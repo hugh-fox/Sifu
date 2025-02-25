@@ -48,24 +48,24 @@ pub fn build(b: *std.Build) void {
     const run_step = b.step("run", "Run the pattern");
     run_step.dependOn(&run_cmd.step);
 
-    const wasm_exe = b.addExecutable(.{
+    const wasm_lib = b.addExecutable(.{
         .name = "sifu",
         // In this case the main source file is merely a path, however, in more
         // complicated build scripts, this could be a generated file.
-        .root_source_file = b.path("src/main.zig"),
+        .root_source_file = b.path("src/wasm.zig"),
         .target = b.resolveTargetQuery(.{
             .cpu_arch = .wasm32,
             .os_tag = .freestanding,
         }),
-        .optimize = .Debug,
+        .optimize = std.builtin.OptimizeMode.ReleaseSmall,
     });
-    // wasm_exe.entry = .disabled;
-    wasm_exe.rdynamic = true;
-    wasm_exe.root_module.pic = true;
-    wasm_exe.import_memory = true;
-    const run_wasm = b.addInstallArtifact(wasm_exe, .{});
+    wasm_lib.entry = .disabled;
+    wasm_lib.rdynamic = true;
+    wasm_lib.root_module.pic = true;
+    wasm_lib.import_memory = true;
+    const run_wasm = b.addInstallArtifact(wasm_lib, .{});
     run_wasm.step.dependOn(b.getInstallStep());
-    const wasm_step = b.step("wasm", "Build a wasm exe");
+    const wasm_step = b.step("wasm", "Build a wasm lib");
     wasm_step.dependOn(&run_wasm.step);
 
     const wasi_exe = b.addExecutable(.{
@@ -77,7 +77,7 @@ pub fn build(b: *std.Build) void {
             .cpu_arch = .wasm32,
             .os_tag = .wasi,
         }),
-        .optimize = .Debug,
+        .optimize = optimize,
     });
     const run_wasi = b.addInstallArtifact(wasi_exe, .{});
     run_wasi.step.dependOn(b.getInstallStep());
@@ -113,7 +113,7 @@ pub fn build(b: *std.Build) void {
     build_options.addOption(bool, "verbose_errors", verbose_errors);
     build_options.addOption(bool, "detect_leaks", detect_leaks);
     unit_tests.root_module.addOptions("build_options", build_options);
-    wasm_exe.root_module.addOptions("build_options", build_options);
+    wasm_lib.root_module.addOptions("build_options", build_options);
     wasi_exe.root_module.addOptions("build_options", build_options);
     exe.root_module.addOptions("build_options", build_options);
 }

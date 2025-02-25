@@ -4,6 +4,7 @@ const mem = std.mem;
 const math = std.math;
 const compare = math.compare;
 const util = @import("../util.zig");
+const parse = @import("parser.zig").parse;
 const assert = std.debug.assert;
 const panic = util.panic;
 const Order = math.Order;
@@ -775,6 +776,18 @@ pub const Trie = struct {
         return result;
     }
 
+    pub fn matchSlice(
+        self: Self,
+        allocator: Allocator,
+        bound: usize,
+        query_str: []const u8,
+    ) !Match {
+        var fbs = std.io.fixedBufferStream(query_str);
+        var arena, const query = try parse(allocator, fbs.reader());
+        defer arena.deinit();
+        return self.match(allocator, bound, query);
+    }
+
     /// The second half of an evaluation step. Rewrites all variable
     /// captures into the matched expression. Copies any variables in node
     /// if they are keys in bindings with their values. If there are no
@@ -991,6 +1004,12 @@ pub const Trie = struct {
     /// Pretty print a trie on multiple lines
     pub fn pretty(self: Self, writer: anytype) !void {
         try self.writeIndent(writer, 0);
+    }
+
+    pub fn toString(self: Self, allocator: Allocator) ![]const u8 {
+        var buff = ArrayList(u8).init(allocator);
+        self.pretty(buff.writer());
+        return buff.toOwnedSlice();
     }
 
     /// Print a trie without newlines

@@ -234,9 +234,13 @@ const Level = struct {
 // behavior of commas and semis is no longer list-like, but array-like)
 pub fn parse(
     allocator: Allocator,
-    str_allocator: Allocator,
     reader: anytype,
-) !?Pattern {
+) !struct { ArenaAllocator, Pattern } {
+    // An arena for temporary match expressions' strings
+    // TODO: free this when a match isn't inserted, maybe using a
+    // StringHashMap for each Trie or Pattern?
+    var str_arena = ArenaAllocator.init(allocator);
+    const str_allocator = str_arena.allocator();
     // Read strings into an arena so that the caller can do what they want with
     // them
     var lexer = Lexer(@TypeOf(reader)).init(str_allocator, reader);
@@ -251,11 +255,31 @@ pub fn parse(
         assert(line.items.len == 0);
         assert(levels.items.len == 0);
     }
-    return while (try lexer.nextLine(&line)) |_| {
+    const pattern_result = while (try lexer.nextLine(&line)) |_| {
         defer line.clearRetainingCapacity();
         if (try parseLine(allocator, &levels, line.items)) |pattern|
             break pattern;
-    } else null;
+    } else return .{ str_arena, Pattern{} };
+
+    return .{ str_arena, pattern_result };
+}
+
+pub fn parseSlice(
+    allocator: Allocator,
+    slice: []const u8,
+) !?struct { ArenaAllocator, Pattern } {
+    var fbs = std.io.fixedBufferStream(slice);
+    return parse(allocator, fbs.reader());
+}
+
+pub fn parseTrie(
+    allocator: Allocator,
+    reader: anytype,
+) !?Trie {
+    _ = reader; // autofix
+    _ = allocator; // autofix
+
+    return Trie{};
 }
 
 /// Does not allocate on errors or empty parses. Parses the line of tokens,

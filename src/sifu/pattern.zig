@@ -40,6 +40,10 @@ pub const Pattern = struct {
     root: []const Node = &.{},
     height: usize = 1, // patterns have a height because they are a branch
 
+    pub fn isEmpty(self: Pattern) bool {
+        return self.root.len == 0;
+    }
+
     /// A pattern (a list of nodes) Node with its height cached.
     pub const Node = union(enum) {
         /// A unique constant, literal values. Uniqueness when in a pattern
@@ -290,6 +294,12 @@ pub const Pattern = struct {
         writer: anytype,
     ) !void {
         return self.writeIndent(writer, 0);
+    }
+
+    pub fn toString(self: Pattern, allocator: Allocator) ![]const u8 {
+        var buff = std.ArrayList(u8).init(allocator);
+        try self.write(buff.writer());
+        return buff.toOwnedSlice();
     }
 
     pub fn copy(self: Pattern, allocator: Allocator) !Pattern {

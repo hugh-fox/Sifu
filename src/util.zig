@@ -10,7 +10,7 @@ const assert = std.debug.assert;
 const no_os = @import("builtin").target.os.tag == .freestanding;
 const wasm = @import("wasm.zig");
 pub const streams = @import("streams.zig").streams;
-pub const panic = if (no_os) wasm.panic else std.debug.panic;
+pub const panic = std.debug.panic;
 const detect_leaks = @import("build_options").detect_leaks;
 pub const GPA = std.heap.GeneralPurposeAllocator(
     .{

@@ -96,6 +96,8 @@ pub fn Lexer(comptime Reader: type) type {
             // doesn't matter.
             const token_type: Type = switch (char) {
                 '\n' => .NewLine,
+                // escape (from pressing alt+enter in most shells)
+                // 0x1B => .Comma,
                 ',' => .Comma,
                 ';' => .Semicolon,
                 '(' => .LeftParen,
@@ -160,11 +162,13 @@ pub fn Lexer(comptime Reader: type) type {
         }
 
         fn peekChar(self: *Self) !?u8 {
+            // Avoid using switch here as different readers have different error
+            // sets, and we can't assume they have other cases
             self.char = self.char orelse
-                self.reader.readByte() catch |e| return switch (e) {
-                error.EndOfStream => null,
-                else => e,
-            };
+                self.reader.readByte() catch |e| return if (e == error.EndOfStream)
+                null
+            else
+                e;
             return self.char.?;
         }
 

@@ -74,12 +74,8 @@ fn replStep(
     allocator: Allocator,
     writer: anytype,
 ) !?void {
-    // An arena for temporary match expressions' strings
-    // TODO: free this when a match isn't inserted, maybe using a
-    // StringHashMap for each Trie or Pattern?
-    var str_arena = ArenaAllocator.init(allocator);
-    const str_allocator = str_arena.allocator();
-    const pattern = try parse(allocator, str_allocator, streams.in) orelse
+    var str_arena, const pattern = try parse(allocator, streams.in);
+    if (pattern.isEmpty())
         return error.EndOfStream;
     defer pattern.deinit(allocator);
     // if (comptime detect_leaks) try streams.err.print(
@@ -101,10 +97,6 @@ fn replStep(
     // }
     print("\n", .{});
 
-    // for (fbs.getWritten()) |char| {
-    // escape (from pressing alt+enter in most shells)
-    // if (char == 0x1b) {}
-    // }
     // TODO: read a "file" from stdin first, until eof, then start eval/matching
     // until another eof.
     if (root.len > 0 and root[root.len - 1] == .arrow) {
