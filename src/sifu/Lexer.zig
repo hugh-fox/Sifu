@@ -34,7 +34,7 @@ pub fn Lexer(comptime Reader: type) type {
         pub const Self = @This();
         // Get the inferred error set of the reader without EndOfStream
         pub const Error = @typeInfo(@TypeOf(peekChar(undefined)))
-            .ErrorUnion.error_set || Allocator.Error;
+            .error_union.error_set || Allocator.Error;
 
         /// A separate buffer to hold chars for the current token
         buff: ArrayList(u8),

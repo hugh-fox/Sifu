@@ -257,7 +257,7 @@ pub const Trie = struct {
     pub fn eql(self: Self, other: Self) bool {
         if (self.map.count() != other.map.count() or
             self.value.entries.len !=
-            other.value.entries.len or
+                other.value.entries.len or
             self.value.entries.len != other.value.entries.len)
             return false;
         var map_iter = self.map.iterator();
@@ -528,18 +528,20 @@ pub const Trie = struct {
 
         // To compare by bound with other branches, it must be put into a Branch
         // first. Its kind can be undefined since it will never be returned.
-        const elem = IndexBranch{ bound, undefined };
+        // const elem = IndexBranch{ bound, undefined };
         const index = sort.lowerBound(
             IndexBranch,
-            elem,
             branches.items,
-            {},
+            .{ bound, branches },
             struct {
-                fn lessThan(_: void, lhs: IndexBranch, rhs: IndexBranch) bool {
-                    const lhs_index, _ = lhs;
-                    const rhs_index, _ = rhs;
+                fn lessThan(
+                    ctx: @TypeOf(.{ bound, branches }),
+                    cmp_branch: IndexBranch,
+                ) Order {
+                    const b, _ = ctx;
+                    const i, _ = cmp_branch;
                     // print("Compare branches: {} < {}\n", .{ lhs_index, rhs_index });
-                    return lhs_index < rhs_index;
+                    return math.order(b, i);
                 }
             }.lessThan,
         );
@@ -565,19 +567,17 @@ pub const Trie = struct {
         print("Cache: {any}\n", .{cache});
         const cache_index = sort.lowerBound(
             usize,
-            branches_bound,
             cache,
-            self.value.branches.items,
+            .{ branches_bound, self.value.branches.items },
             struct {
                 fn lessThan(
-                    branches: []const IndexBranch,
-                    lhs_index: usize,
-                    rhs_index: usize,
-                ) bool {
-                    const lhs, _ = branches[lhs_index];
-                    const rhs, _ = branches[rhs_index];
-                    print("Compare cached: {} < {}\n", .{ lhs, rhs });
-                    return lhs < rhs;
+                    ctx: @TypeOf(.{ branches_bound, self.value.branches.items }),
+                    cmp_index: usize,
+                ) Order {
+                    const bound, const branches = ctx;
+                    const index, _ = branches[cmp_index];
+                    print("Compare cached: {} < {}\n", .{ bound, index });
+                    return math.order(bound, index);
                 }
             }.lessThan,
         );

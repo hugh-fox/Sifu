@@ -33,7 +33,7 @@ export fn parseSliceAsTrie(ptr: [*]const u8, len: u32) u64 {
 
         trie_ptr.* = trie;
         break :blk @intFromPtr(trie_ptr);
-    } else @bitCast(PackedSlice{ .ptr = 0, .len = 0 });
+    } else 0;
 }
 
 /// Caller frees.

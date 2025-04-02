@@ -109,9 +109,9 @@ pub fn hasherUpdateFromHash(
 }
 
 pub fn genericWrite(val: anytype, writer: anytype) @TypeOf(writer).Error!void {
-    return switch (@typeInfo(@TypeOf(val))) {
-        .Struct, .Union => val.write(writer),
-        .Pointer => |S| if (S.child == u8)
+    return switch (@typeInfo(@TypeOf(val))) { // .type
+        // .struct, .union => val.write(writer),
+        .pointer => |S| if (S.child == u8)
             writer.writeAll(val)
         else
             writer.print("{any}", .{val}),

@@ -213,7 +213,7 @@ const Level = struct {
         allocator: Allocator,
         height: usize,
     ) !Pattern {
-        while (level.precedences.popOrNull()) |*precedence|
+        while (level.precedences.pop()) |*precedence|
             try @constCast(precedence).writeTail(allocator, height);
 
         // All arraylists have been written to slices, so don't need freeing
@@ -325,7 +325,7 @@ pub fn parseLine(
             },
             .RightParen, .RightBrace => blk: {
                 height += 1;
-                defer level = levels.pop();
+                defer level = levels.pop().?;
                 break :blk Node.ofPattern(try level.finalize(allocator, height));
             },
             .Var => Node.ofVar(token.lit),
