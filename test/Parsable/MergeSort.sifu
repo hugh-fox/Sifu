@@ -1,0 +1,7 @@
+
+Merge xs () -> xs
+Merge () ys -> ys
+Merge (x, *xs) (y, *ys) -> if (x <= y)
+		x, Merge xs (y, *ys)
+	else
+		y, Merge (x, *xs) ys
