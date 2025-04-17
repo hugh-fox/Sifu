@@ -335,11 +335,10 @@ pub const Pattern = struct {
     pub fn eql(self: Pattern, other: Pattern) bool {
         return self.height == other.height and
             self.root.len == other.root.len and
-            for (self.root, other.root) |pattern, other_pattern|
-        {
-            if (!pattern.eql(other_pattern))
-                break false;
-        } else true;
+            for (self.root, other.root) |pattern, other_pattern| {
+                if (!pattern.eql(other_pattern))
+                    break false;
+            } else true;
     }
 
     pub fn hasherUpdate(self: Pattern, hasher: anytype) void {

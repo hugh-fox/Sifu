@@ -1,6 +1,11 @@
 
-# `[]` is the empty list literal
+# `()` is the empty list literal
 Map fn () -> ()
-# `:>` is the cons operator
-Map fn (x :> xs) -> fn x :> Map fn xs
 
+# `,` is the cons operator
+Map fn (x, *xs) -> fn x, Map fn *xs
+
+# Alternative, minimal definition
+Empty ->
+Map fn -> Empty
+Map fn x, *xs -> fn x, Map fn *xs

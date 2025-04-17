@@ -21,7 +21,7 @@ const PackedSlice = packed struct(u64) {
     len: u32,
 };
 
-export fn parseSliceAsTrie(ptr: [*]const u8, len: u32) u64 {
+export fn parseSliceAsTrie(ptr: [*]const u8, len: u32) u32 {
     var fbs = std.io.fixedBufferStream(ptr[0..len]);
     const reader = fbs.reader();
     const maybe_trie = parser.parseTrie(wasm_allocator, reader) catch |e|

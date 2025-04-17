@@ -1,6 +1,6 @@
 # Ideas on how to implement a non-builtin list type
 
-# Make the empty list a concrete type, but with polymorphic elements
+# Define an empty list type, that is dependent and polymorphic
 [] -> [] : List 0 _
 
 # An alias to allow single term empty lists
@@ -10,3 +10,7 @@
 # Make commas operators
 ([ head ]) -> head :> [] # allow lists without trailing comma 
 ([ head , tail) -> head :> [ tail
+] -> tail
+
+# Define `append` with UFC syntax
+(list : List len type).append(elem : type) -> (list :> elem) (len + 1) type

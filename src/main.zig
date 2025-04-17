@@ -131,19 +131,32 @@ fn replStep(
         // } else print("null", .{});
         // try writer.writeByte('\n');
 
+        // const result = try trie.evaluate(allocator, pattern);
+        // defer result.deinit(allocator);
+        // try result.write(writer);
+        // try writer.writeByte('\n');
+
+        const result = try trie.evaluateComplete(allocator, 0, pattern);
+        // if (result.value) |*value|
+        //     value.deinit(allocator);
+        _ = result;
+        // try result.value.write(writer);
+        // try writer.writeByte('\n');
+
         // const index, const step = try trie.evaluateStep(allocator, 0, pattern);
         // defer step.deinit(allocator);
         // print("Match at {}, Rewrite: ", .{index});
         // try step.write(writer);
         // try writer.writeByte('\n');
 
-        var result = std.ArrayList(Node).init(allocator);
-        defer result.deinit();
-        const eval = try trie.evaluateSlice(allocator, pattern, &result);
-        defer if (comptime detect_leaks)
-            eval.deinit(allocator)
-        else
-            eval.deinit(allocator); // TODO: free an arena instead
+        // var result = std.ArrayList(Node).init(allocator);
+        // defer result.deinit();
+        // const eval = try trie.evaluateSlice(allocator, pattern, &result);
+        // defer if (comptime detect_leaks)
+        //     eval.deinit(allocator)
+        // else
+        //     eval.deinit(allocator); // TODO: free an arena instead
+
         // try writer.print("Eval: ", .{});
         // for (eval) |pattern| {
         //     try pattern.writeSExp(writer, 0);
