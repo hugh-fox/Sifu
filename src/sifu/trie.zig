@@ -778,7 +778,7 @@ pub const Trie = struct {
             result.index = index;
         } else print(
             "No match in range [{}, {}], after {} nodes followed\n",
-            .{ index, index, result.len },
+            .{ bound, index, result.len },
         );
         return result;
     }
@@ -900,9 +900,9 @@ pub const Trie = struct {
         var buffer = ArrayList(Node).init(allocator);
         defer buffer.deinit(); // shouldn't be necessary, but just in case
         var matched: Match = .{};
-        var index = bound;
+        var index: usize = bound;
+        var current: Pattern = pattern;
         while (index < self.size()) : (matched.deinit(allocator)) {
-            var current: Pattern = pattern;
             matched = try self.match(allocator, index, current);
             index = matched.index + 1;
             if (matched.len != pattern.root.len) {
@@ -947,7 +947,7 @@ pub const Trie = struct {
             }
         }
         const eval = Eval{
-            .value = matched.value,
+            .value = current,
             .index = matched.index,
             .len = matched.len,
         };
