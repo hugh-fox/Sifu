@@ -10,7 +10,12 @@ const ArrayList = std.ArrayList;
 const verbose_errors = @import("build_options").verbose_errors;
 const Lexer = @import("sifu/Lexer.zig");
 const parser = @import("sifu/parser.zig");
-const Trie = @import("sifu/trie.zig").Trie;
+// const trie_module = @import("sifu/trie.zig");
+const pattern_module = @import("sifu/pattern.zig");
+const Pattern = pattern_module.Pattern;
+const Trie = pattern_module.Trie;
+
+// const Node = Pattern.Node;
 const Level = parser.Level;
 const Token = @import("sifu/syntax.zig").Token;
 const wasm_allocator = std.heap.wasm_allocator;
@@ -21,26 +26,24 @@ const PackedSlice = packed struct(u64) {
     len: u32,
 };
 
+/// Returns an int pointer to a trie, which should be freed with
+/// `Trie.destroy(wasm_allocator)`
 export fn parseSliceAsTrie(ptr: [*]const u8, len: u32) u32 {
-    var fbs = std.io.fixedBufferStream(ptr[0..len]);
-    const reader = fbs.reader();
-    const maybe_trie = parser.parseTrie(wasm_allocator, reader) catch |e|
+    const trie = parser.parsePattern(wasm_allocator, ptr[0..len]) catch |e|
         panic("Parser error: {}", .{e});
 
-    return if (maybe_trie) |trie| blk: {
-        const trie_ptr = wasm_allocator.create(Trie) catch |e|
-            panic("Allocation of trie failed: {}", .{e});
+    const trie_ptr = wasm_allocator.create(Trie) catch |e|
+        panic("Allocation of trie failed: {}", .{e});
 
-        trie_ptr.* = trie;
-        break :blk @intFromPtr(trie_ptr);
-    } else 0;
+    trie_ptr.* = trie;
+    return @intFromPtr(trie_ptr);
 }
 
 /// Caller frees.
-export fn matchSlice(trie_ptr: u32, query_ptr: [*]const u8, query_len: u32) u64 {
+export fn matchStr(trie_ptr: u32, query_ptr: [*]const u8, query_len: u32) u64 {
     const trie: *Trie = @ptrFromInt(trie_ptr);
     const slice = query_ptr[0..query_len];
-    const result = trie.matchSlice(wasm_allocator, trie.len(), slice) catch |e|
+    const result = trie.matchStr(wasm_allocator, trie.size(), slice) catch |e|
         panic("Match error: {}", .{e});
     const expr = result.value orelse result.key;
     const expr_string = expr.toString(wasm_allocator) catch
@@ -106,15 +109,15 @@ fn readFn(ctx: *InputCtx, bytes: []u8) error{OutOfMemory}!usize {
 
 pub const Streams = struct {
     var input_ctx: InputCtx = .{ .ptr = undefined };
-    in: io.GenericReader(*InputCtx, error{OutOfMemory}, readFn) = .{
+    in: io.Reader(*InputCtx, error{OutOfMemory}, readFn) = .{
         .context = &input_ctx,
     },
-    out: io.AnyWriter = io.AnyWriter{
+    out: io.Writer = io.Writer{
         .writeFn = writeFn,
         .context = undefined,
     },
-    err: io.AnyWriter = if (verbose_errors)
-        std.io.AnyWriter{
+    err: io.Writer = if (verbose_errors)
+        std.io.Writer{
             .writeFn = writeFn,
             .context = undefined,
         }

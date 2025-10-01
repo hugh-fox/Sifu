@@ -9,6 +9,8 @@ const Allocator = std.mem.Allocator;
 const assert = std.debug.assert;
 const no_os = @import("builtin").target.os.tag == .freestanding;
 const wasm = @import("wasm.zig");
+const Writer = std.io.Writer;
+
 pub const streams = @import("streams.zig").streams;
 pub const panic = std.debug.panic;
 const detect_leaks = @import("build_options").detect_leaks;
@@ -108,7 +110,7 @@ pub fn hasherUpdateFromHash(
     }.hasherUpdate;
 }
 
-pub fn genericWrite(val: anytype, writer: anytype) @TypeOf(writer).Error!void {
+pub fn genericWrite(val: anytype, writer: anytype) Writer.Error!void {
     return switch (@typeInfo(@TypeOf(val))) { // .type
         // .struct, .union => val.write(writer),
         .pointer => |S| if (S.child == u8)

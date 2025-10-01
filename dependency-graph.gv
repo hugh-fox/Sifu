@@ -1,0 +1,62 @@
+digraph SifuProject {
+    node [style=filled, shape="rectangle" fontname="Maple Mono", fontsize=10];
+    // Entry points
+    main [fillcolor="#FFD1DC", label="main"];
+    wasm [fillcolor="#FFD1DC", label="wasm"];
+
+    // Core module
+    sifu [fillcolor="#FFFACD", label="sifu"];
+
+    // Utilities
+    util [fillcolor="#E6E6FA", label="util"];
+    streams [fillcolor="#ADD8E6", label="streams"];
+    generics_util [fillcolor="#FFE4E1", label="generics_util"];
+
+    // Core components
+    lexer [fillcolor="#FFB6C1", label="Lexer"];
+    parser [fillcolor="#E0FFFF", label="parser"];
+    pattern [fillcolor="#F0FFF0", label="pattern"];
+    syntax [fillcolor="#F0F8FF", label="syntax"];
+    trie [fillcolor="#FFF0F5", label="trie"];
+
+    // Pattern sub-node
+    pattern_node [fillcolor="#F0FFF0", label="node"];
+
+    // Dependencies
+    main -> sifu;
+    wasm -> sifu;
+    sifu -> util;
+    sifu -> parser;
+    util -> streams;
+    lexer -> syntax;
+    parser -> lexer;
+    parser -> trie;
+    parser -> pattern;
+    parser -> syntax;
+    trie -> pattern;
+    pattern -> syntax;
+    pattern -> pattern_node;
+    syntax -> util;
+    trie -> util;
+
+    // Group for sifu-related nodes
+    subgraph cluster_sifu {
+        label = "Sifu";
+        style = filled;
+        fillcolor = "#F5F5F5";
+        
+        sifu;
+        parser;
+        lexer;
+        syntax;
+        trie;
+
+        subgraph cluster_pattern {
+        label = "Pattern";
+        pattern_node;
+        pattern;
+        }
+    }
+
+
+}

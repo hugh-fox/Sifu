@@ -19,9 +19,11 @@ pub fn build(b: *std.Build) void {
         .name = "sifu",
         // In this case the main source file is merely a path, however, in more
         // complicated build scripts, this could be a generated file.
-        .root_source_file = b.path("src/main.zig"),
-        .target = target,
-        .optimize = optimize,
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/main.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
     });
 
     // This is commented out so as to not build the x86 default when targeting
@@ -52,12 +54,14 @@ pub fn build(b: *std.Build) void {
         .name = "sifu",
         // In this case the main source file is merely a path, however, in more
         // complicated build scripts, this could be a generated file.
-        .root_source_file = b.path("src/wasm.zig"),
-        .target = b.resolveTargetQuery(.{
-            .cpu_arch = .wasm32,
-            .os_tag = .freestanding,
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/wasm.zig"),
+            .target = b.resolveTargetQuery(.{
+                .cpu_arch = .wasm32,
+                .os_tag = .freestanding,
+            }),
+            .optimize = std.builtin.OptimizeMode.ReleaseSmall,
         }),
-        .optimize = std.builtin.OptimizeMode.ReleaseSmall,
     });
     wasm_lib.entry = .disabled;
     wasm_lib.rdynamic = true;
@@ -72,12 +76,14 @@ pub fn build(b: *std.Build) void {
         .name = "sifu-wasi",
         // In this case the main source file is merely a path, however, in more
         // complicated build scripts, this could be a generated file.
-        .root_source_file = b.path("src/main.zig"),
-        .target = b.resolveTargetQuery(.{
-            .cpu_arch = .wasm32,
-            .os_tag = .wasi,
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/main.zig"),
+            .target = b.resolveTargetQuery(.{
+                .cpu_arch = .wasm32,
+                .os_tag = .wasi,
+            }),
+            .optimize = optimize,
         }),
-        .optimize = optimize,
     });
     const run_wasi = b.addInstallArtifact(wasi_exe, .{});
     run_wasi.step.dependOn(b.getInstallStep());
@@ -87,9 +93,11 @@ pub fn build(b: *std.Build) void {
     // Creates a step for unit testing. This only builds the test executable
     // but does not run it.
     const unit_tests = b.addTest(.{
-        .root_source_file = b.path("src/test.zig"),
-        .target = target,
-        .optimize = optimize,
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/test.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
     });
     const run_unit_tests = b.addRunArtifact(unit_tests);
     if (b.args) |args| {

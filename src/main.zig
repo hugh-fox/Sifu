@@ -1,13 +1,14 @@
 const std = @import("std");
 const sifu = @import("sifu.zig");
 const Trie = @import("sifu/trie.zig").Trie;
-const Pattern = @import("sifu/pattern.zig").Pattern;
-const Node = Pattern.Node;
+// const Pattern = @import("sifu/pattern.zig").Pattern;
+const Pattern = @import("sifu/trie.zig").Pattern;
+const Node = @import("sifu/trie.zig").Node;
 const syntax = @import("sifu/syntax.zig");
 const ArenaAllocator = std.heap.ArenaAllocator;
 const Allocator = std.mem.Allocator;
-const ArrayListUnmanaged = std.ArrayListUnmanaged;
-const parse = @import("sifu/parser.zig").parse;
+const ArrayList = std.ArrayList; // Update import
+const parsePattern = @import("sifu/parser.zig").parsePattern;
 const streams = @import("streams.zig").streams;
 const io = std.io;
 const mem = std.mem;
@@ -19,6 +20,8 @@ const panic = util.panic;
 const print = util.print;
 const detect_leaks = @import("build_options").detect_leaks;
 const debug_mode = @import("builtin").mode == .Debug;
+const Reader = io.Reader;
+const Writer = io.Writer;
 // TODO: merge these into just GPA, when it eventually implements wasm_allocator
 // itself
 var gpa = if (no_os) {} else GPA{};
@@ -52,17 +55,9 @@ pub fn main() void {
 fn repl(
     allocator: Allocator,
 ) !void {
-    var buff_writer_out = io.bufferedWriter(streams.out);
-    const buff_out = buff_writer_out.writer();
     var trie = Trie{}; // This will be cleaned up with the arena
 
-    while (replStep(&trie, allocator, buff_out)) |_| {
-        try buff_writer_out.flush();
-        // if (comptime !no_os and detect_leaks) try streams.err.print(
-        //     "GPA Allocated: {} bytes\n",
-        //     .{gpa.total_requested_bytes},
-        // );
-    } else |err| switch (err) {
+    while (replStep(&trie, allocator, streams.out)) |_| {} else |err| switch (err) {
         error.EndOfStream => return {},
         // error.StreamTooLong => return e, // TODO: handle somehow
         else => return err,
@@ -72,9 +67,9 @@ fn repl(
 fn replStep(
     trie: *Trie,
     allocator: Allocator,
-    writer: anytype,
+    writer: *Writer,
 ) !?void {
-    var str_arena, const pattern = try parse(allocator, streams.in);
+    var str_arena, const pattern = try parsePattern(allocator, streams.in);
     if (pattern.isEmpty())
         return error.EndOfStream;
     defer pattern.deinit(allocator);
@@ -149,20 +144,17 @@ fn replStep(
         // try step.write(writer);
         // try writer.writeByte('\n');
 
-        // var result = std.ArrayList(Node).init(allocator);
-        // defer result.deinit();
-        // const eval = try trie.evaluateSlice(allocator, pattern, &result);
-        // defer if (comptime detect_leaks)
-        //     eval.deinit(allocator)
-        // else
-        //     eval.deinit(allocator); // TODO: free an arena instead
+        var buff = ArrayList(Node){};
+        defer buff.deinit(allocator);
+        const eval = try trie.evaluateSlice(allocator, pattern, &buff);
+        defer if (comptime detect_leaks)
+            eval.deinit(allocator)
+        else
+            eval.deinit(allocator); // TODO: free an arena instead
 
-        // try writer.print("Eval: ", .{});
-        // for (eval) |pattern| {
-        //     try pattern.writeSExp(writer, 0);
-        //     try writer.writeByte(' ');
-        // }
-        // try writer.writeByte('\n');
+        try writer.print("Eval: ", .{});
+        try pattern.writeIndent(writer, 0);
+        try writer.writeByte('\n');
     }
     // try trie.pretty(writer);
     // print("\n", .{});

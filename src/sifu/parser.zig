@@ -10,14 +10,14 @@ const Allocator = std.mem.Allocator;
 const ArenaAllocator = std.heap.ArenaAllocator;
 const util = @import("../util.zig");
 const fsize = util.fsize();
-const Pattern = @import("pattern.zig").Pattern;
-const Node = Pattern.Node;
+const Pattern = @import("trie.zig").Pattern;
+// const Node = Pattern.Node;
+const Node = @import("trie.zig").Node;
 const Trie = @import("trie.zig").Trie;
 const syntax = @import("syntax.zig");
 const Token = syntax.Token(usize);
 const Type = syntax.Type;
 const Set = util.Set;
-const ArrayListUnmanaged = std.ArrayListUnmanaged;
 const ArrayList = std.ArrayList;
 const Oom = Allocator.Error;
 const Order = std.math.Order;
@@ -29,9 +29,10 @@ const print = util.print;
 const panic = util.panic;
 const streams = @import("../streams.zig").streams;
 const fs = std.fs;
-const Lexer = @import("Lexer.zig").Lexer;
+const Lexer = @import("Lexer.zig");
 const debug_mode = @import("builtin").mode == .Debug;
 const detect_leaks = @import("build_options").detect_leaks;
+const Reader = io.Reader;
 
 // TODO add indentation tracking, and separate based on newlines+indent
 
@@ -68,7 +69,7 @@ const Level = struct {
     /// their destination and a stack for their arguments.
     const Precedence = struct {
         tail: *Node,
-        pattern: ArrayListUnmanaged(Node) = .{},
+        pattern: ArrayList(Node) = .{}, // Change to ArrayList
 
         pub fn writeTail(
             self: *Precedence,
@@ -100,7 +101,7 @@ const Level = struct {
         }
 
         pub fn append(self: *Precedence, allocator: Allocator, ast: Node) !void {
-            return self.pattern.append(allocator, ast);
+            try self.pattern.append(allocator, ast);
         }
 
         /// True if the given op has precedence over the current one. True if an op
@@ -124,15 +125,13 @@ const Level = struct {
     // infixes mutate the element at their index as they are parsed.
     // The current level of pattern (containing the lowest level precedence)
     // being parsed
-    precedences: ArrayListUnmanaged(Precedence) =
-        ArrayListUnmanaged(Precedence){},
+    precedences: ArrayList(Precedence) = ArrayList(Precedence){},
     // Tracks the first link in the operator list, if any
     root: Node = Node.ofPattern(.{}), // root starts as an pattern by default
 
     /// This function should be used on a new, stack allocated level
     pub fn init(self: *Level, allocator: Allocator) !void {
         assert(self.precedences.items.len == 0);
-        // print("New tail {*}\n", .{self.tail});
         // Add the initial level of pattern
         const precedence = Precedence{ .tail = &self.root };
         try self.precedences.append(allocator, precedence);
@@ -232,9 +231,9 @@ const Level = struct {
 /// Returns an arena containing all string allocations (from lexing)
 // - TODO: [] should be a flat Pattern instead of as an infix / nesting ops (the
 // behavior of commas and semis is no longer list-like, but array-like)
-pub fn parse(
+pub fn parsePattern(
     allocator: Allocator,
-    reader: anytype,
+    reader: *Reader,
 ) !struct { ArenaAllocator, Pattern } {
     // An arena for temporary match expressions' strings
     // TODO: free this when a match isn't inserted, maybe using a
@@ -243,13 +242,13 @@ pub fn parse(
     const str_allocator = str_arena.allocator();
     // Read strings into an arena so that the caller can do what they want with
     // them
-    var lexer = Lexer(@TypeOf(reader)).init(str_allocator, reader);
+    var lexer = Lexer.init(str_allocator, reader);
     defer lexer.deinit();
     var line = try ArrayList(Token).initCapacity(allocator, 16);
-    defer line.deinit();
+    defer line.deinit(allocator);
     // No need to destroy asts, they will all be returned or cleaned up
-    var levels = ArrayList(Level).init(allocator);
-    defer levels.deinit();
+    var levels = ArrayList(Level){};
+    defer levels.deinit(allocator);
     defer {
         assert(lexer.buff.items.len == 0);
         assert(line.items.len == 0);
@@ -267,30 +266,21 @@ pub fn parse(
 pub fn parseSlice(
     allocator: Allocator,
     slice: []const u8,
-) !?struct { ArenaAllocator, Pattern } {
+) !struct { ArenaAllocator, Pattern } {
     var fbs = std.io.fixedBufferStream(slice);
-    return parse(allocator, fbs.reader());
-}
-
-pub fn parseTrie(
-    allocator: Allocator,
-    reader: anytype,
-) !?Trie {
-    _ = reader; // autofix
-    _ = allocator; // autofix
-
-    return Trie{};
+    return parsePattern(allocator, fbs.reader());
 }
 
 /// Does not allocate on errors or empty parses. Parses the line of tokens,
-/// returning a partial Pattern on trailing operators or unfinished nesting. In such
-/// a case, null is returned and the same parser_stack must be reused to finish
-/// parsing. Otherwise, an Pattern is returned from an owned slice of parser_stack.
-// The parsing algorithm pushes a list whenever an operator with lower precedence
-// is parsed. Operators with same or higher precedence than their previous
-// adjacent operator are simply added to the tail of the current list. To parse
-// nesting pattern or tries, a new level is pushed on or popped off the level
-// stack.
+/// returning a partial Pattern on trailing operators or unfinished nesting.
+/// In such a case, null is returned and the same parser_stack must be reused
+/// to finish parsing. Otherwise, an Pattern is returned from an owned slice
+/// of parser_stack.
+// The parsing algorithm pushes a list whenever an operator with lower
+// precedence is parsed. Operators with same or higher precedence than their
+// previous adjacent operator are simply added to the tail of the current list.
+// To parse nesting pattern or tries, a new level is pushed on or popped off the
+// level stack.
 // All tokens in Sifu do not affect the semantics of previously parsed ones.
 // This makes the precedence of the links in an operators chain monotonically
 // decreasing once the highest level hast been found. Once a lower precedence
@@ -315,7 +305,7 @@ pub fn parseLine(
                 if (height > 0)
                     height -= 1;
                 // Push the current level for later
-                try levels.append(level);
+                try levels.append(allocator, level);
                 // Start a new nesting level
                 level = Level{};
                 try level.init(allocator);
@@ -416,7 +406,7 @@ const expectEqualStrings = testing.expectEqualStrings;
 const io = std.io;
 const TestLexer = @import("Lexer.zig")
     .Lexer(io.FixedBufferStream([]const u8).Reader);
-const List = ArrayListUnmanaged(Node);
+const List = ArrayList(Node);
 
 test "simple val" {
     var arena = ArenaAllocator.init(testing.allocator);
@@ -424,7 +414,7 @@ test "simple val" {
 
     var fbs = io.fixedBufferStream("Asdf");
     var lexer = TestLexer.init(arena.allocator(), fbs.reader());
-    const ast = try parse(arena.allocator(), &lexer);
+    const ast = try parsePattern(arena.allocator(), &lexer);
     try testing.expect(ast == .pattern and ast.pattern.len == 1);
     try testing.expectEqualStrings(ast.pattern[0].key.lit, "Asdf");
 }
@@ -435,7 +425,7 @@ fn testStrParse(str: []const u8, expecteds: []const Node) !void {
     const allocator = arena.allocator();
     var fbs = io.fixedBufferStream(str);
     var lexer = TestLexer.init(allocator, fbs.reader());
-    const actuals = try parse(allocator, &lexer);
+    const actuals = try parsePattern(allocator, &lexer);
     for (expecteds, actuals.pattern) |expected, actual| {
         try expectEqualPattern(expected, actual);
     }
@@ -743,9 +733,9 @@ test "Trie: trie eql hash" {
     var lexer2 = TestLexer.init(allocator, fbs2.reader());
     var lexer3 = TestLexer.init(allocator, fbs3.reader());
 
-    const ast1 = try parse(allocator, &lexer1);
-    const ast2 = try parse(allocator, &lexer2);
-    const ast3 = try parse(allocator, &lexer3);
+    const ast1 = try parsePattern(allocator, &lexer1);
+    const ast2 = try parsePattern(allocator, &lexer2);
+    const ast3 = try parsePattern(allocator, &lexer3);
     // try testing.expectEqualStrings(ast.?.pattern[0].pat, "Asdf");
     try testing.expect(ast1.eql(ast2));
     try testing.expectEqual(ast1.hash(), ast2.hash());
