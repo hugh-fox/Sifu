@@ -57,7 +57,10 @@ fn repl(
 ) !void {
     var trie = Trie{}; // This will be cleaned up with the arena
 
-    while (replStep(&trie, allocator, streams.out)) |_| {} else |err| switch (err) {
+    while (replStep(&trie, allocator, streams.out)) |_| {
+        try streams.out.flush();
+        try streams.err.flush();
+    } else |err| switch (err) {
         error.EndOfStream => return {},
         // error.StreamTooLong => return e, // TODO: handle somehow
         else => return err,
@@ -73,10 +76,12 @@ fn replStep(
     if (pattern.isEmpty())
         return error.EndOfStream;
     defer pattern.deinit(allocator);
+
     // if (comptime detect_leaks) try streams.err.print(
     //     "String Arena Allocated: {} bytes\n",
     //     .{str_arena.queryCapacity()},
     // );
+
     const root = pattern.root;
 
     print(
@@ -131,10 +136,11 @@ fn replStep(
         // try result.write(writer);
         // try writer.writeByte('\n');
 
-        const result = try trie.evaluateComplete(allocator, 0, pattern);
+        // const result = try trie.evaluateComplete(allocator, 0, pattern);
+        // _ = result;
+
         // if (result.value) |*value|
         //     value.deinit(allocator);
-        _ = result;
         // try result.value.write(writer);
         // try writer.writeByte('\n');
 

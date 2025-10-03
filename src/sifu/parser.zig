@@ -242,6 +242,7 @@ pub fn parsePattern(
     const str_allocator = str_arena.allocator();
     // Read strings into an arena so that the caller can do what they want with
     // them
+
     var lexer = Lexer.init(str_allocator, reader);
     defer lexer.deinit();
     var line = try ArrayList(Token).initCapacity(allocator, 16);

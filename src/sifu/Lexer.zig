@@ -4,7 +4,7 @@
 /// numbers. There are no errors, any utf-8 text is parsable.
 
 // Parsing begins with a new `Pattern` ast node. Each term is lexed, parsed into
-// a `Token`, then added  to the top-level `Ast`. Pattern construction happens
+// a `Token`, then added to the top-level `Ast`. Pattern construction happens
 // after this, as does error reporting on invalid asts.
 
 const std = @import("std");
@@ -12,7 +12,6 @@ const io = std.io;
 const Allocator = std.mem.Allocator;
 const ArenaAllocator = std.heap.ArenaAllocator;
 const util = @import("../util.zig");
-const fsize = fsize;
 const trie = @import("trie.zig");
 const Ast = trie.AstType;
 const Lit = Ast.Lit;
@@ -30,12 +29,11 @@ const panic = util.panic;
 const print = util.print;
 const detect_leaks = @import("build_options").detect_leaks;
 const Reader = io.Reader;
-
+const Writer = io.Writer;
 const Self = @This();
 
 // Get the inferred error set of the reader without EndOfStream
-pub const Error = @typeInfo(@TypeOf(peekChar(undefined)))
-    .error_union.error_set || Allocator.Error;
+pub const Error = Reader.Error || Allocator.Error;
 
 allocator: Allocator,
 /// A separate buffer to hold chars for the current token
@@ -46,8 +44,6 @@ pos: usize = 0,
 line: usize = 0,
 /// Current column in the source
 col: usize = 1,
-/// A single element buffer to hold a char for `peekChar`
-char: ?u8 = null,
 /// The reader providing input
 reader: *Reader,
 
@@ -71,30 +67,18 @@ pub fn deinit(self: *Self) void {
 }
 
 fn reset(self: *Self) void {
-    // Reset self by using implicit default values
-    self.* = Self{
-        .allocator = self.allocator,
-        .buff = self.buff,
-        .reader = self.reader,
-    };
-}
-
-pub inline fn peek(
-    self: *Self,
-) !?Token {
-    if (self.token == null)
-        self.token = try self.next();
-
-    print("peek: {s}\n", .{if (self.token) |t| t.lit else "null"});
-    return self.token;
+    self.pos = 0;
+    self.line = 0;
+    self.col = 1;
 }
 
 /// Caller owns the token, and must free using the allocator backing
 /// this arraylist (that was passed in init()).
 pub fn next(
     self: *Self,
-) !?Token {
+) Error!?Token {
     const pos = self.pos;
+
     try self.skipSpace() orelse
         return null;
     const char = try self.nextChar() orelse
@@ -159,8 +143,10 @@ pub fn next(
 pub fn nextLine(
     self: *Self,
     line: *ArrayList(Token),
-) !?void {
+) Error!?void {
     while (try self.next()) |token| {
+        print("{s}\n", .{token.lit});
+
         if (token.type == .NewLine)
             return;
 
@@ -169,42 +155,34 @@ pub fn nextLine(
     return null;
 }
 
-fn peekChar(self: *Self) !?u8 {
+fn peekChar(self: *Self) Error!?u8 {
     // Avoid using switch here as different readers have different error
     // sets, and we can't assume they have other cases
-
-    // self.char = self.char orelse
-    //     self.reader.take() catch |e| return if (e == error.EndOfStream)
-    //     null
-    // else
-    //     e;
-    // return self.char.?;
-
-    return try self.reader.peekByte();
+    return self.reader.peekByte() catch |e|
+        if (e == error.EndOfStream) null else e;
 }
 
-/// Advances one character, reading it into the current token list
-/// buff unless it is a special character, which don't need allocation.
+/// Advances one character, reading it into the current token buffer
+/// unless it is a special character, which don't need allocation.
 /// Should be used after peekChar.
 inline fn consume(self: *Self) Error!void {
-    switch (self.char orelse
-        panic("Consume called without a char\n", .{})) {
-        ' ', '\t', '\r', '\n', ',', '(', ')', '{', '}' => {},
-        else => |char| {
-            self.pos += 1;
-            if (char == '\n') {
-                self.col = 1;
-                self.line += 1;
-            } else self.col += 1;
-            try self.buff.append(self.allocator, char);
-        },
+    const char = try self.reader.takeByte();
+    self.pos += 1;
+    if (char == '\n') {
+        self.col = 1;
+        self.line += 1;
+    } else {
+        self.col += 1;
     }
-    self.char = null;
+    // Add char to buffer unless it's a separator that doesn't need storage
+    switch (char) {
+        '\n', ',', ';', '(', ')', '{', '}' => {},
+        else => try self.buff.append(self.allocator, char),
+    }
 }
 
-/// Advances one character. Basically just `peekChar` followed by
-/// `consume`.
-fn nextChar(self: *Self) !?u8 {
+/// Advances one character. This is `peekChar` followed by `consume`.
+fn nextChar(self: *Self) Error!?u8 {
     const char = try self.peekChar() orelse
         return null;
     try self.consume();
@@ -214,11 +192,15 @@ fn nextChar(self: *Self) !?u8 {
 /// Skips whitespace except for newlines until a non-whitespace
 /// character is found. Not guaranteed to skip anything. Newlines are
 /// separators, and thus treated as tokens. Returns null on eof.
-inline fn skipSpace(self: *Self) !?void {
+inline fn skipSpace(self: *Self) Error!?void {
     while (try self.peekChar()) |char| {
         switch (char) {
-            // Clear the char buffer
-            ' ', '\t', '\r' => try self.consume(),
+            // Clear the char buffer but don't add to token buffer
+            ' ', '\t', '\r' => {
+                self.pos += 1;
+                self.col += 1;
+                _ = try self.reader.takeByte();
+            },
             else => return,
         }
     } else return null;
@@ -232,17 +214,17 @@ inline fn nextIdent(self: *Self) Error!void {
             break;
 }
 
-inline fn value(self: *Self) !Type {
+inline fn value(self: *Self) Error!Type {
     try self.nextIdent();
     return .Name;
 }
 
-inline fn variable(self: *Self) !Type {
+inline fn variable(self: *Self) Error!Type {
     try self.nextIdent();
     return .Var;
 }
 
-inline fn var_pattern(self: *Self) !Type {
+inline fn var_pattern(self: *Self) Error!Type {
     try self.nextIdent();
     return .VarPattern;
 }
@@ -291,10 +273,12 @@ inline fn integer(self: *Self) Error!Type {
 /// Reads the next characters as number. `parseFloat` only throws
 /// `InvalidCharacter`, so this function cannot fail.
 inline fn float(self: *Self) Error!Type {
-    self.int();
-    if (try self.peekChar() == '.') {
-        try self.consume();
-        self.int();
+    try self.integer();
+    if (try self.peekChar()) |next_char| {
+        if (next_char == '.') {
+            try self.consume();
+            try self.integer();
+        }
     }
 
     return .F;
@@ -303,8 +287,10 @@ inline fn float(self: *Self) Error!Type {
 /// Reads a value wrapped in double-quotes from the current character. If no
 /// matching quote is found, reads until EOF.
 inline fn string(self: *Self) Error!Type {
-    while (try self.peekChar() != '"')
+    while (try self.peekChar()) |next_char| {
+        if (next_char == '"') break;
         try self.consume();
+    }
 
     return .Str;
 }
@@ -355,9 +341,9 @@ inline fn isSep(char: u8) bool {
 inline fn isOp(char: u8) bool {
     return switch (char) {
         // zig fmt: off
-                '.', ':', '-', '+', '=', '<', '>', '%', '^',
-                '*', '&', '|', '/', '\\', '@', '!', '?', '~',
-                // zig fmt: on
+        '.', ':', '-', '+', '=', '<', '>', '%', '^',
+        '*', '&', '|', '/', '\\', '@', '!', '?', '~',
+        // zig fmt: on
         => true,
         else => false,
     };
@@ -377,7 +363,6 @@ const testing = std.testing;
 const meta = std.meta;
 const streams = @import("../streams.zig").streams;
 const err_stream = streams.err_stream;
-
 fn expectEqualTokens(
     comptime input: []const u8,
     expecteds: []const []const u8,
@@ -388,6 +373,7 @@ fn expectEqualTokens(
     var fbs = io.fixedBufferStream(input);
     const reader = fbs.reader();
     var lex = Self.init(arena.allocator(), reader);
+    defer lex.deinit();
 
     for (expecteds) |expected| {
         const next_token = (try lex.next()).?;
