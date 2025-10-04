@@ -79,10 +79,8 @@ pub fn next(
 ) Error!?Token {
     const pos = self.pos;
 
-    try self.skipSpace() orelse
-        return null;
-    const char = try self.nextChar() orelse
-        return null;
+    try self.skipSpace();
+    const char = try self.nextChar();
 
     // Parse separators greedily. These can be vals or infixes, it
     // doesn't matter.
@@ -96,20 +94,28 @@ pub fn next(
         ')' => .RightParen,
         '{' => .LeftBrace,
         '}' => .RightBrace,
-        '*' => if (try self.peekChar()) |next_char|
-            if (isLower(next_char))
+        '*' => blk: {
+            const next_char = self.peekChar() catch |e| switch (e) {
+                // Return infix at end of function
+                error.EndOfStream => break :blk .Infix,
+                else => return e,
+            };
+            break :blk if (isLower(next_char))
                 try self.var_pattern()
             else
-                try self.op()
-        else
-            .Infix,
-        '+', '-' => if (try self.peekChar()) |next_char|
-            if (isDigit(next_char))
+                try self.op();
+        },
+        '+', '-' => blk: {
+            const next_char = self.peekChar() catch |e| switch (e) {
+                // Return infix at end of function
+                error.EndOfStream => break :blk .Infix,
+                else => return e,
+            };
+            break :blk if (isDigit(next_char))
                 try self.integer()
             else
-                try self.op()
-        else
-            .Infix,
+                try self.op();
+        },
         '#' => try self.comment(),
         0xAA => panic("Buffer Overflow debug char (0xAA) consumed\n", .{}),
         else => if (isSep(char))
@@ -155,11 +161,10 @@ pub fn nextLine(
     return null;
 }
 
-fn peekChar(self: *Self) Error!?u8 {
+fn peekChar(self: *Self) Error!u8 {
     // Avoid using switch here as different readers have different error
     // sets, and we can't assume they have other cases
-    return self.reader.peekByte() catch |e|
-        if (e == error.EndOfStream) null else e;
+    return self.reader.peekByte();
 }
 
 /// Advances one character, reading it into the current token buffer
@@ -182,36 +187,33 @@ inline fn consume(self: *Self) Error!void {
 }
 
 /// Advances one character. This is `peekChar` followed by `consume`.
-fn nextChar(self: *Self) Error!?u8 {
-    const char = try self.peekChar() orelse
-        return null;
+fn nextChar(self: *Self) Error!u8 {
+    const char = try self.peekChar();
     try self.consume();
     return char;
 }
 
-/// Skips whitespace except for newlines until a non-whitespace
-/// character is found. Not guaranteed to skip anything. Newlines are
-/// separators, and thus treated as tokens. Returns null on eof.
-inline fn skipSpace(self: *Self) Error!?void {
-    while (try self.peekChar()) |char| {
+/// Skips whitespace except for newlines
+inline fn skipSpace(self: *Self) Error!void {
+    while (self.peekChar()) |char| {
         switch (char) {
-            // Clear the char buffer but don't add to token buffer
             ' ', '\t', '\r' => {
                 self.pos += 1;
                 self.col += 1;
                 _ = try self.reader.takeByte();
             },
-            else => return,
+            else => break,
         }
-    } else return null;
+    } else |e| return e;
 }
 
 inline fn nextIdent(self: *Self) Error!void {
-    while (try self.peekChar()) |next_char|
+    while (self.peekChar()) |next_char| {
         if (isIdent(next_char))
             try self.consume()
         else
             break;
+    } else |e| return e;
 }
 
 inline fn value(self: *Self) Error!Type {
@@ -231,13 +233,13 @@ inline fn var_pattern(self: *Self) Error!Type {
 
 /// Reads the next infix characters
 inline fn op(self: *Self) Error!Type {
-    // The first character of the op
     const pos = self.buff.items.len - 1;
-    while (try self.peekChar()) |next_char|
+    while (self.peekChar()) |next_char| {
         if (isOp(next_char))
             try self.consume()
         else
             break;
+    } else |e| return e;
 
     const lit = self.buff.items[pos..];
     const kind: Type = if (mem.eql(u8, lit, ":"))
@@ -251,7 +253,6 @@ inline fn op(self: *Self) Error!Type {
     else
         .Infix;
 
-    // Clear any builtin tokens, they don't need allocating
     switch (kind) {
         .Infix => {},
         else => self.buff.shrinkRetainingCapacity(pos),
@@ -261,12 +262,12 @@ inline fn op(self: *Self) Error!Type {
 
 /// Reads the next digits and/or any underscores
 inline fn integer(self: *Self) Error!Type {
-    while (try self.peekChar()) |next_char|
+    while (self.peekChar()) |next_char| {
         if (isDigit(next_char) or next_char == '_')
             try self.consume()
         else
             break;
-
+    } else |e| return e;
     return .I;
 }
 
@@ -287,24 +288,22 @@ inline fn float(self: *Self) Error!Type {
 /// Reads a value wrapped in double-quotes from the current character. If no
 /// matching quote is found, reads until EOF.
 inline fn string(self: *Self) Error!Type {
-    while (try self.peekChar()) |next_char| {
-        if (next_char == '"') break;
+    while (self.peekChar()) |next_char| {
+        if (next_char == '"')
+            break;
         try self.consume();
-    }
-
+    } else |e| return e;
     return .Str;
 }
 
 /// Reads until the end of the line or EOF
 inline fn comment(self: *Self) Error!Type {
-    while (try self.peekChar()) |next_char|
+    while (self.peekChar()) |next_char| {
         if (next_char != '\n')
             try self.consume()
         else
-            // Newlines that terminate comments are also terms, so no
-            // `consume` here
             break;
-
+    } else |e| return e;
     return .Comment;
 }
 

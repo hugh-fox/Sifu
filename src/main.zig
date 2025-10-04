@@ -61,7 +61,7 @@ fn repl(
         try streams.out.flush();
         try streams.err.flush();
     } else |err| switch (err) {
-        error.EndOfStream => return {},
+        error.EndOfStream => return,
         // error.StreamTooLong => return e, // TODO: handle somehow
         else => return err,
     }
@@ -73,8 +73,9 @@ fn replStep(
     writer: *Writer,
 ) !?void {
     var str_arena, const pattern = try parsePattern(allocator, streams.in);
+
     if (pattern.isEmpty())
-        return error.EndOfStream;
+        return null;
     defer pattern.deinit(allocator);
 
     // if (comptime detect_leaks) try streams.err.print(
