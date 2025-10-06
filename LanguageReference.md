@@ -1,6 +1,7 @@
 # Language Reference
 
-## Sifu-Specific Terminology and Grammar
+## Sifu-Specific Terminology, Parsing and Grammar
+Sifu has an LL(1) grammar.
 
 #### Nouns
 
@@ -20,12 +21,12 @@ fails.
 - Ast - the Sifu specific data type of the generic Pattern data structure. Sifu
 parses every token as a Token, which is a term with meta-information, and Pattern
 can be nested, so together they form the abstract syntax tree.
-- Pattern - a trie of pattern, nested by braces like `{ F, G -> 2 }`. Simple
+- Trie - a trie of patterns, nested by braces like `{ F, G -> 2 }`. Simple
 tries form sets like `{1, 2, 3}` or hashmaps like `{F -> 1, G -> 2}`.
 - Match
   1. an expression of the form `into : from` where
-    - into is the expression to match into
-    - from is the trie to match from
+    - *into* is the expression to match into
+    - *from* is the trie to match from
   2. the result of evaluating a match, consisting of selecting and rewriting.
 - Arrow
   1. an expression of the form `from -> into` where
@@ -44,6 +45,14 @@ paren or brace.
 operators with precedence in Sifu. This precedence is as follows: 
 > semicolons < long match, long arrow < comma < infix < short match, short arrow
   - Commas and Semis - these delimit separate expressions within a specific level of nesting. Commas are high precedence, while Semicolons are low. 
+
+### Parsing
+
+Parsing begins at the top level with Tries. A Trie is zero or more comma or line separated values. Commas are a kind of operator, and operators are a pattern with their token as the first value, followed by everything after them until a closing trie, pattern, or another operator. 
+
+Multiple operators in the same pattern are similar to a linked list, because each operator starts a new term at the end of the previous operator's pattern. For example, `1 2, 3 4, 5 6`, is parsed as `(1 2 , (3 4 , (5 6)))` with parentheses denoting patterns.
+
+By default, after beginning with a trie at top level everything is assumed to be a pattern, each of which are entered into the trie. This therefore requires addressing how to parse nested patterns and tries, as ambiguity naturally arises from any assumption. A nested pattern or trie term singleton following an operator must be differentiated with a pattern of terms, which may also be nested patterns or tries. For example, `A -> {}` shouldn't be parsed as `A -> ({})` with parentheses denoting patterns. Rather, while parsing a pattern is always the default, if the nested pattern or trie begins and ends with an operator or closing token, like a newline, it is parsed as a singleton. The purpose of this exception is to make typical code more intuitive (wysiwyg), for example: `Key -> { Value }` shouldn't be parsed as `Key -> ({ Value })` with explicit parentheses, but rather a pattern mapping to a trie directly (no redundant pattern in between). 
 
 #### Verbs
 
@@ -152,11 +161,8 @@ their patterns but not evaluated.
 
 ## Semantics and Syntax Isomorphism
 
-All syntax in Sifu can be parsed into a Pattern, then mpatterned back into the original syntax (although it will be desugared). This implies that _all_ syntax has semantics, i.e. parentheses have meaning.
+All non-whitespace syntax in Sifu can be parsed into a Pattern, then pretty printed back into the original syntax (although it will be desugared). This implies that _all_ non-whitespace syntax has semantics, i.e. parentheses have meaning.
 
-## Parsing
-
-parsing
 
 ## Type Checking as Pattern matching on Patterns
 

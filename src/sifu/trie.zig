@@ -842,6 +842,7 @@ pub const Trie = struct {
         return self.append(allocator, Pattern{ .root = root }, value);
     }
 
+    // TODO: change return type to void
     pub fn append(
         trie: *Self,
         allocator: Allocator,

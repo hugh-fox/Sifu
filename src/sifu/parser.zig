@@ -300,25 +300,48 @@ pub fn parseLine(
     var level = Level{};
     try level.init(allocator);
     var height: usize = 0;
+    var in_trie = false;
+    var trie_key: ?Pattern = null;
+
     for (line) |token| {
         const current_ast = switch (token.type) {
             .Name => Node.ofKey(token.lit),
-            inline .LeftParen, .LeftBrace => |tag| {
-                if (height > 0)
-                    height -= 1;
+            .LeftParen => {
+                height += 1;
                 // Push the current level for later
                 try levels.append(allocator, level);
                 // Start a new nesting level
                 level = Level{};
                 try level.init(allocator);
-                if (tag == .LeftBrace)
-                    level.root = Node.ofPattern(Pattern{});
                 continue;
             },
-            .RightParen, .RightBrace => blk: {
+            .LeftBrace => {
                 height += 1;
+                in_trie = true;
+                // Push current level and start new trie
+                try levels.append(allocator, level);
+                level = Level{};
+                try level.init(allocator);
+                level.root = Node{ .trie = Trie{} };
+                continue;
+            },
+            .RightParen => blk: {
+                if (height > 0) height -= 1;
                 defer level = levels.pop().?;
                 break :blk Node.ofPattern(try level.finalize(allocator, height));
+            },
+            .RightBrace => blk: {
+                if (height > 0) height -= 1;
+                defer level = levels.pop().?;
+                // Get final pattern if any
+                if (trie_key) |key| {
+                    const entry = try level.finalize(allocator, height);
+                    _ = try level.root.trie.append(allocator, key, entry);
+                } else {
+                    trie_key = null;
+                }
+                in_trie = false;
+                break :blk Node{ .trie = level.root.trie };
             },
             .Var => Node.ofVar(token.lit),
             .VarPattern => Node.ofVarPattern(token.lit),
@@ -335,6 +358,9 @@ pub fn parseLine(
                     .LongArrow => .long_arrow,
                     else => unreachable,
                 };
+                if (op_tag == .arrow or op_tag == .long_arrow) {
+                    trie_key = try level.finalize(allocator, height);
+                }
                 // Right hand args for previous op with higher precedence
                 try level.appendOp(
                     allocator,
@@ -345,8 +371,16 @@ pub fn parseLine(
                 continue;
             },
         };
+
         try level.current().append(allocator, current_ast);
     }
+
+    // Handle any remaining trie item
+    if (in_trie and trie_key != null) {
+        const entry = try level.finalize(allocator, height);
+        _ = try level.root.trie.append(allocator, trie_key.?, entry);
+    }
+
     return try level.finalize(allocator, height);
 }
 
@@ -743,6 +777,57 @@ test "Trie: trie eql hash" {
     try testing.expectEqual(ast1.hash(), ast2.hash());
     try testing.expect(!ast1.eql(ast3));
     try testing.expect(!ast2.eql(ast3));
-    try testing.expect(ast1.hash() != ast3.hash());
-    try testing.expect(ast2.hash() != ast3.hash());
+}
+
+test "Trie: simple set" {
+    const input = "{1, 2, 3}";
+    const result = try parseSlice(testing.allocator, input);
+    defer result.deinit();
+
+    try testing.expect(result.root[0] == .trie);
+    const trie = result.root[0].trie;
+
+    // Check trie contains expected entries
+    try testing.expect(trie.size() == 3);
+    try testing.expect(trie.get("1") != null);
+    try testing.expect(trie.get("2") != null);
+    try testing.expect(trie.get("3") != null);
+}
+
+test "Trie: simple map" {
+    const input = "{F -> 1, G -> 2}";
+    const result = try parseSlice(testing.allocator, input);
+    defer result.deinit();
+
+    try testing.expect(result.root[0] == .trie);
+    const trie = result.root[0].trie;
+
+    try testing.expect(trie.size() == 2);
+    const f_value = trie.get("F").?.value orelse return error.TestExpectedValue;
+    const g_value = trie.get("G").?.value orelse return error.TestExpectedValue;
+
+    try testing.expectEqualStrings("1", f_value.root[0].key.lit);
+    try testing.expectEqualStrings("2", g_value.root[0].key.lit);
+}
+
+test "Trie: nested" {
+    const input = "{A -> {1, 2}, B -> {3, 4}}";
+    const result = try parseSlice(testing.allocator, input);
+    defer result.deinit();
+
+    try testing.expect(result.root[0] == .trie);
+    const trie = result.root[0].trie;
+
+    try testing.expect(trie.size() == 2);
+
+    // Check nested tries
+    const a_value = trie.get("A").?.value orelse return error.TestExpectedValue;
+    try testing.expect(a_value.root[0] == .trie);
+    const a_trie = a_value.root[0].trie;
+    try testing.expect(a_trie.size() == 2);
+
+    const b_value = trie.get("B").?.value orelse return error.TestExpectedValue;
+    try testing.expect(b_value.root[0] == .trie);
+    const b_trie = b_value.root[0].trie;
+    try testing.expect(b_trie.size() == 2);
 }

@@ -620,7 +620,7 @@ These must be different, because computations are fundamentally more reducable t
 - Infix operators lose information about precedence when concatenated. For example, (x & y) | (w & z) isn't equal to x & y | w & z
   1. Make infix operators stop? idk
   2. Ignore this issue and require parens (probably necessary)
-  3. Add builtin precedence (eww)
+  3. Add builtin precedence
   4. Make variables only match terms, not patterns
   5. Preserve patterns during binding/matching, i.e. rewrite to (x & y) | (w & z)
 
