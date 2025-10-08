@@ -14,6 +14,7 @@ const parser = @import("sifu/parser.zig");
 const pattern_module = @import("sifu/pattern.zig");
 const Pattern = pattern_module.Pattern;
 const Trie = pattern_module.Trie;
+const Streams = @import("streams.zig").Streams;
 
 // const Node = Pattern.Node;
 const Level = parser.Level;
@@ -107,21 +108,20 @@ fn readFn(ctx: *InputCtx, bytes: []u8) error{OutOfMemory}!usize {
     return slice.len;
 }
 
-pub const Streams = struct {
-    var input_ctx: InputCtx = .{ .ptr = undefined };
-    in: io.Reader(*InputCtx, error{OutOfMemory}, readFn) = .{
+var input_ctx: InputCtx = .{ .ptr = undefined };
+pub const streams: Streams = .{
+    .in = .{
         .context = &input_ctx,
     },
-    out: io.Writer = io.Writer{
+    .out = io.Writer{
         .writeFn = writeFn,
         .context = undefined,
     },
-    err: io.Writer = if (verbose_errors)
-        std.io.Writer{
+    .err = if (verbose_errors)
+        io.Writer{
             .writeFn = writeFn,
             .context = undefined,
         }
     else
-        std.io.null_writer,
+        io.Writer.Discarding,
 };
-pub const streams = Streams{};

@@ -9,8 +9,8 @@ const ArenaAllocator = std.heap.ArenaAllocator;
 const Allocator = std.mem.Allocator;
 const ArrayList = std.ArrayList; // Update import
 const parsePattern = @import("sifu/parser.zig").parsePattern;
-const streams = @import("streams.zig").streams;
 const io = std.io;
+const fs = std.fs;
 const mem = std.mem;
 const wasm = @import("wasm.zig");
 const builtin = @import("builtin");
@@ -22,10 +22,15 @@ const detect_leaks = @import("build_options").detect_leaks;
 const debug_mode = @import("builtin").mode == .Debug;
 const Reader = io.Reader;
 const Writer = io.Writer;
+const Streams = @import("streams.zig").Streams;
+const streams = @import("streams.zig").streams;
+const verbose_tests = @import("build_options").verbose_errors;
 // TODO: merge these into just GPA, when it eventually implements wasm_allocator
 // itself
 var gpa = if (no_os) {} else GPA{};
 const GPA = util.GPA;
+
+// extern fn tree_sitter_zig() callconv(.c) *ts.Language;
 
 pub fn main() void {
     // @compileLog(@sizeOf(Pat));
@@ -57,7 +62,7 @@ fn repl(
 ) !void {
     var trie = Trie{}; // This will be cleaned up with the arena
 
-    while (replStep(&trie, allocator, streams.out)) |_| {
+    while (replStep(&trie, allocator)) |_| {
         try streams.out.flush();
         try streams.err.flush();
     } else |err| switch (err) {
@@ -70,7 +75,6 @@ fn repl(
 fn replStep(
     trie: *Trie,
     allocator: Allocator,
-    writer: *Writer,
 ) !?void {
     var str_arena, const pattern = try parsePattern(allocator, streams.in);
 
@@ -89,7 +93,7 @@ fn replStep(
         "Parsed pattern {} high and {} wide: ",
         .{ pattern.height, pattern.root.len },
     );
-    try pattern.write(streams.err);
+    try pattern.write(streams.out);
     // print("\nof types: ", .{});
     // for (root) |app| {
     //     print("{s} ", .{@tagName(app)});
@@ -159,11 +163,11 @@ fn replStep(
         else
             eval.deinit(allocator); // TODO: free an arena instead
 
-        try writer.print("Eval: ", .{});
-        try pattern.writeIndent(writer, 0);
-        try writer.writeByte('\n');
+        try streams.out.print("Eval: ", .{});
+        try pattern.writeIndent(streams.out, 0);
+        try streams.out.writeByte('\n');
     }
     // try trie.pretty(writer);
     // print("\n", .{});
-    try trie.writeCanonical(writer);
+    try trie.writeCanonical(streams.out);
 }

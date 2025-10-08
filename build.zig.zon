@@ -17,20 +17,25 @@
     // This field is optional.
     // This is currently advisory only; Zig does not yet do anything
     // with this value.
-    //.minimum_zig_version = "0.11.0",
+    // .minimum_zig_version = "0.15.1",
 
     // This field is optional.
     // Each dependency must either provide a `url` and `hash`, or a `path`.
     // `zig build --fetch` can be used to fetch all dependencies of a package, recursively.
     // Once all dependencies are fetched, `zig build` no longer requires
     // internet connectivity.
-    .dependencies = .{},
+    .dependencies = .{
+        .tree_sitter = .{
+            .url = "https://github.com/tree-sitter/zig-tree-sitter/archive/refs/heads/master.tar.gz",
+            .hash = "tree_sitter-0.25.0-8heIf4KZAQCmEhQwLPPtKBsU3BBkohvUJpfDXc7vmDM7",
+        },
+    },
+
     .paths = .{
         "build.zig",
         "build.zig.zon",
         "src",
-        // For example...
         "LICENSE",
-        //"README.md",
+        "README.md",
     },
 }
