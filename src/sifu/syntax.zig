@@ -14,13 +14,13 @@ const Wyhash = std.hash.Wyhash;
 
 /// Builtin Sifu types, values here correspond exactly to a type name in Sifu.
 /// They don't make up part of Nodes directly because Nodes are an abstract,
-/// standalone datastructure, not an Ast.
+/// standalone data structure, not an Ast.
 pub const Type = enum {
     Name,
     Var,
     VarPattern,
     Str,
-    // Ints/UInts are be patternlied to a number which signifies their size
+    // Ints/UInts are be applied to a number which signifies their size
     I, // signed
     U, // unsigned
     F, // float
@@ -42,6 +42,13 @@ pub const Type = enum {
     pub fn order(self: Type, other: Type) Order {
         return math.order(@intFromEnum(self), @intFromEnum(other));
     }
+};
+
+/// This is the default context type for Tokens.
+pub const Span = struct {
+    line: usize,
+    col: usize, // Column in line, starting at 0
+    pos: usize, // Byte offset in the source
 };
 
 /// Any source code word with with context, including vars.

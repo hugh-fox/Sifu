@@ -78,14 +78,6 @@ pub const Node = union(enum) {
     /// enough information preserved such that during printing, the
     /// correct precedence operator can be recreated.
     arrow: Pattern,
-    /// TODO: remove. These are here temporarily until the parser is
-    /// refactored to determine precedence by tracking tokens instead of
-    /// nodes. The pretty printer must also then reconstruct the correct
-    /// tokens based on the precedence needed to preserve a given Ast's
-    /// structure.
-    long_match: Pattern,
-    long_arrow: Pattern,
-    long_list: Pattern,
     /// A single element in comma separated list, with the comma elided.
     /// Lists are operators that are recognized as separators for
     /// patterns.

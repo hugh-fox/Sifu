@@ -10,10 +10,9 @@ const ArrayList = std.ArrayList;
 const verbose_errors = @import("build_options").verbose_errors;
 const Lexer = @import("sifu/Lexer.zig");
 const parser = @import("sifu/parser.zig");
-// const trie_module = @import("sifu/trie.zig");
-const pattern_module = @import("sifu/pattern.zig");
-const Pattern = pattern_module.Pattern;
-const Trie = pattern_module.Trie;
+const trie_module = @import("sifu/trie.zig");
+const Pattern = trie_module.Pattern;
+const Trie = trie_module.Trie;
 const Streams = @import("streams.zig").Streams;
 
 // const Node = Pattern.Node;

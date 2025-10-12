@@ -843,7 +843,7 @@ to begin with for some feature is a possible code smell of that feature.
   if that submatch doesn't match itself. This is equivalent to using false with
   an implication in classical logic. The proof, and therefore program is valid.
 
-- Computation must be _bounded_ upwards for streaming execution, but should
+- Computation should be _bounded_ upwards for streaming execution? but should
   _flow_ from the trie's top to the current location
 - Patterns of differing length are fine: the lowest index, followed by longest
   match is chosen greedily
@@ -852,6 +852,7 @@ to begin with for some feature is a possible code smell of that feature.
   with a simplified expression (patterns like `F -> (F)` shouldn't recurse on
   `F`). An Ast is more reduced than another if it has a shorter height of patterns/
   ops.
+- Computation should flow downwards to satisfy a more mathematical philosophy: earlier rules are likely to be intended more as foundational axioms as compared to following rules
   
 - Optional: an arbitrary match but finite limit argument that allows a certain
   number of what would be non-terminating evaluations

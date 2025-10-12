@@ -18,9 +18,7 @@ Vars always successfully match (if there is a Var) after a Key or Subpat match
 fails.
 - Pattern - a list of terms, nested by parenthesis
 - Tuple - anything surrounded by parenthesis
-- Ast - the Sifu specific data type of the generic Pattern data structure. Sifu
-parses every token as a Token, which is a term with meta-information, and Pattern
-can be nested, so together they form the abstract syntax tree.
+- Ast - one possible encoding of the intermediate representation required to parse Sifu semantics from text 
 - Trie - a trie of patterns, nested by braces like `{ F, G -> 2 }`. Simple
 tries form sets like `{1, 2, 3}` or hashmaps like `{F -> 1, G -> 2}`.
 - Match

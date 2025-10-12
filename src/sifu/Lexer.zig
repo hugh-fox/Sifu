@@ -16,7 +16,7 @@ const trie = @import("trie.zig");
 const Ast = trie.AstType;
 const Lit = Ast.Lit;
 const syntax = @import("syntax.zig");
-const Token = syntax.Token(usize);
+const Token = syntax.Token(syntax.Span);
 const Type = syntax.Type;
 const Set = util.Set;
 const ArrayListUnmanaged = std.ArrayListUnmanaged;
@@ -54,6 +54,15 @@ pub fn init(allocator: Allocator, reader: *Reader) Self {
         .buff = ArrayList(u8){},
         .reader = reader,
     };
+}
+
+pub fn readAll(self: *Self) Error![]const Token {
+    var tokens = ArrayList(Token){};
+    errdefer tokens.deinit(self.allocator);
+    while (try self.next()) |token| {
+        try tokens.append(self.allocator, token);
+    }
+    return tokens.toOwnedSlice(self.allocator);
 }
 
 pub fn clearRetainingCapacity(self: *Self) void {
@@ -139,7 +148,11 @@ pub fn next(
     return Token{
         .type = token_type,
         .lit = try self.buff.toOwnedSlice(self.allocator),
-        .context = pos,
+        .context = .{
+            .line = self.line,
+            .col = self.col,
+            .pos = pos,
+        },
     };
 }
 

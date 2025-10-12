@@ -8,6 +8,5 @@ test "Submodules" {
     _ = @import("sifu/syntax.zig");
     _ = @import("sifu/Lexer.zig");
     _ = @import("sifu/parser.zig");
-    _ = @import("sifu/pattern.zig");
     _ = @import("sifu/trie.zig");
 }
