@@ -89,8 +89,9 @@ pub const Parser = struct {
         return try self.parseTrie();
     }
 
+    // TODO: call parseNestedTrie instead of duplicating logic
     fn parseTrie(self: *Parser) !AstNode {
-        var patterns = ArrayList(AstNode){};
+        var patterns = ArrayList([]const AstNode){};
         defer patterns.deinit(self.allocator);
 
         self.skipNewlines();
@@ -104,7 +105,7 @@ pub const Parser = struct {
                     const pattern = try self.parsePattern(.None);
                     try patterns.append(
                         self.allocator,
-                        AstNode{ .pattern = pattern },
+                        pattern,
                     );
                     self.skipNewlines();
                 },
@@ -255,7 +256,7 @@ pub const Parser = struct {
     fn parseNestedTrie(self: *Parser) !AstNode {
         self.skipNewlines();
 
-        var patterns = ArrayList(AstNode){};
+        var patterns = ArrayList([]const AstNode){};
         defer patterns.deinit(self.allocator);
 
         while (!self.isAtEnd()) {
@@ -268,7 +269,7 @@ pub const Parser = struct {
             }
 
             const pattern = try self.parsePattern(.None);
-            try patterns.append(self.allocator, AstNode{ .pattern = pattern });
+            try patterns.append(self.allocator, pattern);
             self.skipNewlines();
         }
 

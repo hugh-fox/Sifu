@@ -64,8 +64,8 @@ pub fn main() void {
     };
     defer ast.deinit(arena.allocator());
 
-    // const trie = try astNodeToTrie(arena.allocator(), ast);
-    // try trie.writeCanonical(streams.out);
+    const trie = try astNodeToTrie(arena.allocator(), ast);
+    try trie.writeCanonical(streams.out);
 
     if (comptime detect_leaks)
         _ = gpa.detectLeaks()

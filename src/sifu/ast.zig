@@ -36,7 +36,7 @@ pub const AstNode = union(enum) {
     match: []const AstNode,
     arrow: []const AstNode,
     list: []const AstNode,
-    trie: []const AstNode,
+    trie: []const []const AstNode,
 
     fn deinitSlice(slice: []const AstNode, allocator: Allocator) void {
         for (slice) |*node| {
@@ -100,47 +100,40 @@ pub fn astNodeToTrie(allocator: Allocator, ast: AstNode) error{OutOfMemory}!Node
         .variable => |v| Node{ .variable = v },
         .var_pattern => |vp| Node{ .var_pattern = vp },
         .pattern => |nodes| {
-            var converted = try allocator.alloc(Node, nodes.len);
-            var max_height: usize = 0;
-            for (nodes, 0..) |node, i| {
-                converted[i] = try astNodeToTrie(allocator, node);
-                const h = getNodeHeight(converted[i]);
-                if (h > max_height) max_height = h;
-            }
-            return Node{ .pattern = .{ .root = converted, .height = max_height + 1 } };
+            const pattern = try astSliceToPattern(allocator, nodes);
+            return Node{ .pattern = pattern };
         },
         .infix => |inf| {
-            const expr_node = try astNodeToTrie(allocator, inf.expr);
-            var nodes = try allocator.alloc(Node, 1);
-            nodes[0] = expr_node;
-            const h = getNodeHeight(expr_node);
-            return Node{ .infix = .{ .root = nodes, .height = h + 1 } };
+            const expr_node = try astSliceToPattern(allocator, inf.expr);
+            return Node{ .infix = expr_node };
         },
         .match => |expr| {
-            const expr_node = try astNodeToTrie(allocator, expr);
-            var nodes = try allocator.alloc(Node, 1);
-            nodes[0] = expr_node;
-            const h = getNodeHeight(expr_node);
-            return Node{ .match = .{ .root = nodes, .height = h + 1 } };
+            const expr_node = try astSliceToPattern(allocator, expr);
+            return Node{ .match = expr_node };
         },
         .arrow => |expr| {
-            const expr_node = try astNodeToTrie(allocator, expr);
-            var nodes = try allocator.alloc(Node, 1);
-            nodes[0] = expr_node;
-            const h = getNodeHeight(expr_node);
-            return Node{ .arrow = .{ .root = nodes, .height = h + 1 } };
+            const expr_node = try astSliceToPattern(allocator, expr);
+            return Node{ .arrow = expr_node };
         },
         .list => |expr| {
-            const expr_node = try astNodeToTrie(allocator, expr);
-            var nodes = try allocator.alloc(Node, 1);
-            nodes[0] = expr_node;
-            const h = getNodeHeight(expr_node);
-            return Node{ .list = .{ .root = nodes, .height = h + 1 } };
+            const expr_node = try astSliceToPattern(allocator, expr);
+            return Node{ .list = expr_node };
         },
         .trie => |nodes| {
             var trie = Trie{};
             for (nodes) |node| {
-                try trie.append(allocator, &trie, node);
+                const len = node.len;
+                if (len > 0 and node[len - 1] == .arrow)
+                    try trie.append(
+                        allocator,
+                        Pattern{
+                            .root = node[0 .. len - 2],
+                            // TOOD: replace this with a counter
+                            .height = 0,
+                        },
+                        node[len - 1],
+                    );
+                try trie.append(allocator, node, null);
             }
             return Node{ .trie = trie };
         },
