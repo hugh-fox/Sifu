@@ -8,8 +8,7 @@ const io = std.io;
 const ArrayList = std.ArrayList;
 // for debugging with zig test --test-filter, comment this import
 const verbose_errors = @import("build_options").verbose_errors;
-const Lexer = @import("sifu/Lexer.zig");
-const parser = @import("sifu/parser.zig");
+const parser = @import("tree_sitter_sifu");
 const trie_module = @import("sifu/trie.zig");
 const Pattern = trie_module.Pattern;
 const Trie = trie_module.Trie;
@@ -17,7 +16,6 @@ const Streams = @import("streams.zig").Streams;
 
 // const Node = Pattern.Node;
 const Level = parser.Level;
-const Token = @import("sifu/syntax.zig").Token;
 const wasm_allocator = std.heap.wasm_allocator;
 extern "js" fn log(msg_ptr: [*]const u8, msg_len: usize) void;
 

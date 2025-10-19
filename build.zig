@@ -15,16 +15,36 @@ pub fn build(b: *std.Build) void {
     // set a preferred release mode, allowing the user to decide how to optimize.
     const optimize = b.standardOptimizeOption(.{});
 
+    const module = b.addModule("sifu", .{
+        .root_source_file = b.path("src/root.zig"),
+        .target = target,
+    });
+
     const exe = b.addExecutable(.{
         .name = "sifu",
-        // In this case the main source file is merely a path, however, in more
-        // complicated build scripts, this could be a generated file.
         .root_module = b.createModule(.{
+            // b.createModule defines a new module just like b.addModule but,
+            // unlike b.addModule, it does not expose the module to consumers of
+            // this package, which is why in this case we don't have to give it a name.
             .root_source_file = b.path("src/main.zig"),
+            // Target and optimization levels must be explicitly wired in when
+            // defining an executable or library (in the root module), and you
+            // can also hardcode a specific target for an executable or library
+            // definition if desireable (e.g. firmware for embedded devices).
             .target = target,
             .optimize = optimize,
+            // List of modules available for import in source files part of the
+            // root module.
+            .imports = &.{
+                .{ .name = "module", .module = module },
+            },
         }),
     });
+    const tree_sitter_sifu = b.dependency("tree_sitter_sifu", .{
+        .target = target,
+        .optimize = optimize,
+    });
+    exe.root_module.addImport("tree_sitter_sifu", tree_sitter_sifu.module("tree_sitter_sifu"));
 
     // This is commented out so as to not build the x86 default when targeting
     // wasm.

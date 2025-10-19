@@ -1,11 +1,7 @@
 const std = @import("std");
-const sifu = @import("sifu.zig");
 const Trie = @import("sifu/trie.zig").Trie;
-// const Pattern = @import("sifu/pattern.zig").Pattern;
 const Pattern = @import("sifu/trie.zig").Pattern;
 const Node = @import("sifu/trie.zig").Node;
-const Lexer = @import("sifu/Lexer.zig");
-const syntax = @import("sifu/syntax.zig");
 const ArenaAllocator = std.heap.ArenaAllocator;
 const Allocator = std.mem.Allocator;
 const ArrayList = std.ArrayList; // Update import
@@ -25,15 +21,12 @@ const Writer = io.Writer;
 const Streams = @import("streams.zig").Streams;
 const streams = @import("streams.zig").streams;
 const verbose_tests = @import("build_options").verbose_errors;
-const parseFile = @import("sifu/parser.zig").parseFile;
+const parser = @import("sifu/ast.zig").parser;
 const astNodeToTrie = @import("sifu/ast.zig").astNodeToTrie;
 // TODO: merge these into just GPA, when it eventually implements wasm_allocator
 // itself
 var gpa = if (no_os) {} else GPA{};
 const GPA = util.GPA;
-
-const ts = @import("tree-sitter");
-extern fn tree_sitter_zig() callconv(.c) *ts.Language;
 
 pub fn main() void {
     // @compileLog(@sizeOf(Pat));
@@ -52,20 +45,22 @@ pub fn main() void {
 
     // repl(arena.allocator()) catch |e|
     //     panic("{}", .{e});
-
-    var lexer = Lexer.init(arena.allocator(), streams.in);
-    defer lexer.deinit();
-
-    const tokens = lexer.readAll() catch |e| {
-        panic("Error lexing stdin: {}", .{e});
-    };
-    var ast = parseFile(arena.allocator(), tokens) catch |e| {
+    var buffer = std.ArrayList(u8){};
+    const ast_option = parser.parseReader(
+        arena.allocator(),
+        &buffer,
+        streams.in,
+        null,
+    ) catch |e|
         panic("Error parsing stdin: {}", .{e});
-    };
-    defer ast.deinit(arena.allocator());
+    const ast_ptr = ast_option orelse panic("Nothing to parse\n", .{});
 
-    const trie = try astNodeToTrie(arena.allocator(), ast);
-    try trie.writeCanonical(streams.out);
+    defer ast_ptr.destroy();
+
+    const trie = astNodeToTrie(arena.allocator(), ast_ptr) catch |e|
+        panic("Error parsing stdin: {}", .{e});
+    trie.writeCanonical(streams.out) catch |e|
+        panic("Error writing trie: {}", .{e});
 
     if (comptime detect_leaks)
         _ = gpa.detectLeaks()

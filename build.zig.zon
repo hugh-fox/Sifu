@@ -25,9 +25,8 @@
     // Once all dependencies are fetched, `zig build` no longer requires
     // internet connectivity.
     .dependencies = .{
-        .tree_sitter = .{
-            .url = "https://github.com/tree-sitter/zig-tree-sitter/archive/refs/heads/master.tar.gz",
-            .hash = "tree_sitter-0.25.0-8heIf4KZAQCmEhQwLPPtKBsU3BBkohvUJpfDXc7vmDM7",
+        .tree_sitter_sifu = .{
+            .path = "../tree_sitter_sifu",
         },
     },
 

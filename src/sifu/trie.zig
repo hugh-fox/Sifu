@@ -5,7 +5,7 @@ const mem = std.mem;
 const math = std.math;
 const compare = math.compare;
 const util = @import("../util.zig");
-const parse = @import("parser.zig").parse;
+const parse = @import("tree_sitter_sifu").parse;
 const assert = std.debug.assert;
 const panic = util.panic;
 const Order = math.Order;
@@ -245,8 +245,12 @@ pub const Node = union(enum) {
                 switch (tag) {
                     .arrow => try writer.writeAll("-> "),
                     .match => try writer.writeAll(": "),
-                    .long_arrow => try writer.writeAll("--> "),
-                    .long_match => try writer.writeAll(":: "),
+                    // TODO: these should be determined by reverse engineering
+                    // the required precedence based on parse tree. In other
+                    // words, this function should to the exact opposite of
+                    // parsing, and reconstruct precedence.
+                    // .long_arrow => try writer.writeAll("--> "),
+                    // .long_match => try writer.writeAll(":: "),
                     .list => try writer.writeAll(", "),
                     else => {},
                 }
@@ -348,40 +352,40 @@ pub const Pattern = struct {
     }
 };
 
-const Token = @import("syntax.zig").Token;
-test "simple ast to pattern" {
-    const term = Token{
-        .type = .Name,
-        .lit = "My-Token",
-        .context = 0,
-    };
-    _ = term;
-    const ast = Pattern.Node{
-        .key = .{
-            .type = .Name,
-            .lit = "Some-Other-Token",
-            .context = 20,
-        },
-    };
-    _ = ast;
-    // _ = Pattern.ofTokenType(term, ast);
-}
+// const Token = @import("syntax.zig").Token;
+// test "simple ast to pattern" {
+//     const term = Token{
+//         .type = .Name,
+//         .lit = "My-Token",
+//         .context = 0,
+//     };
+//     _ = term;
+//     const ast = Pattern.Node{
+//         .key = .{
+//             .type = .Name,
+//             .lit = "Some-Other-Token",
+//             .context = 20,
+//         },
+//     };
+//     _ = ast;
+//     // _ = Pattern.ofTokenType(term, ast);
+// }
 
-test "Token equality" {
-    const t1 = Token{
-        .type = .Name,
-        .lit = "Asdf",
-        .context = 0,
-    };
-    const t2 = Token{
-        .type = .Name,
-        .lit = "Asdf",
-        .context = 1,
-    };
+// test "Token equality" {
+//     const t1 = Token{
+//         .type = .Name,
+//         .lit = "Asdf",
+//         .context = 0,
+//     };
+//     const t2 = Token{
+//         .type = .Name,
+//         .lit = "Asdf",
+//         .context = 1,
+//     };
 
-    try testing.expect(t1.eql(t2));
-    try testing.expectEqual(t1.hash(), t2.hash());
-}
+//     try testing.expect(t1.eql(t2));
+//     try testing.expectEqual(t1.hash(), t2.hash());
+// }
 
 /// This maps to branches, but the type is Branch instead of just *Self to
 /// retrieve keys if necessary. The Self pointer references another field in
