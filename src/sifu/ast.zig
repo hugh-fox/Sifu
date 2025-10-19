@@ -44,21 +44,36 @@ pub fn astSliceToPattern(
     }
     return .{ .root = nodes, .height = max_height + 1 };
 }
+
 /// Convert an AstNode to a Trie
 pub fn astNodeToTrie(allocator: Allocator, ast: *parser.Tree) error{OutOfMemory}!Trie {
+    print("{s}\n", .{try ast.rootNode().toSexp(allocator)});
+
     var cursor = ast.walk();
-    return astNodeToTrieHelper(allocator, &cursor);
-}
-pub fn astNodeToTrieHelper(allocator: Allocator, cursor: *AstCursor) error{OutOfMemory}!Trie {
-    while (true) {
-        _ = cursor.gotoFirstChild() or break;
-        while (cursor.gotoNextSibling()) {
-            print("Child: {s}\n", .{cursor.fieldName() orelse ""});
-            print("Sibling: {s}\n", .{cursor.fieldName() orelse ""});
-            _ = try astNodeToTrieHelper(allocator, cursor);
+    var queue = ArrayList(AstCursor){};
+    defer queue.deinit(allocator);
+
+    try queue.append(allocator, cursor);
+
+    var idx: usize = 0;
+    while (idx < queue.items.len) {
+        var current = queue.items[idx];
+        current.node().format(streams.err) catch unreachable;
+        print("{s}: \n", .{current.node().kind()});
+
+        if (current.gotoFirstChild()) {
+            try queue.append(allocator, current);
+            while (current.gotoNextSibling()) {
+                try queue.append(allocator, current);
+            }
         }
+        if (!cursor.gotoParent()) break;
+        try queue.append(allocator, current);
+
+        idx += 1;
     }
-    return error.OutOfMemory;
+
+    return Trie{};
     // return switch (cursor.fieldName() orelse "") {
     //     .key => |k| Node{ .key = k },
     //     .variable => |v| Node{ .variable = v },

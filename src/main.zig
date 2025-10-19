@@ -54,13 +54,13 @@ pub fn main() void {
     ) catch |e|
         panic("Error parsing stdin: {}", .{e});
     const ast_ptr = ast_option orelse panic("Nothing to parse\n", .{});
-
     defer ast_ptr.destroy();
 
     const trie = astNodeToTrie(arena.allocator(), ast_ptr) catch |e|
         panic("Error parsing stdin: {}", .{e});
     trie.writeCanonical(streams.out) catch |e|
         panic("Error writing trie: {}", .{e});
+    streams.err.flush() catch unreachable;
 
     if (comptime detect_leaks)
         _ = gpa.detectLeaks()
