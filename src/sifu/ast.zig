@@ -45,78 +45,140 @@ pub fn astSliceToPattern(
     return .{ .root = nodes, .height = max_height + 1 };
 }
 
-/// Convert an AstNode to a Trie
-pub fn astNodeToTrie(allocator: Allocator, ast: *parser.Tree) error{OutOfMemory}!Trie {
-    print("{s}\n", .{try ast.rootNode().toSexp(allocator)});
+// print("{s}\n", .{try ast.rootNode().toSexp(allocator)});/// Convert an AstNode to a Trie
+pub fn astNodeToTrie(
+    allocator: Allocator,
+    source: []const u8,
+    ast: *parser.Tree,
+) error{OutOfMemory}!Trie {
+    var trie = try Trie.create(allocator);
+    errdefer trie.deinit(allocator);
 
-    var cursor = ast.walk();
-    var queue = ArrayList(AstCursor){};
-    defer queue.deinit(allocator);
+    const root_node = ast.rootNode();
 
-    try queue.append(allocator, cursor);
+    // Process all top-level patterns in the source file
+    var child_cursor = root_node.walk();
 
-    var idx: usize = 0;
-    while (idx < queue.items.len) {
-        var current = queue.items[idx];
-        current.node().format(streams.err) catch unreachable;
-        print("{s}: \n", .{current.node().kind()});
+    if (child_cursor.gotoFirstChild()) {
+        while (true) {
+            const node = child_cursor.node();
+            const node_type = node.kind();
 
-        if (current.gotoFirstChild()) {
-            try queue.append(allocator, current);
-            while (current.gotoNextSibling()) {
-                try queue.append(allocator, current);
+            // Skip newlines and comments
+            if (std.mem.eql(u8, node_type, "\n") or
+                std.mem.eql(u8, node_type, "comment"))
+            {
+                if (!child_cursor.gotoNextSibling()) break;
+                continue;
             }
-        }
-        if (!cursor.gotoParent()) break;
-        try queue.append(allocator, current);
 
-        idx += 1;
+            // Process pattern nodes
+            if (std.mem.eql(u8, node_type, "pattern")) {
+                const pattern = try astNodeToPattern(allocator, source, node);
+                defer pattern.deinit(allocator);
+
+                // Append pattern to trie with no value (it's a top-level pattern)
+                _ = try trie.append(allocator, pattern, null);
+            }
+
+            if (!child_cursor.gotoNextSibling()) break;
+        }
     }
 
-    return Trie{};
-    // return switch (cursor.fieldName() orelse "") {
-    //     .key => |k| Node{ .key = k },
-    //     .variable => |v| Node{ .variable = v },
-    //     .var_pattern => |vp| Node{ .var_pattern = vp },
-    //     .pattern => |nodes| {
-    //         const pattern = try astSliceToPattern(allocator, nodes);
-    //         return Node{ .pattern = pattern };
-    //     },
-    //     .infix => |inf| {
-    //         const expr_node = try astSliceToPattern(allocator, inf.expr);
-    //         return Node{ .infix = expr_node };
-    //     },
-    //     .match => |expr| {
-    //         const expr_node = try astSliceToPattern(allocator, expr);
-    //         return Node{ .match = expr_node };
-    //     },
-    //     .arrow => |expr| {
-    //         const expr_node = try astSliceToPattern(allocator, expr);
-    //         return Node{ .arrow = expr_node };
-    //     },
-    //     .list => |expr| {
-    //         const expr_node = try astSliceToPattern(allocator, expr);
-    //         return Node{ .list = expr_node };
-    //     },
-    //     .trie => |nodes| {
-    //         var trie = Trie{};
-    //         for (nodes) |node| {
-    //             const len = node.len;
-    //             if (len > 0 and node[len - 1] == .arrow)
-    //                 try trie.append(
-    //                     allocator,
-    //                     Pattern{
-    //                         .root = node[0 .. len - 2],
-    //                         // TOOD: replace this with a counter
-    //                         .height = 0,
-    //                     },
-    //                     node[len - 1],
-    //                 );
-    //             try trie.append(allocator, node, null);
-    //         }
-    //         return Node{ .trie = trie };
-    //     },
-    // };
+    return trie.*;
+}
+
+/// Parse a pattern node into a Pattern
+pub fn astNodeToPattern(
+    allocator: Allocator,
+    source: []const u8,
+    node: AstNode,
+) error{OutOfMemory}!Pattern {
+    var nodes = std.ArrayList(Node){};
+    errdefer {
+        for (nodes.items) |n| {
+            n.deinit(allocator);
+        }
+        nodes.deinit(allocator);
+    }
+
+    var cursor = node.walk();
+
+    if (cursor.gotoFirstChild()) {
+        while (true) {
+            const child = cursor.node();
+            const trie_node = try parseTermNode(allocator, source, child);
+            try nodes.append(allocator, trie_node);
+
+            if (!cursor.gotoNextSibling()) break;
+        }
+    }
+
+    const node_slice = try nodes.toOwnedSlice(allocator);
+
+    // Calculate max height
+    var max_height: usize = 0;
+    for (node_slice) |n| {
+        const h = getNodeHeight(n);
+        if (h > max_height) max_height = h;
+    }
+
+    return .{ .root = node_slice, .height = max_height + 1 };
+}
+
+/// Parse a term node into a Node
+fn parseTermNode(
+    allocator: Allocator,
+    source: []const u8,
+    node: AstNode,
+) error{OutOfMemory}!Node {
+    const node_type = node.kind();
+    const start_byte = node.startByte();
+    const end_byte = node.endByte();
+    print("{}..{}\n", .{ start_byte, end_byte });
+    streams.err.flush() catch unreachable;
+    const text = source[start_byte..end_byte];
+
+    // Keys (uppercase identifiers)
+    if (std.mem.eql(u8, node_type, "key")) {
+        return Node.ofKey(text);
+    }
+
+    // Variables (lowercase identifiers)
+    if (std.mem.eql(u8, node_type, "var")) {
+        return Node.ofVar(text);
+    }
+
+    // Numbers, strings, symbols - treat as keys
+    if (std.mem.eql(u8, node_type, "number") or
+        std.mem.eql(u8, node_type, "string") or
+        std.mem.eql(u8, node_type, "symbol"))
+    {
+        return Node.ofKey(text);
+    }
+    // Operators - parse as patterns
+    if (std.mem.eql(u8, node_type, "comma_expr") or
+        std.mem.eql(u8, node_type, "semicolon_expr") or
+        std.mem.eql(u8, node_type, "long_match") or
+        std.mem.eql(u8, node_type, "long_arrow") or
+        std.mem.eql(u8, node_type, "infix") or
+        std.mem.eql(u8, node_type, "short_match") or
+        std.mem.eql(u8, node_type, "short_arrow"))
+    {
+        const pattern = try astNodeToPattern(allocator, source, node);
+        return Node.ofPattern(pattern);
+    }
+
+    // Nested structures
+    if (std.mem.eql(u8, node_type, "nested_pattern") or
+        std.mem.eql(u8, node_type, "nested_trie"))
+    {
+        const pattern = try astNodeToPattern(allocator, source, node);
+        return Node.ofPattern(pattern);
+    }
+
+    // Default: treat as key
+    return Node.ofKey(text);
 }
 
 fn getNodeHeight(node: Node) usize {
