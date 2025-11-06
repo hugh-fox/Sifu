@@ -1,0 +1,10 @@
+# An implementation of Booleans and an If/Else expression. The `Then`/`Else`
+# constants aren't necessary, and are only for (arguably) more readability.
+
+Bool -> { True, False }
+
+# This definition doesn't require `Bool` to be defined.
+if True  then @then else _     -> @then
+if False then _     else @else -> @else
+
+
