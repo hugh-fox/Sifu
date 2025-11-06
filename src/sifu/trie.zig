@@ -28,13 +28,6 @@ const Writer = io.Writer;
 pub const HashMap = std.StringHashMapUnmanaged(Trie);
 pub const GetOrPutResult = HashMap.GetOrPutResult;
 
-/// Describes the height and width of an Pattern (the level of nesting and
-/// length of the root array respectively)
-pub const Dimension = struct {
-    height: usize,
-    width: usize,
-};
-
 /// Nodes form the keys and values of a pattern type (its recursive structure
 /// forces both to be the same type). In Sifu, it is also the structure given
 /// to a source code entry (a `Node(Token)`). It encodes sequences, nesting,
@@ -43,7 +36,7 @@ pub const Dimension = struct {
 /// otherwise irrelevant. Any infix operator that isn't a builtin (match, arrow
 /// or list) is parsed into a pattern. These are ordered in their precedence, which
 /// is used during parsing.
-/// A pattern (a list of nodes) Node with its height cached.
+/// A pattern (a list of nodes) Node.
 pub const Node = union(enum) {
     /// A unique constant, literal values. Uniqueness when in a pattern
     /// arises from NodeMap referencing the same value multiple times
@@ -495,6 +488,7 @@ pub const Trie = struct {
 
     map: HashMap = .{},
     value: IndexedValues = .{},
+    height: usize = 0, // TODO: implement height caching
 
     /// The results of matching a trie exactly (vars are matched literally
     /// instead of by building up a pattern of their possible values)

@@ -103,17 +103,15 @@ fn replStep(
 
     // streams.out.print("replStep\n", .{}) catch unreachable;
     // streams.out.flush() catch unreachable;
-    // print(
-    //     "Parsed pattern {} high and {} wide: ",
-    //     .{ pattern.height, pattern.root.len },
-    // );
-
-    // print("\nof types: ", .{});
-    // for (root) |app| {
-    //     print("{s} ", .{@tagName(app)});
-    //     app.writeSExp(streams.err, 0) catch unreachable;
-    //     streams.err.writeByte(' ') catch unreachable;
-    // }
+    print(
+        "Parsed pattern {} high and {} wide, of types: ",
+        .{ pattern.height, pattern.root.len },
+    );
+    for (root) |app| {
+        print("{s} ", .{@tagName(app)});
+        app.writeSExp(streams.err, 0) catch unreachable;
+        streams.err.writeByte(' ') catch unreachable;
+    }
     print("\n", .{});
 
     // TODO: read a "file" from stdin first, until eof, then start eval/matching
