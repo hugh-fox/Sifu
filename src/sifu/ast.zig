@@ -107,18 +107,15 @@ pub fn astNodeToPattern(
     if (cursor.gotoFirstChild()) {
         while (true) {
             const child = cursor.node();
-            const trie_node = try parseTermNode(allocator, source, child) orelse {
-                if (!cursor.gotoNextSibling()) break;
-                continue;
-            };
-            try nodes.append(allocator, trie_node);
-
+            if (try parseTermNode(allocator, source, child)) |trie_node| {
+                try nodes.append(allocator, trie_node);
+            }
             if (!cursor.gotoNextSibling()) break;
         }
     }
 
     const node_slice = try nodes.toOwnedSlice(allocator);
-
+    print("node len: {}\n", .{node.childCount()});
     // Calculate max height
     var max_height: usize = 0;
     for (node_slice) |n| {
@@ -139,11 +136,8 @@ fn parseTermNode(
     const start_byte = node.startByte();
     const end_byte = node.endByte();
     const text = source[start_byte..end_byte];
-    print("Parsing term node of type '{s}' with text: '{s}'\n", .{ node_kind, text });
-    node.format(streams.err) catch unreachable;
-    print("\n", .{});
     streams.err.flush() catch unreachable;
-    if (node.isNamed())
+    if (!node.isNamed())
         return null;
 
     // Keys (uppercase identifiers)
@@ -231,7 +225,7 @@ fn parsePatternRecursive(
         const h = getNodeHeight(n);
         if (h > max_height) max_height = h;
     }
-
+    // TODO: fix node type instead of just Pattern
     return Node.ofPattern(.{ .root = node_slice, .height = max_height + 1 });
 }
 

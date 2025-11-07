@@ -85,14 +85,17 @@ fn replStep(
     //     panic("Out of memory allocating source: {}", .{e});
     const ast_ptr = ast_option orelse panic("Nothing to parse\n", .{});
     defer ast_ptr.destroy();
-
+    {
+        const node = ast_ptr.rootNode();
+        const text = buffer.written()[node.startByte()..node.endByte()];
+        print("Parsing term node of type '{s}' with text: '{s}'\n", .{ node.kind(), text });
+        try node.format(streams.err);
+        print("\n", .{});
+    }
     const pattern = astNodeToPattern(allocator, buffer.written(), ast_ptr.rootNode()) catch |e|
         panic("Error parsing stdin: {}", .{e});
-    // defer pattern.deinit(allocator);
-
-    if (pattern.isEmpty())
-        return null;
     defer pattern.deinit(allocator);
+    // defer pattern.deinit(allocator);
 
     // if (comptime detect_leaks) try streams.err.print(
     //     "String Arena Allocated: {} bytes\n",
@@ -113,6 +116,10 @@ fn replStep(
         streams.err.writeByte(' ') catch unreachable;
     }
     print("\n", .{});
+    streams.err.flush() catch unreachable;
+
+    if (pattern.isEmpty())
+        return null;
 
     // TODO: read a "file" from stdin first, until eof, then start eval/matching
     // until another eof.
@@ -170,7 +177,7 @@ fn replStep(
             eval.deinit(allocator); // TODO: free an arena instead
 
         try streams.out.print("Eval: ", .{});
-        try pattern.writeIndent(streams.out, 0);
+        try eval.writeIndent(streams.out, 0);
         try streams.out.writeByte('\n');
     }
 
