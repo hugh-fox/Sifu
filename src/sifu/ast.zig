@@ -45,7 +45,6 @@ pub fn astSliceToPattern(
     return .{ .root = nodes, .height = max_height + 1 };
 }
 
-// print("{s}\n", .{try ast.rootNode().toSexp(allocator)});/// Convert an AstNode to a Trie
 pub fn astNodeToTrie(
     allocator: Allocator,
     source: []const u8,
@@ -74,9 +73,7 @@ pub fn astNodeToTrie(
 
             // Process pattern nodes
             if (std.mem.eql(u8, node_kind, "pattern")) {
-                const pattern = try astNodeToPattern(allocator, source, node);
-                defer pattern.deinit(allocator);
-
+                const pattern = try astToPattern(allocator, source, node);
                 // Append pattern to trie with no value (it's a top-level pattern)
                 _ = try trie.append(allocator, pattern, null);
             }
@@ -86,44 +83,6 @@ pub fn astNodeToTrie(
     }
 
     return trie.*;
-}
-
-/// Parse a pattern node into a Pattern
-pub fn astNodeToPattern(
-    allocator: Allocator,
-    source: []const u8,
-    node: AstNode,
-) error{OutOfMemory}!Pattern {
-    var nodes = std.ArrayList(Node){};
-    errdefer {
-        for (nodes.items) |n| {
-            n.deinit(allocator);
-        }
-        nodes.deinit(allocator);
-    }
-
-    var cursor = node.walk();
-    // Ignore root node itself, parse its children
-    if (cursor.gotoFirstChild()) {
-        while (true) {
-            const child = cursor.node();
-            if (try parseTermNode(allocator, source, child)) |trie_node| {
-                try nodes.append(allocator, trie_node);
-            }
-            if (!cursor.gotoNextSibling()) break;
-        }
-    }
-
-    const node_slice = try nodes.toOwnedSlice(allocator);
-    print("node len: {}\n", .{node.childCount()});
-    // Calculate max height
-    var max_height: usize = 0;
-    for (node_slice) |n| {
-        const h = getNodeHeight(n);
-        if (h > max_height) max_height = h;
-    }
-
-    return .{ .root = node_slice, .height = max_height + 1 };
 }
 
 /// Parse a term node into a Node (recursive)
@@ -136,55 +95,60 @@ fn parseTermNode(
     const start_byte = node.startByte();
     const end_byte = node.endByte();
     const text = source[start_byte..end_byte];
-    streams.err.flush() catch unreachable;
+
+    // Ignore anonymous nodes (this info is stored in the enum type, like `arrow`)
     if (!node.isNamed())
         return null;
 
-    // Keys (uppercase identifiers)
-    if (std.mem.eql(u8, node_kind, "key")) {
-        return Node.ofKey(text);
-    }
+    const NodeKind = enum {
+        key,
+        variable,
+        number,
+        string,
+        symbol,
+        pattern,
+        comma_expr,
+        semicolon_expr,
+        long_match,
+        long_arrow,
+        infix,
+        short_match,
+        short_arrow,
+        nested_pattern,
+        nested_trie,
+    };
 
-    // Variables (lowercase identifiers)
-    if (std.mem.eql(u8, node_kind, "var")) {
-        return Node.ofVar(text);
-    }
+    const kind = std.meta.stringToEnum(NodeKind, node_kind) orelse {
+        // TODO: ignore literal nodes like '->' when parsing builtins and other rules that use literals
+        // return Node{ .key = text };
+        // TODO: when above is complete, add this back when not in release mode
+        return panic("Unhandled AST node type: {s}", .{node_kind});
+    };
 
-    // Numbers, strings, symbols - treat as keys
-    if (std.mem.eql(u8, node_kind, "number") or
-        std.mem.eql(u8, node_kind, "string") or
-        std.mem.eql(u8, node_kind, "symbol"))
-    {
-        return Node.ofKey(text);
-    }
-
-    // Operators and nested structures - recursively parse children
-    if (std.mem.eql(u8, node_kind, "pattern") or
-        std.mem.eql(u8, node_kind, "comma_expr") or
-        std.mem.eql(u8, node_kind, "semicolon_expr") or
-        std.mem.eql(u8, node_kind, "long_match") or
-        std.mem.eql(u8, node_kind, "long_arrow") or
-        std.mem.eql(u8, node_kind, "infix") or
-        std.mem.eql(u8, node_kind, "short_match") or
-        std.mem.eql(u8, node_kind, "short_arrow") or
-        std.mem.eql(u8, node_kind, "nested_pattern") or
-        std.mem.eql(u8, node_kind, "nested_trie"))
-    {
-        return try parsePatternRecursive(allocator, source, node);
-    }
-
-    // TODO: ignore literal nodes like '->' when parsing builtins and other rules that use literals
-    // return Node.ofKey(text);
-    // TODO: when above is complete, add this back when not in release mode
-    return panic("Unhandled AST node type: {s}", .{node_kind});
+    const pattern = try astToPattern(allocator, source, node);
+    return switch (kind) {
+        .key, .number, .string, .symbol => Node{ .key = text },
+        .variable => Node{ .variable = text },
+        .pattern => .{ .pattern = pattern },
+        .comma_expr => .{ .list = pattern },
+        .semicolon_expr => .{ .list = pattern },
+        .long_match => .{ .match = pattern },
+        .long_arrow => .{ .arrow = pattern },
+        .infix => .{ .infix = pattern },
+        .short_match => .{ .match = pattern },
+        .short_arrow => .{ .arrow = pattern },
+        .nested_pattern => .{ .pattern = pattern },
+        .nested_trie => .{ .trie = @panic("unimplemented\n") },
+    };
 }
 
 /// Recursively parse a pattern node and its children
-fn parsePatternRecursive(
+pub fn astToPattern(
     allocator: Allocator,
     source: []const u8,
     node: AstNode,
-) error{OutOfMemory}!?Node {
+) error{OutOfMemory}!Pattern {
+    print("Parsing pattern node of type '{s}' with {} children\n", .{ node.kind(), node.childCount() });
     var nodes = std.ArrayList(Node){};
     errdefer {
         for (nodes.items) |n| {
@@ -192,41 +156,33 @@ fn parsePatternRecursive(
         }
         nodes.deinit(allocator);
     }
-
     var cursor = node.walk();
+    var has_next = cursor.gotoFirstChild();
 
-    if (cursor.gotoFirstChild()) {
-        while (true) {
-            const child = cursor.node();
-            const child_type = child.kind();
-
-            // Skip whitespace and comments
-            if (std.mem.eql(u8, child_type, "\n") or
-                std.mem.eql(u8, child_type, "comment"))
-            {
-                if (!cursor.gotoNextSibling()) break;
-                continue;
-            }
-
-            // Recursively parse each child
-            const trie_node = try parseTermNode(allocator, source, child) orelse
-                return null;
-            try nodes.append(allocator, trie_node);
-
-            if (!cursor.gotoNextSibling()) break;
+    while (has_next) : (has_next = cursor.gotoNextSibling()) {
+        const child = cursor.node();
+        const child_type = child.kind();
+        // Skip comments
+        if (std.mem.eql(u8, child_type, "comment")) {
+            continue;
         }
+        // Recursively parse each child
+        const trie_node = try parseTermNode(allocator, source, child) orelse {
+            has_next = cursor.gotoFirstChild();
+            continue;
+        };
+
+        try nodes.append(allocator, trie_node);
     }
-
     const node_slice = try nodes.toOwnedSlice(allocator);
-
     // Calculate max height
     var max_height: usize = 0;
     for (node_slice) |n| {
         const h = getNodeHeight(n);
-        if (h > max_height) max_height = h;
+        if (h > max_height)
+            max_height = h;
     }
-    // TODO: fix node type instead of just Pattern
-    return Node.ofPattern(.{ .root = node_slice, .height = max_height + 1 });
+    return .{ .root = node_slice, .height = max_height + 1 };
 }
 
 fn getNodeHeight(node: Node) usize {

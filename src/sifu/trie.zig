@@ -1223,10 +1223,6 @@ pub const Trie = struct {
                 "Match result: {} of {} pattern nodes at index {}, ",
                 .{ matched.len, pattern.root.len, matched.index },
             );
-            total_matched += matched.len;
-            if (total_matched < pattern.root.len)
-                break;
-
             if (matched.value) |value| {
                 print("matched value: ", .{});
                 value.write(streams.err) catch unreachable;
@@ -1234,7 +1230,9 @@ pub const Trie = struct {
                 return try rewrite(allocator, value, matched.bindings, result);
             } else print("but no match", .{});
             print("\n", .{});
-            // const slice = pattern.root[matched.len - 1 ..];
+            total_matched += matched.len;
+            if (total_matched < pattern.root.len)
+                break;
         }
         return try pattern.copy(allocator);
     }

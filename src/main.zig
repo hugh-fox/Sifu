@@ -23,7 +23,7 @@ const streams = @import("streams.zig").streams;
 const verbose_tests = @import("build_options").verbose_errors;
 const parser = @import("sifu/ast.zig").parser;
 const astNodeToTrie = @import("sifu/ast.zig").astNodeToTrie;
-const astNodeToPattern = @import("sifu/ast.zig").astNodeToPattern;
+const astToPattern = @import("sifu/ast.zig").astToPattern;
 const parseAll = @import("sifu/ast.zig").parseAll;
 // TODO: merge these into just GPA, when it eventually implements wasm_allocator
 // itself
@@ -76,7 +76,7 @@ fn replStep(
 ) !?void {
     var buffer = std.Io.Writer.Allocating.init(allocator);
     buffer.clearRetainingCapacity();
-    defer buffer.deinit();
+    // defer buffer.deinit(); // TODO: proper memory management
     const ast_option = try parser.parseLine(
         &buffer,
         streams.in,
@@ -88,13 +88,12 @@ fn replStep(
     {
         const node = ast_ptr.rootNode();
         const text = buffer.written()[node.startByte()..node.endByte()];
-        print("Parsing term node of type '{s}' with text: '{s}'\n", .{ node.kind(), text });
+        print("Parsing term node of type '{s}' and {} children with text: '{s}'\n", .{ node.kind(), node.childCount(), text });
         try node.format(streams.err);
         print("\n", .{});
     }
-    const pattern = astNodeToPattern(allocator, buffer.written(), ast_ptr.rootNode()) catch |e|
+    const pattern = astToPattern(allocator, buffer.written(), ast_ptr.rootNode()) catch |e|
         panic("Error parsing stdin: {}", .{e});
-    defer pattern.deinit(allocator);
     // defer pattern.deinit(allocator);
 
     // if (comptime detect_leaks) try streams.err.print(
@@ -115,7 +114,9 @@ fn replStep(
         app.writeSExp(streams.err, 0) catch unreachable;
         streams.err.writeByte(' ') catch unreachable;
     }
-    print("\n", .{});
+    print("\nPattern: ", .{});
+    pattern.write(streams.err) catch unreachable;
+    streams.err.writeByte('\n') catch unreachable;
     streams.err.flush() catch unreachable;
 
     if (pattern.isEmpty())
