@@ -125,19 +125,18 @@ fn parseTermNode(
         return panic("Unhandled AST node type: {s}", .{node_kind});
     };
 
-    const pattern = try astToPattern(allocator, source, node);
     return switch (kind) {
         .key, .number, .string, .symbol => Node{ .key = text },
         .variable => Node{ .variable = text },
-        .pattern => .{ .pattern = pattern },
-        .comma_expr => .{ .list = pattern },
-        .semicolon_expr => .{ .list = pattern },
-        .long_match => .{ .match = pattern },
-        .long_arrow => .{ .arrow = pattern },
-        .infix => .{ .infix = pattern },
-        .short_match => .{ .match = pattern },
-        .short_arrow => .{ .arrow = pattern },
-        .nested_pattern => .{ .pattern = pattern },
+        .pattern => .{ .pattern = try astToPattern(allocator, source, node) },
+        .comma_expr => .{ .list = try astToPattern(allocator, source, node) },
+        .semicolon_expr => .{ .list = try astToPattern(allocator, source, node) },
+        .long_match => .{ .match = try astToPattern(allocator, source, node) },
+        .long_arrow => .{ .arrow = try astToPattern(allocator, source, node) },
+        .infix => .{ .infix = try astToPattern(allocator, source, node) },
+        .short_match => .{ .match = try astToPattern(allocator, source, node) },
+        .short_arrow => .{ .arrow = try astToPattern(allocator, source, node) },
+        .nested_pattern => .{ .pattern = try astToPattern(allocator, source, node) },
         .nested_trie => .{ .trie = @panic("unimplemented\n") },
     };
 }
@@ -158,21 +157,22 @@ pub fn astToPattern(
     }
     var cursor = node.walk();
     var has_next = cursor.gotoFirstChild();
-
-    while (has_next) : (has_next = cursor.gotoNextSibling()) {
-        const child = cursor.node();
-        const child_type = child.kind();
-        // Skip comments
-        if (std.mem.eql(u8, child_type, "comment")) {
-            continue;
+    while (has_next) {
+        while (has_next) : (has_next = cursor.gotoNextSibling()) {
+            const child = cursor.node();
+            const child_type = child.kind();
+            // Skip comments
+            if (std.mem.eql(u8, child_type, "comment"))
+                continue;
+            // Recursively parse each child
+            const trie_node = try parseTermNode(allocator, source, child) orelse {
+                has_next = cursor.gotoFirstChild();
+                continue;
+            };
+            try nodes.append(allocator, trie_node);
         }
-        // Recursively parse each child
-        const trie_node = try parseTermNode(allocator, source, child) orelse {
-            has_next = cursor.gotoFirstChild();
-            continue;
-        };
-
-        try nodes.append(allocator, trie_node);
+        has_next = cursor.gotoParent();
+        has_next = cursor.gotoNextSibling();
     }
     const node_slice = try nodes.toOwnedSlice(allocator);
     // Calculate max height
