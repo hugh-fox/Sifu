@@ -1,10 +1,31 @@
-# An implementation of Booleans and an If/Else expression. The `Then`/`Else`
-# constants aren't necessary, and are only for (arguably) more readability.
-
+# Define a boolean type using a single term arrow to a set
 Bool -> { True, False }
 
-# This definition doesn't require `Bool` to be defined.
-if True  then @then else _     -> @then
-if False then _     else @else -> @else
+# Define an arrow that emulates the `not` function on bools
+Not (True)  -> False
+Not (False) -> True
 
+# Define a function that takes a tuple of any two `Bools`. Lowercase identifier
+# are variables instead of constants, and match any term. Arguments that don't
+# match the pattern `_ : Bool` cause the parent `Xor` match to fail also. 
+Xor (x : Bool, y : Bool) -> Not (x == y)
+
+# Matching can also be used to implement control flow primitives. Parenthesis
+# are needed around the branches' bodies so that arguments don't get mixed up
+# with our Then/Else words. The `*` sigil means variadic variables that bind to
+# any number of apps.
+# Note: Parenthesis are exclusively for structure, not precedence (they are
+# never implicitly elided or ignored).
+If (bool : Bool) Then (*true) Else (*false) -> bool : {
+    True  -> *true
+    False -> *false
+}
+
+# Variables by themselves can implement generic functions. Equality is defined
+# by set membership. If `x` is not in `{y}`, then the nested match evaluates to
+# `()`.
+x == y --> (x : {y}) : {
+    () -> False
+    _  -> True
+}
 
