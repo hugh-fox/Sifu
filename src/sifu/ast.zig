@@ -1,6 +1,6 @@
 const std = @import("std");
 const Allocator = std.mem.Allocator;
-const ArrayList = std.ArrayList; // Update import
+const ArrayList = std.ArrayList;
 const mem = std.mem;
 const math = std.math;
 const util = @import("../util.zig");
@@ -29,22 +29,6 @@ const Node = @import("trie.zig").Node;
 
 pub const parser = @import("tree_sitter_sifu");
 
-pub fn astSliceToPattern(
-    allocator: Allocator,
-    ast: []const AstNode,
-) error{OutOfMemory}!Pattern {
-    var nodes = try allocator.alloc(Node, ast.len);
-    for (ast, 0..) |node, i| {
-        nodes[i] = try astNodeToTrie(allocator, node);
-    }
-    var max_height: usize = 0;
-    for (nodes) |node| {
-        const h = getNodeHeight(node);
-        if (h > max_height) max_height = h;
-    }
-    return .{ .root = nodes, .height = max_height + 1 };
-}
-
 pub fn astNodeToTrie(
     allocator: Allocator,
     source: []const u8,
@@ -54,8 +38,6 @@ pub fn astNodeToTrie(
     errdefer trie.deinit(allocator);
 
     const root_node = ast.rootNode();
-
-    // Process all top-level patterns in the source file
     var child_cursor = root_node.walk();
 
     if (child_cursor.gotoFirstChild()) {
@@ -63,7 +45,6 @@ pub fn astNodeToTrie(
             const node = child_cursor.node();
             const node_kind = node.kind();
 
-            // Skip newlines and comments
             if (std.mem.eql(u8, node_kind, "\n") or
                 std.mem.eql(u8, node_kind, "comment"))
             {
@@ -71,10 +52,8 @@ pub fn astNodeToTrie(
                 continue;
             }
 
-            // Process pattern nodes
             if (std.mem.eql(u8, node_kind, "pattern")) {
                 const pattern = try astToPattern(allocator, source, node);
-                // Append pattern to trie with no value (it's a top-level pattern)
                 _ = try trie.append(allocator, pattern, null);
             }
 
@@ -85,7 +64,200 @@ pub fn astNodeToTrie(
     return trie.*;
 }
 
-/// Parse a term node into a Node (recursive)
+/// Recursively parse a pattern node and its children
+pub fn astToPattern(
+    allocator: Allocator,
+    source: []const u8,
+    node: AstNode,
+) error{OutOfMemory}!Pattern {
+    const node_kind = node.kind();
+
+    print("Parsing node of type '{s}' with {} children\n", .{ node_kind, node.childCount() });
+
+    // Check if this is an operator node
+    const is_operator = std.mem.eql(u8, node_kind, "semicolon") or
+        std.mem.eql(u8, node_kind, "long_match") or
+        std.mem.eql(u8, node_kind, "long_arrow") or
+        std.mem.eql(u8, node_kind, "comma") or
+        std.mem.eql(u8, node_kind, "infix") or
+        std.mem.eql(u8, node_kind, "match") or
+        std.mem.eql(u8, node_kind, "arrow");
+
+    if (is_operator) {
+        return try parseOperatorNode(allocator, source, node, node_kind);
+    }
+
+    // For pattern nodes or _op nodes, we need to look at their single child
+    // since the grammar wraps everything in optional(_op)
+    if (std.mem.eql(u8, node_kind, "pattern") and node.childCount() == 1) {
+        var cursor = node.walk();
+        if (cursor.gotoFirstChild()) {
+            const child = cursor.node();
+            // Recurse into the single child
+            return try astToPattern(allocator, source, child);
+        }
+    }
+
+    // Handle non-operator nodes by flattening their children
+    var nodes = std.ArrayList(Node){};
+    errdefer {
+        for (nodes.items) |n| n.deinit(allocator);
+        nodes.deinit(allocator);
+    }
+
+    var cursor = node.walk();
+    if (cursor.gotoFirstChild()) {
+        while (true) {
+            const child = cursor.node();
+            const child_kind = child.kind();
+
+            // Skip comments
+            if (std.mem.eql(u8, child_kind, "comment")) {
+                if (!cursor.gotoNextSibling()) break;
+                continue;
+            }
+
+            // Parse the child
+            if (try parseTermNode(allocator, source, child)) |parsed_node| {
+                try nodes.append(allocator, parsed_node);
+            }
+
+            if (!cursor.gotoNextSibling()) break;
+        }
+    }
+
+    const node_slice = try nodes.toOwnedSlice(allocator);
+    var max_height: usize = 0;
+    for (node_slice) |n| {
+        const h = getNodeHeight(n);
+        if (h > max_height) max_height = h;
+    }
+
+    return .{ .root = node_slice, .height = max_height + 1 };
+}
+
+fn parseOperatorNode(
+    allocator: Allocator,
+    source: []const u8,
+    node: AstNode,
+    node_kind: []const u8,
+) error{OutOfMemory}!Pattern {
+    print("Parsing operator '{s}'\n", .{node_kind});
+
+    var nodes = std.ArrayList(Node){};
+    errdefer {
+        for (nodes.items) |n| n.deinit(allocator);
+        nodes.deinit(allocator);
+    }
+
+    var lhs_node: ?AstNode = null;
+    var rhs_node: ?AstNode = null;
+    var op_symbol: ?[]const u8 = null;
+
+    // Extract LHS, RHS, and operator symbol (for infix)
+    var cursor = node.walk();
+    if (cursor.gotoFirstChild()) {
+        while (true) {
+            const child = cursor.node();
+            const field_name = cursor.fieldName();
+
+            if (field_name) |fname| {
+                print("  Field '{s}': {s}\n", .{ fname, child.kind() });
+                if (std.mem.eql(u8, fname, "lhs")) {
+                    lhs_node = child;
+                } else if (std.mem.eql(u8, fname, "rhs")) {
+                    rhs_node = child;
+                } else if (std.mem.eql(u8, fname, "op")) {
+                    const start = child.startByte();
+                    const end = child.endByte();
+                    op_symbol = source[start..end];
+                }
+            }
+
+            if (!cursor.gotoNextSibling()) break;
+        }
+    }
+
+    // Distribute LHS into the array
+    if (lhs_node) |lhs| {
+        // Check if LHS is a terminal node (leaf)
+        if (isTerminalNode(lhs)) {
+            // Parse as a single node
+            if (try parseTermNode(allocator, source, lhs)) |lhs_node_parsed| {
+                try nodes.append(allocator, lhs_node_parsed);
+            }
+        } else {
+            // Parse as pattern and flatten
+            const lhs_pattern = try astToPattern(allocator, source, lhs);
+            for (lhs_pattern.root) |lhs_child| {
+                try nodes.append(allocator, try lhs_child.copy(allocator));
+            }
+        }
+    }
+
+    // Create RHS wrapper node
+    if (rhs_node) |rhs| {
+        // Check if RHS is a terminal node
+        const rhs_pattern = if (isTerminalNode(rhs)) blk: {
+            // Create a pattern with single node
+            var rhs_nodes = std.ArrayList(Node){};
+            if (try parseTermNode(allocator, source, rhs)) |rhs_node_parsed| {
+                try rhs_nodes.append(allocator, rhs_node_parsed);
+            }
+            const slice = try rhs_nodes.toOwnedSlice(allocator);
+            var max_h: usize = 0;
+            for (slice) |n| {
+                const h = getNodeHeight(n);
+                if (h > max_h) max_h = h;
+            }
+            break :blk Pattern{ .root = slice, .height = max_h + 1 };
+        } else try astToPattern(allocator, source, rhs);
+
+        // Determine the wrapper type based on operator
+        const wrapper_node = if (std.mem.eql(u8, node_kind, "semicolon"))
+            Node{ .list = rhs_pattern }
+        else if (std.mem.eql(u8, node_kind, "comma"))
+            Node{ .list = rhs_pattern }
+        else if (std.mem.eql(u8, node_kind, "long_match") or std.mem.eql(u8, node_kind, "match"))
+            Node{ .match = rhs_pattern }
+        else if (std.mem.eql(u8, node_kind, "long_arrow") or std.mem.eql(u8, node_kind, "arrow"))
+            Node{ .arrow = rhs_pattern }
+        else if (std.mem.eql(u8, node_kind, "infix")) blk: {
+            // For infix, include the operator symbol in the pattern
+            var infix_nodes = std.ArrayList(Node){};
+            errdefer {
+                for (infix_nodes.items) |n| n.deinit(allocator);
+                infix_nodes.deinit(allocator);
+            }
+            if (op_symbol) |sym| {
+                try infix_nodes.append(allocator, Node{ .key = sym });
+            }
+            for (rhs_pattern.root) |rhs_child| {
+                try infix_nodes.append(allocator, try rhs_child.copy(allocator));
+            }
+            const infix_slice = try infix_nodes.toOwnedSlice(allocator);
+            var max_h: usize = 0;
+            for (infix_slice) |n| {
+                const h = getNodeHeight(n);
+                if (h > max_h) max_h = h;
+            }
+            break :blk Node{ .infix = .{ .root = infix_slice, .height = max_h + 1 } };
+        } else unreachable;
+
+        try nodes.append(allocator, wrapper_node);
+    }
+
+    const node_slice = try nodes.toOwnedSlice(allocator);
+    var max_height: usize = 0;
+    for (node_slice) |n| {
+        const h = getNodeHeight(n);
+        if (h > max_height) max_height = h;
+    }
+
+    print("Operator result: {} nodes, height {}\n", .{ node_slice.len, max_height });
+    return .{ .root = node_slice, .height = max_height + 1 };
+}
+
 fn parseTermNode(
     allocator: Allocator,
     source: []const u8,
@@ -96,9 +268,7 @@ fn parseTermNode(
     const end_byte = node.endByte();
     const text = source[start_byte..end_byte];
 
-    // Ignore anonymous nodes (this info is stored in the enum type, like `arrow`)
-    if (!node.isNamed())
-        return null;
+    if (!node.isNamed()) return null;
 
     const NodeKind = enum {
         key,
@@ -106,83 +276,23 @@ fn parseTermNode(
         number,
         string,
         symbol,
-        pattern,
-        comma_expr,
-        semicolon_expr,
-        long_match,
-        long_arrow,
-        infix,
-        short_match,
-        short_arrow,
         nested_pattern,
         nested_trie,
+        quote,
     };
 
     const kind = std.meta.stringToEnum(NodeKind, node_kind) orelse {
-        // TODO: ignore literal nodes like '->' when parsing builtins and other rules that use literals
-        // return Node{ .key = text };
-        // TODO: when above is complete, add this back when not in release mode
-        return panic("Unhandled AST node type: {s}", .{node_kind});
+        // For operator nodes at term level, recurse
+        return Node{ .pattern = try astToPattern(allocator, source, node) };
     };
 
     return switch (kind) {
         .key, .number, .string, .symbol => Node{ .key = text },
         .variable => Node{ .variable = text },
-        .pattern => .{ .pattern = try astToPattern(allocator, source, node) },
-        .comma_expr => .{ .list = try astToPattern(allocator, source, node) },
-        .semicolon_expr => .{ .list = try astToPattern(allocator, source, node) },
-        .long_match => .{ .match = try astToPattern(allocator, source, node) },
-        .long_arrow => .{ .arrow = try astToPattern(allocator, source, node) },
-        .infix => .{ .infix = try astToPattern(allocator, source, node) },
-        .short_match => .{ .match = try astToPattern(allocator, source, node) },
-        .short_arrow => .{ .arrow = try astToPattern(allocator, source, node) },
-        .nested_pattern => .{ .pattern = try astToPattern(allocator, source, node) },
-        .nested_trie => .{ .trie = @panic("unimplemented\n") },
+        .nested_pattern => Node{ .pattern = try astToPattern(allocator, source, node) },
+        .nested_trie => Node{ .trie = @panic("nested_trie unimplemented") },
+        .quote => Node{ .pattern = try astToPattern(allocator, source, node) },
     };
-}
-
-/// Recursively parse a pattern node and its children
-pub fn astToPattern(
-    allocator: Allocator,
-    source: []const u8,
-    node: AstNode,
-) error{OutOfMemory}!Pattern {
-    print("Parsing pattern node of type '{s}' with {} children\n", .{ node.kind(), node.childCount() });
-    var nodes = std.ArrayList(Node){};
-    errdefer {
-        for (nodes.items) |n| {
-            n.deinit(allocator);
-        }
-        nodes.deinit(allocator);
-    }
-    var cursor = node.walk();
-    var has_next = cursor.gotoFirstChild();
-    while (has_next) {
-        while (has_next) : (has_next = cursor.gotoNextSibling()) {
-            const child = cursor.node();
-            const child_type = child.kind();
-            // Skip comments
-            if (std.mem.eql(u8, child_type, "comment"))
-                continue;
-            // Recursively parse each child
-            const trie_node = try parseTermNode(allocator, source, child) orelse {
-                has_next = cursor.gotoFirstChild();
-                continue;
-            };
-            try nodes.append(allocator, trie_node);
-        }
-        has_next = cursor.gotoParent();
-        has_next = cursor.gotoNextSibling();
-    }
-    const node_slice = try nodes.toOwnedSlice(allocator);
-    // Calculate max height
-    var max_height: usize = 0;
-    for (node_slice) |n| {
-        const h = getNodeHeight(n);
-        if (h > max_height)
-            max_height = h;
-    }
-    return .{ .root = node_slice, .height = max_height + 1 };
 }
 
 fn getNodeHeight(node: Node) usize {
@@ -191,4 +301,13 @@ fn getNodeHeight(node: Node) usize {
         .trie => 1,
         else => 0,
     };
+}
+
+fn isTerminalNode(node: AstNode) bool {
+    const node_kind = node.kind();
+    return std.mem.eql(u8, node_kind, "key") or
+        std.mem.eql(u8, node_kind, "variable") or
+        std.mem.eql(u8, node_kind, "number") or
+        std.mem.eql(u8, node_kind, "string") or
+        std.mem.eql(u8, node_kind, "symbol");
 }

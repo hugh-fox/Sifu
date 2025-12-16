@@ -1069,6 +1069,7 @@ pub const Trie = struct {
                 //     var_result.value_ptr.* = node;
                 // }
             },
+            .infix => {},
             .trie => @panic("unimplemented"), // |trie| {},
             else => @panic("unimplemented"),
         }
