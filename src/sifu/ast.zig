@@ -89,17 +89,10 @@ pub fn astToPattern(
 
     // For terms, we need to look at their single child
     // since the grammar wraps everything in optional(_op)
-    if (mem.eql(u8, node_kind, "terms") and node.childCount() == 1) {
-        print("  Unwrapping nested_pattern\n", .{});
-        var cursor = node.walk();
-        if (cursor.gotoFirstChild()) {
-            if (!mem.eql(u8, cursor.node().kind(), "nested_pattern")) {
-                _ = cursor.gotoParent();
-            } else {
-                const child = cursor.node();
-                // Recurse into the single child
-                return try astToPattern(allocator, source, child);
-            }
+    if ((mem.eql(u8, node_kind, "nested_pattern"))) {
+        if (node.childByFieldName("inner")) |child| {
+            print("  Unwrapping nested_pattern, child kind {s}\n", .{child.kind()});
+            return try astToPattern(allocator, source, child);
         }
     }
 

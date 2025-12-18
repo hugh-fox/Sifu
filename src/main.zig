@@ -92,8 +92,11 @@ fn replStep(
         try node.format(streams.err);
         print("\n", .{});
     }
-    const pattern = astToPattern(allocator, buffer.written(), ast_ptr.rootNode()) catch |e|
-        panic("Error parsing stdin: {}", .{e});
+    const pattern = if (ast_ptr.rootNode().child(0)) |pattern_root|
+        astToPattern(allocator, buffer.written(), pattern_root) catch |e|
+            panic("Error parsing stdin: {}", .{e})
+    else
+        Pattern{ .root = &.{}, .height = 0 };
     // defer pattern.deinit(allocator);
 
     // if (comptime detect_leaks) try streams.err.print(
@@ -171,18 +174,20 @@ fn replStep(
 
         var buff = ArrayList(Node){};
         defer buff.deinit(allocator);
-        const result = try trie.evaluateSlice(allocator, pattern, &buff);
-        // const eval = try trie.evaluateComplete(allocator, 0, pattern);
+        // const result = try trie.evaluateSlice(allocator, pattern, &buff);
+        const eval = try trie.evaluateComplete(allocator, 0, pattern);
         // defer if (comptime detect_leaks)
         //     eval.deinit(allocator)
         // else
         //     eval.deinit(allocator); // TODO: free an arena instead
 
-        // if (eval.value) |result| {
-        // try streams.out.print("Eval at {} of length {}: ", .{ eval.index, eval.len });
+        if (eval.value) |_| {
+            try streams.out.print("Eval at {} of length {}: ", .{ eval.index, eval.len });
+        } else try streams.out.print("No match.\n", .{});
+        const result = eval.value orelse return;
+
         try result.writeIndent(streams.out, 0);
         try streams.out.writeByte('\n');
-        // } else try streams.out.print("No match.\n", .{});
     }
 
     try trie.writeCanonical(streams.out);
