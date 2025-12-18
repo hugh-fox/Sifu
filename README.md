@@ -13,6 +13,8 @@ reason about its effects. This also provides the possibility of proving
 arbitrary things about programs for safety-critical software, as the halting
 problem doesn't apply.
 
+The parser is implemented as a standalone zig module here [tree-sitter-sifu](https://github.com/hugh-fox/Tree-Sitter-Sifu).
+
 ---
 
 ### Main Ideas

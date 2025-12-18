@@ -106,7 +106,7 @@ fn replStep(
     // streams.out.print("replStep\n", .{}) catch unreachable;
     // streams.out.flush() catch unreachable;
     print(
-        "Parsed pattern {} high and {} wide, of types: ",
+        "Converted pattern {} high and {} wide, of types: ",
         .{ pattern.height, pattern.root.len },
     );
     for (root) |app| {
@@ -171,15 +171,18 @@ fn replStep(
 
         var buff = ArrayList(Node){};
         defer buff.deinit(allocator);
-        const eval = try trie.evaluateSlice(allocator, pattern, &buff);
-        defer if (comptime detect_leaks)
-            eval.deinit(allocator)
-        else
-            eval.deinit(allocator); // TODO: free an arena instead
+        const result = try trie.evaluateSlice(allocator, pattern, &buff);
+        // const eval = try trie.evaluateComplete(allocator, 0, pattern);
+        // defer if (comptime detect_leaks)
+        //     eval.deinit(allocator)
+        // else
+        //     eval.deinit(allocator); // TODO: free an arena instead
 
-        try streams.out.print("Eval: ", .{});
-        try eval.writeIndent(streams.out, 0);
+        // if (eval.value) |result| {
+        // try streams.out.print("Eval at {} of length {}: ", .{ eval.index, eval.len });
+        try result.writeIndent(streams.out, 0);
         try streams.out.writeByte('\n');
+        // } else try streams.out.print("No match.\n", .{});
     }
 
     try trie.writeCanonical(streams.out);

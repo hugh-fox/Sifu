@@ -14,7 +14,7 @@ Xor (x : Bool, y : Bool) -> Not (x == y)
 # are needed around the branches' bodies so that arguments don't get mixed up
 # with our Then/Else words. The `*` sigil means variadic variables that bind to
 # any number of apps.
-# Note: Parenthesis are exclusively for structure, not precedence (they are
+# Note: Parentheses are exclusively for structure, not precedence (they are
 # never implicitly elided or ignored).
 If (bool : Bool) Then (*true) Else (*false) -> bool : {
     True  -> *true

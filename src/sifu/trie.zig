@@ -345,40 +345,11 @@ pub const Pattern = struct {
     }
 };
 
-// const Token = @import("syntax.zig").Token;
-// test "simple ast to pattern" {
-//     const term = Token{
-//         .type = .Name,
-//         .lit = "My-Token",
-//         .context = 0,
-//     };
-//     _ = term;
-//     const ast = Pattern.Node{
-//         .key = .{
-//             .type = .Name,
-//             .lit = "Some-Other-Token",
-//             .context = 20,
-//         },
-//     };
-//     _ = ast;
-//     // _ = Pattern.ofTokenType(term, ast);
-// }
-
-// test "Token equality" {
-//     const t1 = Token{
-//         .type = .Name,
-//         .lit = "Asdf",
-//         .context = 0,
-//     };
-//     const t2 = Token{
-//         .type = .Name,
-//         .lit = "Asdf",
-//         .context = 1,
-//     };
-
-//     try testing.expect(t1.eql(t2));
-//     try testing.expectEqual(t1.hash(), t2.hash());
-// }
+/// A key node and its next term pointer for a trie, where only the
+/// length of slice types are stored for keys (instead of pointers).
+/// The term/next is a reference to a key/value in the HashMaps,
+/// which owns both.
+const Entry = HashMap.Entry;
 
 /// This maps to branches, but the type is Branch instead of just *Self to
 /// retrieve keys if necessary. The Self pointer references another field in
@@ -388,14 +359,6 @@ pub const Pattern = struct {
 /// in the trie for a given key. Branches may or may not contain values in their
 /// ValueMap, for example in `Foo Bar -> 123`, the branch at `Foo` would have an
 /// index to the key `Bar` and a leaf trie containing the value `123`.
-// const IndexMap = std.AutoArrayHashMapUnmanaged(usize, Branch);
-
-/// A key node and its next term pointer for a trie, where only the
-/// length of slice types are stored for keys (instead of pointers).
-/// The term/next is a reference to a key/value in the HashMaps,
-/// which owns both.
-const Entry = HashMap.Entry;
-
 const BranchNode = struct {
     // The string key and child trie entry from the current map.
     entry: Entry,
@@ -766,10 +729,18 @@ pub const Trie = struct {
             .variable,
             .var_pattern,
             => |variable| try trie.getOrPutVar(allocator, index, variable),
-            .trie => |sub_pat| {
-                const entry = try trie.getOrPutKey(allocator, index, "{");
-                _ = entry;
-                _ = sub_pat;
+            .pattern => |sub_pat| blk: {
+                var next = try trie.getOrPutKey(allocator, index, "(");
+                next = try next.ensurePath(allocator, index, sub_pat);
+                next = try next.getOrPutKey(allocator, index, ")");
+                break :blk next;
+            },
+            .trie => |sub_trie| {
+                _ = sub_trie;
+                // var next = try trie.getOrPutKey(allocator, index, "{");
+                // next = try next.ensurePath(allocator, index, sub_trie);
+                // next = try next.getOrPutKey(allocator, index, "}");
+                // break :blk next;
                 @panic("unimplemented\n");
             },
             // Pattern trie's values will always be tries too, which will

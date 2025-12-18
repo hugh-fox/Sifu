@@ -45,14 +45,14 @@ pub fn astNodeToTrie(
             const node = child_cursor.node();
             const node_kind = node.kind();
 
-            if (std.mem.eql(u8, node_kind, "\n") or
-                std.mem.eql(u8, node_kind, "comment"))
+            if (mem.eql(u8, node_kind, "\n") or
+                mem.eql(u8, node_kind, "comment"))
             {
                 if (!child_cursor.gotoNextSibling()) break;
                 continue;
             }
 
-            if (std.mem.eql(u8, node_kind, "pattern")) {
+            if (mem.eql(u8, node_kind, "pattern")) {
                 const pattern = try astToPattern(allocator, source, node);
                 _ = try trie.append(allocator, pattern, null);
             }
@@ -75,26 +75,31 @@ pub fn astToPattern(
     print("Parsing node of type '{s}' with {} children\n", .{ node_kind, node.childCount() });
 
     // Check if this is an operator node
-    const is_operator = std.mem.eql(u8, node_kind, "semicolon") or
-        std.mem.eql(u8, node_kind, "long_match") or
-        std.mem.eql(u8, node_kind, "long_arrow") or
-        std.mem.eql(u8, node_kind, "comma") or
-        std.mem.eql(u8, node_kind, "infix") or
-        std.mem.eql(u8, node_kind, "match") or
-        std.mem.eql(u8, node_kind, "arrow");
+    const is_operator = mem.eql(u8, node_kind, "semicolon") or
+        mem.eql(u8, node_kind, "long_match") or
+        mem.eql(u8, node_kind, "long_arrow") or
+        mem.eql(u8, node_kind, "comma") or
+        mem.eql(u8, node_kind, "infix") or
+        mem.eql(u8, node_kind, "match") or
+        mem.eql(u8, node_kind, "arrow");
 
     if (is_operator) {
         return try parseOperatorNode(allocator, source, node, node_kind);
     }
 
-    // For pattern nodes or _op nodes, we need to look at their single child
+    // For terms, we need to look at their single child
     // since the grammar wraps everything in optional(_op)
-    if (std.mem.eql(u8, node_kind, "pattern") and node.childCount() == 1) {
+    if (mem.eql(u8, node_kind, "terms") and node.childCount() == 1) {
+        print("  Unwrapping nested_pattern\n", .{});
         var cursor = node.walk();
         if (cursor.gotoFirstChild()) {
-            const child = cursor.node();
-            // Recurse into the single child
-            return try astToPattern(allocator, source, child);
+            if (!mem.eql(u8, cursor.node().kind(), "nested_pattern")) {
+                _ = cursor.gotoParent();
+            } else {
+                const child = cursor.node();
+                // Recurse into the single child
+                return try astToPattern(allocator, source, child);
+            }
         }
     }
 
@@ -112,7 +117,7 @@ pub fn astToPattern(
             const child_kind = child.kind();
 
             // Skip comments
-            if (std.mem.eql(u8, child_kind, "comment")) {
+            if (mem.eql(u8, child_kind, "comment")) {
                 if (!cursor.gotoNextSibling()) break;
                 continue;
             }
@@ -163,11 +168,11 @@ fn parseOperatorNode(
 
             if (field_name) |fname| {
                 print("  Field '{s}': {s}\n", .{ fname, child.kind() });
-                if (std.mem.eql(u8, fname, "lhs")) {
+                if (mem.eql(u8, fname, "lhs")) {
                     lhs_node = child;
-                } else if (std.mem.eql(u8, fname, "rhs")) {
+                } else if (mem.eql(u8, fname, "rhs")) {
                     rhs_node = child;
-                } else if (std.mem.eql(u8, fname, "op")) {
+                } else if (mem.eql(u8, fname, "op")) {
                     const start = child.startByte();
                     const end = child.endByte();
                     op_symbol = source[start..end];
@@ -180,72 +185,24 @@ fn parseOperatorNode(
 
     // Distribute LHS into the array
     if (lhs_node) |lhs| {
-        // Check if LHS is a terminal node (leaf)
-        if (isTerminalNode(lhs)) {
-            // Parse as a single node
-            if (try parseTermNode(allocator, source, lhs)) |lhs_node_parsed| {
-                try nodes.append(allocator, lhs_node_parsed);
-            }
-        } else {
-            // Parse as pattern and flatten
-            const lhs_pattern = try astToPattern(allocator, source, lhs);
-            for (lhs_pattern.root) |lhs_child| {
-                try nodes.append(allocator, try lhs_child.copy(allocator));
-            }
+        const lhs_pattern = try astToPattern(allocator, source, lhs);
+        for (lhs_pattern.root) |lhs_child| {
+            try nodes.append(allocator, try lhs_child.copy(allocator));
         }
     }
 
     // Create RHS wrapper node
-    if (rhs_node) |rhs| {
-        // Check if RHS is a terminal node
-        const rhs_pattern = if (isTerminalNode(rhs)) blk: {
-            // Create a pattern with single node
-            var rhs_nodes = std.ArrayList(Node){};
-            if (try parseTermNode(allocator, source, rhs)) |rhs_node_parsed| {
-                try rhs_nodes.append(allocator, rhs_node_parsed);
-            }
-            const slice = try rhs_nodes.toOwnedSlice(allocator);
-            var max_h: usize = 0;
-            for (slice) |n| {
-                const h = getNodeHeight(n);
-                if (h > max_h) max_h = h;
-            }
-            break :blk Pattern{ .root = slice, .height = max_h + 1 };
-        } else try astToPattern(allocator, source, rhs);
+    const rhs_pattern = if (rhs_node) |rhs|
+        try astToPattern(allocator, source, rhs)
+    else
+        Pattern{ .root = &[_]Node{}, .height = 0 };
 
-        // Determine the wrapper type based on operator
-        const wrapper_node = if (std.mem.eql(u8, node_kind, "semicolon"))
-            Node{ .list = rhs_pattern }
-        else if (std.mem.eql(u8, node_kind, "comma"))
-            Node{ .list = rhs_pattern }
-        else if (std.mem.eql(u8, node_kind, "long_match") or std.mem.eql(u8, node_kind, "match"))
-            Node{ .match = rhs_pattern }
-        else if (std.mem.eql(u8, node_kind, "long_arrow") or std.mem.eql(u8, node_kind, "arrow"))
-            Node{ .arrow = rhs_pattern }
-        else if (std.mem.eql(u8, node_kind, "infix")) blk: {
-            // For infix, include the operator symbol in the pattern
-            var infix_nodes = std.ArrayList(Node){};
-            errdefer {
-                for (infix_nodes.items) |n| n.deinit(allocator);
-                infix_nodes.deinit(allocator);
-            }
-            if (op_symbol) |sym| {
-                try infix_nodes.append(allocator, Node{ .key = sym });
-            }
-            for (rhs_pattern.root) |rhs_child| {
-                try infix_nodes.append(allocator, try rhs_child.copy(allocator));
-            }
-            const infix_slice = try infix_nodes.toOwnedSlice(allocator);
-            var max_h: usize = 0;
-            for (infix_slice) |n| {
-                const h = getNodeHeight(n);
-                if (h > max_h) max_h = h;
-            }
-            break :blk Node{ .infix = .{ .root = infix_slice, .height = max_h + 1 } };
-        } else unreachable;
+    // Determine the wrapper type based on operator
+    const wrapper_node = convertRHS(allocator, node_kind, op_symbol, rhs_pattern) catch |e| {
+        panic("Error converting RHS for operator '{s}': {}", .{ node_kind, e });
+    };
 
-        try nodes.append(allocator, wrapper_node);
-    }
+    try nodes.append(allocator, wrapper_node);
 
     const node_slice = try nodes.toOwnedSlice(allocator);
     var max_height: usize = 0;
@@ -303,11 +260,41 @@ fn getNodeHeight(node: Node) usize {
     };
 }
 
-fn isTerminalNode(node: AstNode) bool {
-    const node_kind = node.kind();
-    return std.mem.eql(u8, node_kind, "key") or
-        std.mem.eql(u8, node_kind, "variable") or
-        std.mem.eql(u8, node_kind, "number") or
-        std.mem.eql(u8, node_kind, "string") or
-        std.mem.eql(u8, node_kind, "symbol");
+fn convertRHS(
+    allocator: Allocator,
+    node_kind: []const u8,
+    op_symbol: ?[]const u8,
+    rhs_pattern: Pattern,
+) !Node {
+    return if (mem.eql(u8, node_kind, "terms"))
+        Node{ .pattern = rhs_pattern }
+    else if (mem.eql(u8, node_kind, "semicolon"))
+        Node{ .list = rhs_pattern }
+    else if (mem.eql(u8, node_kind, "comma"))
+        Node{ .list = rhs_pattern }
+    else if (mem.eql(u8, node_kind, "long_match") or mem.eql(u8, node_kind, "match"))
+        Node{ .match = rhs_pattern }
+    else if (mem.eql(u8, node_kind, "long_arrow") or mem.eql(u8, node_kind, "arrow"))
+        Node{ .arrow = rhs_pattern }
+    else if (mem.eql(u8, node_kind, "infix")) blk: {
+        // For infix, include the operator symbol in the pattern
+        var infix_nodes = std.ArrayList(Node){};
+        errdefer {
+            for (infix_nodes.items) |n| n.deinit(allocator);
+            infix_nodes.deinit(allocator);
+        }
+        if (op_symbol) |sym| {
+            try infix_nodes.append(allocator, Node{ .key = sym });
+        }
+        for (rhs_pattern.root) |rhs_child| {
+            try infix_nodes.append(allocator, try rhs_child.copy(allocator));
+        }
+        const infix_slice = try infix_nodes.toOwnedSlice(allocator);
+        var max_h: usize = 0;
+        for (infix_slice) |n| {
+            const h = getNodeHeight(n);
+            if (h > max_h) max_h = h;
+        }
+        break :blk Node{ .infix = .{ .root = infix_slice, .height = max_h + 1 } };
+    } else Node{ .pattern = .{ .root = &[_]Node{}, .height = 0 } };
 }
