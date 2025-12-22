@@ -369,7 +369,7 @@ const BranchNode = struct {
 
     pub fn next(branch_node: BranchNode) IndexBranch {
         return branch_node.entry.value_ptr.*
-            .value.branches.items[branch_node.next_index];
+            .branches.items[branch_node.next_index];
     }
 };
 
@@ -387,6 +387,23 @@ const Branch = union(enum) {
             .value => null,
         };
     }
+
+    pub fn next(self: Branch) ?*const Trie {
+        switch (self) {
+            .key => |branch_node| {
+                return branch_node.entry.value_ptr;
+            },
+            .variable => |branch_node| {
+                _ = branch_node;
+                @panic("unimplemented"); // bind var
+                // return branch_node.entry.value_ptr;
+            },
+            .value => |value| {
+                _ = value;
+                return null;
+            },
+        }
+    }
 };
 
 const IndexBranch = struct {
@@ -396,35 +413,6 @@ const IndexBranch = struct {
 
 pub const BranchList = ArrayList(IndexBranch);
 pub const IndexList = ArrayList(usize);
-
-const IndexedValues = struct {
-    branches: BranchList = .{},
-    var_cache: IndexList = .{},
-    value_cache: IndexList = .{},
-
-    pub fn deinit(self: *IndexedValues, allocator: Allocator) void {
-        self.branches.deinit(allocator);
-        self.var_cache.deinit(allocator);
-        self.value_cache.deinit(allocator);
-    }
-
-    pub fn copy(self: IndexedValues, allocator: Allocator) !IndexedValues {
-        _ = allocator; // autofix
-        var result = IndexedValues{};
-        result = result;
-        // TODO Deep copy the new pointers to the new copy
-        for (self.branches.items) |branch| {
-            _ = branch; // autofix
-            // TODO: Insert a borrowed pointer to the new key copy.
-            // try result.value.append(
-            //     allocator,
-            //     Branch{ .index = index, .entry = entry },
-            // );
-        }
-        @panic("unimplemented");
-        // return result;
-    }
-};
 
 /// For directing evaluations to completion. Initially, lower bound begins
 /// at 0, for the upper bound, the length of the pattern (inclusive/exclusive
@@ -450,7 +438,9 @@ pub const Trie = struct {
     pub const Self = @This();
 
     map: HashMap = .{},
-    value: IndexedValues = .{},
+    branches: BranchList = .{},
+    var_cache: IndexList = .{},
+    value_cache: IndexList = .{},
     height: usize = 0, // TODO: implement height caching
 
     /// The results of matching a trie exactly (vars are matched literally
@@ -469,10 +459,10 @@ pub const Trie = struct {
     /// Returns null if the index doesn't exist in the trie.
     pub fn getIndexOrNull(self: Self, index: usize) ?Pattern {
         var current = self;
-        while (current.value.get(index)) |next| {
+        while (current.get(index)) |next| {
             current = next.value_ptr.*;
         }
-        return current.value.get(index);
+        return current.get(index);
     }
 
     /// Rebuilds the key for a given index using an allocator for the
@@ -503,7 +493,7 @@ pub const Trie = struct {
                 try entry.value_ptr.*.copy(allocator),
             );
 
-        result.value = try self.value.copy(allocator);
+        result = try self.copy(allocator);
         @panic("todo: copy all fields");
         // return result;
     }
@@ -528,11 +518,14 @@ pub const Trie = struct {
     /// TODO: check frees properly for owned and borrowed managers
     pub fn deinit(self: *Self, allocator: Allocator) void {
         defer self.map.deinit(allocator);
+        self.branches.deinit(allocator);
+        self.var_cache.deinit(allocator);
+        self.value_cache.deinit(allocator);
         var iter = self.map.iterator();
         while (iter.next()) |entry| {
             entry.value_ptr.*.deinit(allocator);
         }
-        defer self.value.deinit(allocator);
+        defer self.deinit(allocator);
     }
 
     pub fn hash(self: Self) u32 {
@@ -548,11 +541,11 @@ pub const Trie = struct {
             entry.value_ptr.*.hasherUpdate(hasher);
         }
         // No need to hash indices, only vars and values
-        var vars_iter = self.values.vars.iterator();
+        var vars_iter = self.valuess.vars.iterator();
         while (vars_iter.next()) |*entry| {
             hasher.update(entry.value_ptr.*);
         }
-        var values_iter = self.values.values.iterator();
+        var values_iter = self.valuess.values.iterator();
         // TODO: recurse
         while (values_iter.next()) |*entry| {
             entry.value_ptr.hasherUpdate(hasher);
@@ -569,9 +562,9 @@ pub const Trie = struct {
     /// are assumed to be in debruijn form already.
     pub fn eql(self: Self, other: Self) bool {
         if (self.map.count() != other.map.count() or
-            self.value.entries.len !=
+            self.entries.len !=
                 other.value.entries.len or
-            self.value.entries.len != other.value.entries.len)
+            self.entries.len != other.value.entries.len)
             return false;
         var map_iter = self.map.iterator();
         var other_map_iter = other.map.iterator();
@@ -582,7 +575,7 @@ pub const Trie = struct {
                 entry.value_ptr != other_entry.value_ptr)
                 return false;
         }
-        var value_iter = self.value.iterator();
+        var value_iter = self.iterator();
         var other_value_iter = other.value.iterator();
         while (value_iter.next()) |entry| {
             const other_entry = other_value_iter.next() orelse
@@ -623,7 +616,7 @@ pub const Trie = struct {
     ) ?Self {
         return switch (node) {
             .key => |key| trie.map.get(key),
-            .variable => |variable| trie.value.vars.get(variable),
+            .variable => |variable| trie.vars.get(variable),
             .pattern => |sub_pattern| blk: {
                 var current = trie.map.get("(") orelse
                     break :blk null;
@@ -673,12 +666,13 @@ pub const Trie = struct {
     ) !*Self {
         const entry = try trie.map
             .getOrPutValue(allocator, key, Self{});
-        try trie.value.branches.append(
+        const next = entry.value_ptr;
+        try trie.branches.append(
             allocator,
             IndexBranch{ index, .{
                 .key = .{
                     .entry = entry,
-                    .next_index = entry.value_ptr.value.branches.items.len,
+                    .next_index = next.branches.items.len,
                 },
             } },
         );
@@ -691,26 +685,19 @@ pub const Trie = struct {
         index: usize,
         variable: []const u8,
     ) !*Self {
-        const maybe_entry = trie.map.getEntry(variable);
-        const entry = maybe_entry orelse
-            @panic("unimplemented");
-        if (maybe_entry) |_| {} else {
-            entry.value_ptr.* = Self{};
-            try trie.value.var_cache.append(
-                allocator,
-                trie.value.branches.items.len,
-            );
-        }
-        try trie.value.branches.append(
+        const entry = try trie.map
+            .getOrPutValue(allocator, variable, Self{});
+        const next = entry.value_ptr;
+        try trie.branches.append(
             allocator,
-            IndexBranch{
-                index, .{ .variable = .{
+            IndexBranch{ index, .{
+                .variable = .{
                     .entry = entry,
-                    .next_index = @panic("unimplemented"),
-                } },
-            },
+                    .next_index = next.branches.items.len,
+                },
+            } },
         );
-        return entry.value_ptr;
+        return next;
     }
 
     /// Follows or creates a path as necessary in the trie and
@@ -730,7 +717,8 @@ pub const Trie = struct {
             .var_pattern,
             => |variable| try trie.getOrPutVar(allocator, index, variable),
             .pattern => |sub_pat| blk: {
-                var next = try trie.getOrPutKey(allocator, index, "(");
+                var next = trie;
+                next = try next.getOrPutKey(allocator, index, "(");
                 next = try next.ensurePath(allocator, index, sub_pat);
                 next = try next.getOrPutKey(allocator, index, ")");
                 break :blk next;
@@ -817,15 +805,15 @@ pub const Trie = struct {
         // If there isn't a value, use the key as the value instead
         const value = optional_value orelse
             try key.copy(allocator);
-        try current.value.value_cache.append(
+        try current.value_cache.append(
             allocator,
-            current.value.branches.items.len,
+            current.branches.items.len,
         );
-        try current.value.branches.append(
+        try current.branches.append(
             allocator,
             IndexBranch{ index, .{ .value = value } },
         );
-        print("Value cache: {any}\n", .{current.value.value_cache.items});
+        print("Value cache: {any}\n", .{current.value_cache.items});
         return current;
     }
 
@@ -833,6 +821,7 @@ pub const Trie = struct {
     const Match = struct {
         key: Pattern = .{}, // The pattern that was attempted to match
         value: ?Pattern = null,
+        node_ptr: *const Trie,
         index: usize = 0,
         len: usize = 0, // For partial matches
         bindings: VarBindings = .{}, // Bound variables
@@ -853,7 +842,7 @@ pub const Trie = struct {
 
     // Find the index of the next branch starting from bound.
     fn findNextByIndex(self: Self, bound: usize) ?usize {
-        const branches = self.value.branches;
+        const branches = self.branches;
 
         // To compare by bound with other branches, it must be put into a Branch
         // first. Its kind can be undefined since it will never be returned.
@@ -882,7 +871,7 @@ pub const Trie = struct {
     }
     fn findNextBranch(self: Self, bound: usize) ?IndexBranch {
         return if (self.findNextByIndex(bound)) |index|
-            self.value.branches.items[index]
+            self.branches.items[index]
         else
             null;
     }
@@ -896,10 +885,10 @@ pub const Trie = struct {
         const cache_index = sort.lowerBound(
             usize,
             cache,
-            .{ branches_bound, self.value.branches.items },
+            .{ branches_bound, self.branches.items },
             struct {
                 fn lessThan(
-                    ctx: @TypeOf(.{ branches_bound, self.value.branches.items }),
+                    ctx: @TypeOf(.{ branches_bound, self.branches.items }),
                     cmp_index: usize,
                 ) Order {
                     const bound, const branches = ctx;
@@ -911,22 +900,25 @@ pub const Trie = struct {
         );
         // No index found if lowerBound returned the length of branches
         return if (cache_index < cache.len)
-            self.value.branches.items[cache[cache_index]]
+            self.branches.items[cache[cache_index]]
         else
             null;
     }
+
+    /// Finds the next minimum value at this node by index.
     fn findNextValue(self: Self, bound: usize) ?IndexBranch {
         const branches_bound = self.findNextByIndex(bound) orelse
             return null;
-        return self.findNextByCache(branches_bound, self.value.value_cache.items);
+        return self.findNextByCache(branches_bound, self.value_cache.items);
     }
 
+    /// Finds the next minimum variable at this node by index.
     fn findNextVar(self: Self, bound: usize) ?IndexBranch {
-        return self.findNextByCache(bound, self.value.var_cache.items);
+        return self.findNextByCache(bound, self.var_cache.items);
     }
 
     // Finds the next minimum variable or value.
-    fn findCandidate(self: Self, bound: usize) ?IndexBranch {
+    fn findNext(self: Self, bound: usize) ?IndexBranch {
         // Find the next var and value efficiently using their caches
         const value_branch = self.findNextValue(bound) orelse
             return self.findNextVar(bound);
@@ -968,7 +960,8 @@ pub const Trie = struct {
     /// owns the trie returned, but it is a shallow copy and thus cannot be
     /// freed with destroy/deinit without freeing references in self.
     fn matchTerm(
-        self: Self,
+        self: *const Self,
+        allocator: Allocator,
         bound: usize,
         node: Node,
     ) Allocator.Error!?IndexBranch {
@@ -991,9 +984,9 @@ pub const Trie = struct {
                 // TODO: check if this pointer is really memory safe
                 const key_candidate_index = key_entry.value_ptr
                     .findNextByIndex(bound) orelse
-                    return self.findCandidate(bound);
+                    return self.findNext(bound);
                 const key_index, _ =
-                    self.value.branches.items[key_candidate_index];
+                    self.branches.items[key_candidate_index];
                 // print("Finding candidate orelse next index\n", .{});
                 const key_branch = IndexBranch{
                     key_index, .{
@@ -1003,7 +996,7 @@ pub const Trie = struct {
                         },
                     },
                 };
-                const candidate = self.findCandidate(bound) orelse
+                const candidate = self.findNext(bound) orelse
                     return key_branch;
                 const candidate_index, _ = candidate;
                 print(
@@ -1024,7 +1017,7 @@ pub const Trie = struct {
                 // First try any available branches, then let `match` try
                 // values.
                 print("returning find candidate\n", .{});
-                return self.findCandidate(bound);
+                return self.findNext(bound);
             },
             .variable, .var_pattern => {
                 // // If a previous var was bound, check that the
@@ -1040,7 +1033,23 @@ pub const Trie = struct {
                 //     var_result.value_ptr.* = node;
                 // }
             },
-            .infix => {},
+            .infix => @panic("unimplemented"), // |infix| {},
+            .pattern => |pattern| {
+                print("sub-pattern\n", .{});
+                // Follow the sub-pattern in the trie
+                var current = self;
+                var index, var branch = try self.matchTerm(allocator, bound, Node{ .key = "(" }) orelse
+                    return null;
+                current = branch.next() orelse
+                    return null;
+                print("sub-pattern match\n", .{});
+                current = (try current.match(allocator, index, pattern)).node_ptr;
+                index, branch = try current.matchTerm(allocator, index, Node{ .key = ")" }) orelse
+                    return .{ index, branch };
+                current = branch.next() orelse
+                    return null;
+                print("sub-pattern matched\n", .{});
+            },
             .trie => @panic("unimplemented"), // |trie| {},
             else => @panic("unimplemented"),
         }
@@ -1057,38 +1066,38 @@ pub const Trie = struct {
     /// 'A B' are in the trie at indices 0 and 1 respectively, matching 'A B'
     /// with bound 0 will match at 0 partially instead of 'A B' at 1 fully.
     pub fn match(
-        self: Self,
+        self: *const Self,
         allocator: Allocator,
         bound: usize,
         pattern: Pattern,
     ) Allocator.Error!Match {
         var current = self;
         var index: usize = bound;
-        var result = Match{};
-        _ = allocator;
+        var result = Match{ .node_ptr = self };
         while (result.len < pattern.root.len) : (result.len += 1) {
             const node = pattern.root[result.len];
             print("Find next by index from bound: {}\n", .{index});
             print("Branch list: [ ", .{});
-            for (current.value.branches.items) |index_branch| {
+            for (current.branches.items) |index_branch| {
                 print("{} ", .{index_branch[0]});
             }
             print("]\n", .{});
-            index, const branch = try current.matchTerm(index, node) orelse
+            index, const branch = try current.matchTerm(allocator, index, node) orelse
                 break;
             print("at index {}, ", .{index});
             switch (branch) {
                 .key => |branch_node| {
-                    current = branch_node.entry.value_ptr.*;
+                    current = branch_node.entry.value_ptr;
                 },
                 .variable => |branch_node| {
-                    current = branch_node.entry.value_ptr.*;
+                    current = branch_node.entry.value_ptr;
                     @panic("unimplemented"); // bind var
                 },
                 .value => |value| {
-                    print("Value reached, breaking\n", .{});
+                    print("Value reached, continuing\n", .{});
                     result.value = value;
-                    break;
+                    @panic("need to backtrack instead of continue here");
+                    // continue;
                 },
             }
         }
@@ -1101,6 +1110,7 @@ pub const Trie = struct {
             "No match in range [{}, {}], after {} nodes followed\n",
             .{ bound, index, result.len },
         );
+        result.node_ptr = current;
         return result;
     }
 
@@ -1220,7 +1230,7 @@ pub const Trie = struct {
     ) Allocator.Error!Eval {
         var buffer = ArrayList(Node){};
         defer buffer.deinit(allocator); // shouldn't be necessary, but just in case
-        var matched: Match = .{};
+        var matched: Match = .{ .node_ptr = self };
         var index: usize = bound;
         var current: Pattern = pattern;
         while (index < self.size()) : (matched.deinit(allocator)) {
@@ -1357,7 +1367,7 @@ pub const Trie = struct {
     // }
 
     pub fn size(self: Self) usize {
-        return self.value.branches.items.len;
+        return self.branches.items.len;
     }
 
     /// Caller owns the slice, but not the patterns in it.
@@ -1366,23 +1376,23 @@ pub const Trie = struct {
         allocator: Allocator,
         result: []ArrayList([]const u8),
     ) !void {
-        for (self.value.keys) |key| {
+        for (self.keys) |key| {
             try result[key.index].appendSlice(allocator, key.name + ' ');
         }
-        for (self.value.keys.items) |entry|
+        for (self.keys.items) |entry|
             entry.next.setKeys(result);
-        for (self.value.vars.items) |entry|
+        for (self.vars.items) |entry|
             entry.next.setKeys(result);
     }
 
     /// Caller owns the slice, but not the patterns in it.
     fn setValues(self: Self, result: []Pattern) void {
-        for (self.value.values) |value| {
+        for (self.values) |value| {
             result[value.index] = value.pattern;
         }
-        for (self.value.keys.items) |entry|
+        for (self.keys.items) |entry|
             entry.next.setValues(result);
-        for (self.value.vars.items) |entry|
+        for (self.vars.items) |entry|
             entry.next.setValues(result);
     }
 
@@ -1397,7 +1407,7 @@ pub const Trie = struct {
         return result;
     }
 
-    pub fn values(self: Self, allocator: Allocator) ![]Pattern {
+    pub fn valuesAsPatterns(self: Self, allocator: Allocator) ![]Pattern {
         const result = try allocator.alloc(Pattern, self.count());
         self.writeValues(result);
         return result;
@@ -1425,11 +1435,11 @@ pub const Trie = struct {
         writer: anytype,
         index_branch: IndexBranch,
     ) !void {
-        const index, var current = index_branch;
+        const index, var branch = index_branch;
         if (comptime debug_mode)
             try writer.print("{} | ", .{index});
 
-        while (current.node()) |branch_node| : (_, current = branch_node.next()) {
+        while (branch.node()) |branch_node| : (_, branch = branch_node.next()) {
             try writer.writeAll(branch_node.entry.key_ptr.*);
             try writer.writeByte(' ');
 
@@ -1437,12 +1447,12 @@ pub const Trie = struct {
             //     try writer.print("[{}] ", .{index});
         }
         try writer.writeAll("-> ");
-        try current.value.writeIndent(writer, null);
+        try branch.value.writeIndent(writer, null);
     }
 
     /// Print a trie in order based on indices.
     pub fn writeCanonical(self: Self, writer: anytype) !void {
-        for (self.value.branches.items) |index_branch| {
+        for (self.branches.items) |index_branch| {
             try writeIndex(writer, index_branch);
             try writer.writeByte('\n');
         }
@@ -1455,8 +1465,8 @@ pub const Trie = struct {
         optional_indent: ?usize,
     ) Writer.Error!void {
         try writer.writeAll("❬");
-        for (self.value.value_cache.items) |value_index| {
-            _, const branch = self.value.branches.items[value_index];
+        for (self.value_cache.items) |value_index| {
+            _, const branch = self.branches.items[value_index];
             try branch.value.writeIndent(writer, null);
             try writer.writeAll(", ");
         }
