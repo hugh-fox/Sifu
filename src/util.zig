@@ -36,26 +36,19 @@ pub fn print(comptime fmt: []const u8, args: anytype) void {
     streams.err.print(fmt, args) catch panic(fmt, args);
 }
 
-pub fn popMany(
-    unmanaged_list_ptr: anytype,
-    index: usize,
-    allocator: Allocator,
-) !@typeInfo(@TypeOf(unmanaged_list_ptr)).Pointer.child {
-    var result = try @typeInfo(@TypeOf(unmanaged_list_ptr)).Pointer.child
-        .initCapacity(allocator, unmanaged_list_ptr.items.len - index);
+pub fn popMany(comptime Elem: type, unmanaged_list_ptr: anytype, index: usize, allocator: Allocator) !std.ArrayList(Elem) {
+    var result = std.ArrayList(Elem).init(allocator);
+    const capacity = unmanaged_list_ptr.items.len - index;
+    if (capacity > 0) try result.ensureCapacity(capacity);
     for (unmanaged_list_ptr.items[index..]) |pattern| {
-        result.appendAssumeCapacity(pattern);
+        try result.append(allocator, pattern);
     }
     unmanaged_list_ptr.shrinkRetainingCapacity(index);
     return result;
 }
 
-pub fn popManyAsSlice(
-    unmanaged_list_ptr: anytype,
-    index: usize,
-    allocator: Allocator,
-) !@TypeOf(unmanaged_list_ptr.items) {
-    var list = try popMany(unmanaged_list_ptr, index, allocator);
+pub fn popManyAsSlice(comptime Elem: type, unmanaged_list_ptr: anytype, index: usize, allocator: Allocator) ![]Elem {
+    var list = try popMany(Elem, unmanaged_list_ptr, index, allocator);
     return list.toOwnedSlice(allocator);
 }
 
@@ -179,14 +172,14 @@ pub fn AutoSet(comptime T: type) type {
 }
 
 // If this is just a const, the compiler complains about self-dependency in ast.zig
-pub fn fsize() type {
-    return switch (@typeInfo(usize).Int.bits) {
-        8, 16 => f16,
-        64 => f64,
-        128 => f128,
-        else => f32,
-    };
-}
+// pub fn fsize() type {
+//     return switch (@typeInfo(usize).Int.bits) {
+//         8, 16 => f16,
+//         64 => f64,
+//         128 => f128,
+//         else => f32,
+//     };
+// }
 
 const maxInt = std.math.maxInt;
 
@@ -195,10 +188,9 @@ pub fn first(slice: anytype) @TypeOf(slice[0]) {
     return slice[0];
 }
 
-pub fn last(slice: anytype) @typeInfo(@TypeOf(slice)).Pointer.child {
-    panic("this function appears to be broken", .{});
-    // assert(slice.len > 0);
-    // return slice[slice.len - 1];
+pub fn last(slice: anytype) @TypeOf(slice[0]) {
+    assert(slice.len > 0);
+    return slice[slice.len - 1];
 }
 
 /// Compare two slices whose elements can be compared by the `order` function.
@@ -221,10 +213,7 @@ pub fn sliceOrder(
 pub fn sliceEql(
     lhs: anytype,
     rhs: @TypeOf(lhs),
-    eq: fn (
-        @typeInfo(@TypeOf(lhs)).Pointer.child,
-        @typeInfo(@TypeOf(rhs)).Pointer.child,
-    ) bool,
+    eq: fn (@TypeOf(lhs[0]), @TypeOf(rhs[0])) bool,
 ) bool {
     return lhs.len == rhs.len and for (lhs, rhs) |lhs_val, rhs_val| {
         if (!eq(lhs_val, rhs_val))
@@ -249,14 +238,14 @@ pub fn liftOption(
 
 const testing = std.testing;
 
-test "expect f64" {
-    try std.testing.expectEqual(switch (maxInt(usize)) {
-        maxInt(u8), maxInt(u16) => f16,
-        maxInt(u64) => f64,
-        maxInt(u128) => f128,
-        else => f32,
-    }, fsize());
-}
+// test "expect f64" {
+//     try std.testing.expectEqual(switch (maxInt(usize)) {
+//         maxInt(u8), maxInt(u16) => f16,
+//         maxInt(u64) => f64,
+//         maxInt(u128) => f128,
+//         else => f32,
+//     }, fsize());
+// }
 
 test "slices of different len" {
     const s1: []const usize = &.{ 1, 2, 3 };

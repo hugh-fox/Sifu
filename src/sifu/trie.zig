@@ -15,8 +15,6 @@ const AutoContext = std.array_hash_map.AutoContext;
 const StringContext = std.array_hash_map.StringContext;
 const ArenaAllocator = std.heap.ArenaAllocator;
 const print = util.print;
-const first = util.first;
-const last = util.last;
 const streams = util.streams;
 const verbose_errors = @import("build_options").verbose_errors;
 const debug_mode = @import("builtin").mode == .Debug;
@@ -195,11 +193,11 @@ pub const Node = union(enum) {
     }
 
     /// Compares by value, not by len, pos, or pointers.
-    pub fn order(self: Node, other: Node) Order {
+    pub fn order(self: Node, other: Node) order {
         const ord = math.order(@intFromEnum(self), @intFromEnum(other));
         return if (ord == .eq)
             switch (self) {
-                .pattern => |pattern| util.orderWith(
+                .pattern => |pattern| util.sliceOrder(
                     pattern,
                     other.pattern,
                     Node.order,
@@ -457,12 +455,16 @@ pub const Trie = struct {
             panic("Index {} doesn't exist\n", .{index});
     }
     /// Returns null if the index doesn't exist in the trie.
+    /// Note that this isn't O(m) where m is the key length of the index.
     pub fn getIndexOrNull(self: Self, index: usize) ?Pattern {
-        var current = self;
-        while (current.get(index)) |next| {
-            current = next.value_ptr.*;
+        var current = &self;
+        var branch: Branch = undefined;
+        while (current.findNextBranch(index)) |next| {
+            _, branch = next;
+            current = branch.next() orelse
+                return branch.value;
         }
-        return current.get(index);
+        return null;
     }
 
     /// Rebuilds the key for a given index using an allocator for the
@@ -875,6 +877,7 @@ pub const Trie = struct {
         else
             null;
     }
+
     fn findNextBranch(self: Self, bound: usize) ?IndexBranch {
         return if (self.findNextByIndex(bound)) |index|
             self.branches.items[index]
