@@ -63,7 +63,6 @@ fn repl(
 
     while (replStep(allocator, streams, &trie)) |_| {
         try streams.out.flush();
-        try streams.err.flush();
     } else |err| switch (err) {
         error.EndOfStream => return,
         // error.StreamTooLong => return e, // TODO: handle somehow
@@ -90,9 +89,14 @@ fn replStep(
     {
         const node = ast_ptr.rootNode();
         const text = buffer.written()[node.startByte()..node.endByte()];
-        debug("Parsing term node of type '{s}' and {} children with text: '{s}'\n", .{ node.kind(), node.childCount(), text });
-        try node.format(streams.err);
-        debug("\n", .{});
+        debug(
+            "Parsing term node of type '{s}' and {} children with text: '{s}'",
+            .{ node.kind(), node.childCount(), text },
+        );
+        streams.err.writeByte('\t') catch unreachable;
+        node.format(streams.err) catch unreachable;
+        streams.err.writeByte('\n') catch unreachable;
+        try streams.err.flush();
     }
     const pattern = if (ast_ptr.rootNode().child(0)) |pattern_root|
         astToPattern(allocator, buffer.written(), pattern_root) catch |e|
@@ -101,28 +105,23 @@ fn replStep(
         Pattern{ .root = &.{}, .height = 0 };
     // defer pattern.deinit(allocator);
 
-    // if (comptime detect_leaks) try streams.err.print(
-    //     "String Arena Allocated: {} bytes\n",
+    // if (comptime detect_leaks) try debug(
+    //     "String Arena Allocated: {} bytes",
     //     .{str_arena.queryCapacity()},
     // );
 
     const root = pattern.root;
 
-    // streams.out.print("replStep\n", .{}) catch unreachable;
-    // streams.out.flush() catch unreachable;
-    debug(
-        "Converted pattern {} high and {} wide, of types: ",
-        .{ pattern.height, pattern.root.len },
-    );
-    for (root) |app| {
-        debug("{s} ", .{@tagName(app)});
-        app.writeSExp(streams.err, 0) catch unreachable;
-        streams.err.writeByte(' ') catch unreachable;
-    }
-    debug("\nPattern: ", .{});
-    pattern.write(streams.err) catch unreachable;
-    streams.err.writeByte('\n') catch unreachable;
-    streams.err.flush() catch unreachable;
+    // debug(
+    //     "Converted pattern {} high and {} wide, of types: ",
+    //     .{ pattern.height, pattern.root.len },
+    // );
+    // for (root) |app| {
+    //     debug("{s} ", .{@tagName(app)});
+    //     // app.writeSExp(streams.err, 0) catch unreachable;
+    //     // streams.err.writeByte(' ') catch unreachable;
+    // }
+    pattern.debug("Pattern: {s}");
 
     if (pattern.isEmpty())
         return null;
@@ -145,7 +144,7 @@ fn replStep(
 
         // If not inserting, then try to match the expression
         // TODO: put into a comptime for eval kind
-        // print("Parsed ast hash: {}\n", .{ast.hash()});
+        // print("Parsed ast hash: {}", .{ast.hash()});
 
         // const match = try trie.match(allocator, 0, pattern);
         // print("Matched {} nodes ", .{match.len});

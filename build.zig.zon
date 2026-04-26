@@ -26,7 +26,7 @@
     // internet connectivity.
     .dependencies = .{
         .tree_sitter_sifu = .{
-            .path = "../tree_sitter_sifu/",
+            .path = "../Tree-Sitter-Sifu/",
             // .url = "git+https://github.com/hugh-fox/Tree-Sitter-Sifu?ref=HEAD#10836887d82680ec937bd03f55037fd9f7122e76",
             // .hash = "tree_sitter_sifu-0.0.0-GITWtPovAAD6_-xTRcKQUm9tYzS03FEURq5a2bHCJPWp",
         },

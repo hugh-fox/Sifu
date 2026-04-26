@@ -209,6 +209,17 @@ pub const Node = union(enum) {
             ord;
     }
 
+    pub fn formatSExp(
+        self: Node,
+        allocator: Allocator,
+    ) ![]const u8 {
+        var buff: std.ArrayList(u8) = try .initCapacity(allocator, 1024);
+        defer buff.deinit(allocator);
+        var writer = Io.Writer.fromArrayList(&buff);
+        try self.writeSExp(&writer, null);
+        return buff.toOwnedSlice(allocator);
+    }
+
     pub fn writeSExp(
         self: Node,
         writer: *Writer,
@@ -217,9 +228,9 @@ pub const Node = union(enum) {
         for (0..optional_indent orelse 0) |_|
             try writer.writeByte(' ');
         switch (self) {
-            .key => |key| _ = try util.genericWrite(key, writer),
+            .key => |key| _ = try writer.writeAll(key),
             .variable, .var_pattern => |variable| {
-                _ = try util.genericWrite(variable, writer);
+                try writer.writeAll(variable);
             },
             .trie => |trie| try trie.writeIndent(
                 writer,
@@ -249,6 +260,13 @@ pub const Node = union(enum) {
             },
         }
     }
+
+    pub fn debug(self: Node, comptime fmt: []const u8) void {
+        const allocator = std.debug.getDebugInfoAllocator();
+        const node_str = self.formatSExp(allocator) catch unreachable;
+        std.log.debug(fmt, .{node_str});
+        defer allocator.free(node_str);
+    }
 };
 
 pub const Pattern = struct {
@@ -267,17 +285,17 @@ pub const Pattern = struct {
         const slice = self.root;
         if (slice.len == 0)
             return;
-        // debug("tag: {s}\n", .{@tagName(pattern[0])});
+        // debug("tag: {s}", .{@tagName(pattern[0])});
         try slice[0].writeSExp(writer, optional_indent);
         if (slice.len == 1) {
             return;
         } else for (slice[1 .. slice.len - 1]) |pattern| {
-            // debug("tag: {s}\n", .{@tagName(pattern)});
+            // debug("tag: {s}", .{@tagName(pattern)});
             try writer.writeByte(' ');
             try pattern.writeSExp(writer, optional_indent);
         }
         try writer.writeByte(' ');
-        // debug("tag: {s}\n", .{@tagName(pattern[pattern.len - 1])});
+        // debug("tag: {s}", .{@tagName(pattern[pattern.len - 1])});
         try slice[slice.len - 1]
             .writeSExp(writer, optional_indent);
     }
@@ -290,9 +308,10 @@ pub const Pattern = struct {
     }
 
     pub fn toString(self: Pattern, allocator: Allocator) ![]const u8 {
-        var buff = std.ArrayList(u8).init(allocator);
-        try self.write(buff.writer());
-        return buff.toOwnedSlice();
+        var buff: std.ArrayList(u8) = try .initCapacity(allocator, 1024);
+        var writer = Io.Writer.fromArrayList(&buff);
+        try self.write(&writer);
+        return buff.toOwnedSlice(allocator);
     }
 
     pub fn copy(self: Pattern, allocator: Allocator) !Pattern {
@@ -339,6 +358,13 @@ pub const Pattern = struct {
         // information
         for (self.root) |pattern|
             pattern.hasherUpdate(hasher);
+    }
+
+    pub fn debug(self: Pattern, comptime fmt: []const u8) void {
+        const allocator = std.debug.getDebugInfoAllocator();
+        const node_str = self.toString(allocator) catch unreachable;
+        std.log.debug(fmt, .{node_str});
+        defer allocator.free(node_str);
     }
 };
 
@@ -803,7 +829,7 @@ pub const Trie = struct {
             allocator,
             IndexBranch{ index, .{ .value = value } },
         );
-        debug("Value cache: {any}\n", .{current.value_cache.items});
+        debug("Value cache: {any}", .{current.value_cache.items});
         return current;
     }
 
@@ -890,7 +916,7 @@ pub const Trie = struct {
         branches_bound: usize,
         cache: []const usize,
     ) ?IndexBranch {
-        debug("Cache: {any}\n", .{cache});
+        debug("Cache: {any}", .{cache});
         const cache_index = sort.lowerBound(
             usize,
             cache,
@@ -902,7 +928,7 @@ pub const Trie = struct {
                 ) Order {
                     const bound, const branches = ctx;
                     const index, _ = branches[cmp_index];
-                    debug("Compare cached: {} < {}\n", .{ bound, index });
+                    debug("Compare cached: {} < {}", .{ bound, index });
                     return math.order(bound, index);
                 }
             }.lessThan,
@@ -986,14 +1012,14 @@ pub const Trie = struct {
             queue.deinit(allocator);
         }
 
-        debug("Branching `{s}", .{"TODO"});
-        // node.formatSExp()
-        debug("` from bound {}\n", .{bound});
+        debug("Branching `", .{});
+        node.debug("{s}");
+        debug("` from bound {}", .{bound});
 
         // Check for variable branches that match anything
         if (self.findNextVar(bound)) |var_candidate| {
             const var_bound, const var_branch = var_candidate;
-            debug("Found var branch at index: {}\n", .{var_bound});
+            debug("Found var branch at index: {}", .{var_bound});
 
             if (var_branch == .variable) {
                 const branch_node = var_branch.variable;
@@ -1034,7 +1060,7 @@ pub const Trie = struct {
         switch (node) {
             .key => |key| {
                 if (self.map.getEntry(key)) |key_entry| {
-                    debug("Found key match: {s}\n", .{key});
+                    debug("Found key match: {s}", .{key});
 
                     // Find the next valid index for this key
                     const key_trie = key_entry.value_ptr;
@@ -1056,20 +1082,20 @@ pub const Trie = struct {
                         });
                     }
                 } else {
-                    debug("Key '{s}' not found in map\n", .{key});
+                    debug("Key '{s}' not found in map", .{key});
                 }
             },
 
             .variable => |variable| {
                 // Match against bound variable or bind new one
                 if (bindings.get(variable)) |bound_node| {
-                    debug("Checking existing var binding: {s}\n", .{variable});
+                    debug("Checking existing var binding: {s}", .{variable});
                     // Variable already bound - need to match the bound value
                     var sub_queue = try self.matchAllTerms(allocator, bound, bindings, bound_node);
                     defer sub_queue.deinit(allocator);
                     try queue.appendSlice(allocator, sub_queue.items);
                 } else {
-                    debug("Variable {s} not yet bound - matches anything\n", .{variable});
+                    debug("Variable {s} not yet bound - matches anything", .{variable});
                     // Variable not bound - it can match any single term
                     // We need to try matching each possible branch
                     if (self.findNext(bound)) |next_candidate| {
@@ -1106,7 +1132,7 @@ pub const Trie = struct {
                 }
             },
             .pattern => |pattern| {
-                debug("Matching sub-pattern\n", .{});
+                debug("Matching sub-pattern", .{});
                 // Match opening paren
                 if (self.map.getEntry("(")) |open_entry| {
                     const open_trie = open_entry.value_ptr;
@@ -1157,12 +1183,12 @@ pub const Trie = struct {
             },
         }
 
-        debug("matchAllTerms found {} candidates\n", .{queue.items.len});
+        debug("matchAllTerms found {} candidates", .{queue.items.len});
         return queue;
     }
 
     /// Finds the lowest index full match for the entire pattern.
-    /// A full match means every term in the pattern matched at least once.
+    /// A full match means every term in the pattern matched a branch in the trie.
     pub fn match(
         self: *const Self,
         allocator: Allocator,
@@ -1170,7 +1196,7 @@ pub const Trie = struct {
         bindings: VarBindings,
         pattern: Pattern,
     ) Allocator.Error!Match {
-        debug("=== Starting match for pattern of length {} from bound {} ===\n", .{ pattern.root.len, bound });
+        debug("=== Starting match for pattern of length {} from bound {} ===", .{ pattern.root.len, bound });
 
         // Base case: empty pattern
         if (pattern.root.len == 0) {
@@ -1202,7 +1228,7 @@ pub const Trie = struct {
                 next_queue.deinit(allocator);
             }
 
-            debug("Extending matches for term {} of {}\n", .{ term_idx, pattern.root.len });
+            debug("Extending matches for term {} of {}", .{ term_idx, pattern.root.len });
 
             for (current_queue.items) |*candidate| {
                 const node = pattern.root[term_idx];
@@ -1226,7 +1252,7 @@ pub const Trie = struct {
             current_queue = next_queue;
 
             if (current_queue.items.len == 0) {
-                debug("No candidates remain after term {}\n", .{term_idx});
+                debug("No candidates remain after term {}", .{term_idx});
                 break;
             }
         }
@@ -1256,12 +1282,12 @@ pub const Trie = struct {
         }
 
         if (best_match) |m| {
-            debug("Found full match at index {} with {} terms\n", .{ m.index, m.len });
+            debug("Found full match at index {} with {} terms", .{ m.index, m.len });
             return m;
         }
 
         // No full match found - return partial match info
-        debug("No full match found\n", .{});
+        debug("No full match found", .{});
         return Match{
             .key = pattern,
             .node_ptr = self,
@@ -1301,11 +1327,10 @@ pub const Trie = struct {
             .variable => |variable| {
                 debug("Var get: ", .{});
                 if (bindings.get(variable)) |var_node|
-                    debug("TODO {}\n", .{var_node})
-                    // var_node.writeSExp(streams.err, null) catch unreachable
+                    var_node.debug("{s}")
                 else
                     debug("null", .{});
-                debug("\n", .{});
+                debug("", .{});
                 try result.append(
                     allocator,
                     bindings.get(variable) orelse
@@ -1315,11 +1340,11 @@ pub const Trie = struct {
             .var_pattern => |var_pattern| {
                 debug("Var pattern get: ", .{});
                 if (bindings.get(var_pattern)) |var_node|
-                    debug("TODO {}\n", .{var_node})
+                    var_node.debug("{s}")
                     // var_node.writeSExp(streams.err, null) catch unreachable
                 else
                     debug("null", .{});
-                debug("\n", .{});
+                debug("", .{});
                 if (bindings.get(var_pattern)) |sub_pattern| {
                     // TODO: calculate correct height with sub_pattern's
                     // height
@@ -1357,7 +1382,7 @@ pub const Trie = struct {
         var total_matched: usize = 0;
         var matched: Match = .{ .index = 0 };
         while (matched.index < bound.upper) : (bound.upper = matched.index) {
-            debug("Matching from bounds [{},{})\n", .{ bound.lower, bound.upper });
+            debug("Matching from bounds [{},{})", .{ bound.lower, bound.upper });
             matched = try self.match(allocator, bound.lower, pattern);
             defer matched.deinit(allocator);
             debug(
@@ -1365,13 +1390,10 @@ pub const Trie = struct {
                 .{ matched.len, pattern.root.len, matched.index },
             );
             if (matched.value) |value| {
-                debug("matched value: ", .{});
-                debug("TODO {}\n", .{value});
-                // value.write(streams.err) catch unreachable;
-                debug("\n", .{});
+                debug("matched value: {}", .{value});
                 return try rewrite(allocator, value, matched.bindings, result);
             } else debug("but no match", .{});
-            debug("\n", .{});
+            debug("", .{});
             total_matched += matched.len;
             if (total_matched < pattern.root.len)
                 break;
@@ -1397,7 +1419,7 @@ pub const Trie = struct {
             matched = try self.match(allocator, index, matched.bindings, current);
             index = matched.index + 1;
             if (matched.len != pattern.root.len) {
-                debug("No complete match, skipping index {}.\n", .{matched.index});
+                debug("No complete match, skipping index {}.", .{matched.index});
                 // Evaluate nested patterns that failed to match
                 // TODO: replace recursion with a continue
                 // switch (pattern) {
@@ -1414,7 +1436,7 @@ pub const Trie = struct {
                 // }
 
             }
-            debug("vars in map: {}\n", .{matched.bindings.size});
+            debug("vars in map: {}", .{matched.bindings.size});
             const slice = .{};
             if (matched.value) |next| {
                 // Prevent infinite recursion at this index. Recursion
@@ -1428,13 +1450,13 @@ pub const Trie = struct {
                             break;
                     } else break; // Don't evaluate the same trie
                 debug("Eval matched {}: ", .{next.root.len});
-                debug("TODO {}\n", .{next});
+                next.debug("{s}");
                 // next.write(streams.err) catch unreachable;
                 // streams.err.writeByte('\n') catch unreachable;
                 current =
                     try rewrite(allocator, next, matched.bindings, &buffer);
             } else {
-                debug("Match, but no value\n", .{});
+                debug("Match, but no value", .{});
                 break;
             }
         }
@@ -1443,13 +1465,10 @@ pub const Trie = struct {
             .index = matched.index,
             .len = matched.len,
         };
-        debug("Evaluated {} nodes at index {}:\n", .{ eval.len, eval.index });
+        debug("Evaluated {} nodes at index {}:", .{ eval.len, eval.index });
         if (eval.value) |value| {
-            debug("TODO {}\n", .{value});
-            // value.write(streams.err) catch unreachable;
-            // streams.err.writeByte(' ') catch unreachable;
+            value.debug("{s}");
         }
-        // streams.err.writeByte('\n') catch unreachable;
         return eval;
     }
 
@@ -1471,7 +1490,7 @@ pub const Trie = struct {
     //     while (index < pattern.root.len) {
     //         const eval = try self.evaluateSlice(allocator, pattern, &result);
     //         if (result.items.len == 0) {
-    //             debug("No match, skipping index {}.\n", .{index});
+    //             debug("No match, skipping index {}.", .{index});
     //             try result.append(
     //                 // Evaluate nested pattern that failed to match
     //                 // TODO: replace recursion with a continue
@@ -1490,7 +1509,7 @@ pub const Trie = struct {
     //             index += 1;
     //             continue;
     //         }
-    //         debug("vars in map: {}\n", .{eval.bindings.entries.len});
+    //         debug("vars in map: {}", .{eval.bindings.entries.len});
     //         const slice = .{};
     //         if (eval.value) |next| {
     //             // Prevent infinite recursion at this index. Recursion
@@ -1505,7 +1524,7 @@ pub const Trie = struct {
     //                 } else break; // Don't evaluate the same trie
     //             debug("Eval matched {s}: ", .{@tagName(next.*)});
     //             next.write(streams.err) catch unreachable;
-    //             streams.err.writeByte('\n') catch unreachable;
+    //             streams.err.writeByte('') catch unreachable;
     //             const rewritten =
     //                 try rewrite(next.pattern, eval.bindings, buffer);
     //             defer Node.ofPattern(rewritten).deinit(allocator);
@@ -1514,7 +1533,7 @@ pub const Trie = struct {
     //             try result.appendSlice(allocator, sub_eval);
     //         } else {
     //             try result.appendSlice(allocator, slice);
-    //             debug("Match, but no value\n", .{});
+    //             debug("Match, but no value", .{});
     //         }
     //         index += eval.len;
     //     }
@@ -1524,7 +1543,7 @@ pub const Trie = struct {
     //         trie.writeSExp(streams.err, 0) catch unreachable;
     //         streams.err.writeByte(' ') catch unreachable;
     //     }
-    //     streams.err.writeByte('\n') catch unreachable;
+    //     streams.err.writeByte('') catch unreachable;
     //     return result.toOwnedSlice();
     // }
 
