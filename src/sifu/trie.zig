@@ -402,11 +402,12 @@ const BranchNode = struct {
 const Branch = union(enum) {
     key: BranchNode,
     variable: BranchNode,
+    var_pattern: BranchNode,
     value: Pattern,
 
     pub fn node(branch: Branch) ?BranchNode {
         return switch (branch) {
-            .key, .variable => |branch_node| branch_node,
+            .key, .variable, .var_pattern => |branch_node| branch_node,
             .value => null,
         };
     }
@@ -414,9 +415,16 @@ const Branch = union(enum) {
     pub fn next(self: Branch) ?*const Trie {
         switch (self) {
             .key => |branch_node| {
-                return branch_node.entry.value_ptr;
+                _ = branch_node;
+                @panic("unimplemented\n");
+                // return branch_node.entry.value_ptr;
             },
             .variable => |branch_node| {
+                _ = branch_node;
+                @panic("unimplemented"); // bind var
+                // return branch_node.entry.value_ptr;
+            },
+            .var_pattern => |branch_node| {
                 _ = branch_node;
                 @panic("unimplemented"); // bind var
                 // return branch_node.entry.value_ptr;
@@ -840,7 +848,6 @@ pub const Trie = struct {
         node_ptr: *const Trie,
         index: usize = 0,
         len: usize = 0, // For partial matches
-        bindings: VarBindings = .{}, // Bound variables
 
         /// Node entries are just references, so they aren't freed by this
         /// function.
@@ -852,20 +859,18 @@ pub const Trie = struct {
         }
     };
 
-    const MatchCandidate = struct {
+    const IndexBranchTrie = struct {
         index: usize,
         branch: Branch,
         trie: *const Trie,
-        bindings: VarBindings,
-        matched_len: usize,
 
-        pub fn deinit(self: *MatchCandidate, allocator: Allocator) void {
-            self.bindings.deinit(allocator);
+        pub fn deinit(self: *IndexBranchTrie, allocator: Allocator) void {
+            self.deinit(allocator);
         }
     };
 
     // TODO: convert to PriorityQueue
-    const MatchQueue = ArrayList(MatchCandidate);
+    const MatchQueue = ArrayList(IndexBranchTrie);
 
     /// A partial or complete sequence of matches of a pattern against a trie.
     const Eval = struct {
@@ -1001,17 +1006,23 @@ pub const Trie = struct {
     /// Returns a queue of all candidate matches with their indices, branches, and updated bindings.
     fn matchAllTerms(
         self: *const Self,
+        // allocator: Allocator,
+        // bound: usize,
+        // bindings: VarBindings,
+        // node: Node,
+    ) Allocator.Error!MatchQueue {
+        _ = self;
+        @panic("unimplemented\n");
+    }
+
+    /// Find the first term at or after bound
+    fn matchTerm(
+        self: *const Self,
         allocator: Allocator,
         bound: usize,
-        bindings: VarBindings,
+        bindings: *VarBindings,
         node: Node,
-    ) Allocator.Error!MatchQueue {
-        var queue = MatchQueue.empty;
-        errdefer {
-            for (queue.items) |*candidate| candidate.deinit(allocator);
-            queue.deinit(allocator);
-        }
-
+    ) Allocator.Error!?IndexBranchTrie {
         debug("Branching `", .{});
         node.debug("{s}");
         debug("` from bound {}", .{bound});
@@ -1028,30 +1039,31 @@ pub const Trie = struct {
                 var new_bindings = VarBindings{};
                 errdefer new_bindings.deinit(allocator);
 
-                if (bindings.get(variable)) |bound_node| {
-                    // Variable already bound - only match if node equals bound value
-                    if (bound_node.eql(node)) {
-                        try queue.append(allocator, MatchCandidate{
+                const get_or_put = try bindings.getOrPut(allocator, variable);
+
+                // Variable already bound - only match if node equals bound value
+                if (get_or_put.found_existing) {
+                    if (get_or_put.value_ptr.eql(node))
+                        return IndexBranchTrie{
                             .index = var_bound,
                             .branch = var_branch,
                             .trie = branch_node.entry.value_ptr,
-                            .bindings = new_bindings,
-                            .matched_len = 1,
-                        });
-                    } else {
+                        }
+                    else {
                         // TODO
                         // new_bindings.deinit(allocator);
+                        @panic("unimplemented\n");
                     }
                 } else {
+                    get_or_put.value_ptr.* = node;
+
                     // Bind the variable to this node
                     try new_bindings.put(allocator, variable, node);
-                    try queue.append(allocator, MatchCandidate{
+                    return IndexBranchTrie{
                         .index = var_bound,
                         .branch = var_branch,
                         .trie = branch_node.entry.value_ptr,
-                        .bindings = new_bindings,
-                        .matched_len = 1,
-                    });
+                    };
                 }
             }
         }
@@ -1059,27 +1071,24 @@ pub const Trie = struct {
         // Now check for exact matches based on node type
         switch (node) {
             .key => |key| {
-                if (self.map.getEntry(key)) |key_entry| {
+                if (self.map.getEntry(key)) |entry| {
                     debug("Found key match: {s}", .{key});
 
                     // Find the next valid index for this key
-                    const key_trie = key_entry.value_ptr;
+                    const key_trie = entry.value_ptr;
                     if (key_trie.findNextByIndex(bound)) |key_candidate_index| {
                         const key_index, _ = self.branches.items[key_candidate_index];
 
-                        const new_bindings = try bindings.clone(allocator);
-                        try queue.append(allocator, MatchCandidate{
+                        return IndexBranchTrie{
                             .index = key_index,
                             .branch = .{
                                 .key = .{
-                                    .entry = key_entry,
+                                    .entry = entry,
                                     .next_index = key_candidate_index,
                                 },
                             },
                             .trie = key_trie,
-                            .bindings = new_bindings,
-                            .matched_len = 1,
-                        });
+                        };
                     }
                 } else {
                     debug("Key '{s}' not found in map", .{key});
@@ -1091,9 +1100,7 @@ pub const Trie = struct {
                 if (bindings.get(variable)) |bound_node| {
                     debug("Checking existing var binding: {s}", .{variable});
                     // Variable already bound - need to match the bound value
-                    var sub_queue = try self.matchAllTerms(allocator, bound, bindings, bound_node);
-                    defer sub_queue.deinit(allocator);
-                    try queue.appendSlice(allocator, sub_queue.items);
+                    return self.matchTerm(allocator, bound, bindings, bound_node);
                 } else {
                     debug("Variable {s} not yet bound - matches anything", .{variable});
                     // Variable not bound - it can match any single term
@@ -1104,12 +1111,13 @@ pub const Trie = struct {
 
                         // Bind the variable to what we're matching
                         const bound_value = switch (next_branch) {
-                            .key => |bn| Node.ofKey(bn.entry.key_ptr.*),
-                            .variable => |bn| Node.ofVar(bn.entry.key_ptr.*),
+                            .key => |branch_node| Node.ofKey(branch_node.entry.key_ptr.*),
+                            .variable => |branch_node| Node.ofVar(branch_node.entry.key_ptr.*),
+                            .var_pattern => |branch_node| Node{ .var_pattern = branch_node.entry.key_ptr.* },
                             .value => {
                                 // TODO
                                 // new_bindings.deinit(allocator);
-                                return queue;
+                                return null;
                             },
                         };
 
@@ -1118,56 +1126,48 @@ pub const Trie = struct {
                         const next_trie = next_branch.next() orelse {
                             // TODO
                             // new_bindings.deinit(allocator);
-                            return queue;
+                            @panic("unimplemented\n");
+                            // return null;
                         };
 
-                        try queue.append(allocator, MatchCandidate{
+                        return IndexBranchTrie{
                             .index = next_index,
                             .branch = next_branch,
                             .trie = next_trie,
-                            .bindings = new_bindings,
-                            .matched_len = 1,
-                        });
+                        };
                     }
                 }
             },
             .pattern => |pattern| {
                 debug("Matching sub-pattern", .{});
                 // Match opening paren
-                if (self.map.getEntry("(")) |open_entry| {
-                    const open_trie = open_entry.value_ptr;
-                    if (open_trie.findNextByIndex(bound)) |open_index| {
-                        const idx, _ = self.branches.items[open_index];
+                const open_entry = self.map.getEntry("(") orelse return null;
+                const open_trie = open_entry.value_ptr;
+                const open_index = open_trie.findNextByIndex(bound) orelse return null;
+                const idx, _ = self.branches.items[open_index];
 
-                        // Recursively match the pattern contents
-                        var pattern_match = try open_trie.match(allocator, idx, bindings, pattern);
-                        defer pattern_match.deinit(allocator);
+                // Recursively match the pattern contents
+                var pattern_match = try open_trie
+                    .match(allocator, idx, bindings, pattern);
+                defer pattern_match.deinit(allocator);
 
-                        if (pattern_match.len == pattern.root.len) {
-                            // Successfully matched entire pattern, now match closing paren
-                            if (pattern_match.node_ptr.map.getEntry(")")) |close_entry| {
-                                const close_trie = close_entry.value_ptr;
-                                if (close_trie.findNextByIndex(pattern_match.index)) |close_index| {
-                                    const close_idx, _ = close_trie.branches.items[close_index];
-
-                                    const new_bindings = try pattern_match.bindings.clone(allocator);
-                                    try queue.append(allocator, MatchCandidate{
-                                        .index = close_idx,
-                                        .branch = .{
-                                            .key = .{
-                                                .entry = close_entry,
-                                                .next_index = close_index,
-                                            },
-                                        },
-                                        .trie = close_trie,
-                                        .bindings = new_bindings,
-                                        .matched_len = 1,
-                                    });
-                                }
-                            }
-                        }
-                    }
-                }
+                if (pattern_match.len != pattern.root.len) return null;
+                // Successfully matched entire pattern, now match closing paren
+                const close_entry = self.map.getEntry(")") orelse return null;
+                const close_trie = close_entry.value_ptr;
+                const close_index = close_trie
+                    .findNextByIndex(pattern_match.index) orelse return null;
+                const close_idx, _ = close_trie.branches.items[close_index];
+                return IndexBranchTrie{
+                    .index = close_idx,
+                    .branch = .{
+                        .key = .{
+                            .entry = close_entry,
+                            .next_index = close_index,
+                        },
+                    },
+                    .trie = close_trie,
+                };
             },
 
             .var_pattern => {
@@ -1179,12 +1179,11 @@ pub const Trie = struct {
             },
 
             else => {
-                @panic("unimplemented node type in matchAllTerms");
+                @panic("unimplemented node type in matchTerm");
             },
         }
 
-        debug("matchAllTerms found {} candidates", .{queue.items.len});
-        return queue;
+        return null;
     }
 
     /// Finds the lowest index full match for the entire pattern.
@@ -1193,107 +1192,58 @@ pub const Trie = struct {
         self: *const Self,
         allocator: Allocator,
         bound: usize,
-        bindings: VarBindings,
+        bindings: *VarBindings,
         pattern: Pattern,
     ) Allocator.Error!Match {
-        debug("=== Starting match for pattern of length {} from bound {} ===", .{ pattern.root.len, bound });
-
-        // Base case: empty pattern
-        if (pattern.root.len == 0) {
-            return Match{
-                .key = pattern,
-                .node_ptr = self,
-                .index = bound,
-                .len = 0,
-                .bindings = try bindings.clone(allocator),
-            };
-        }
-
-        var best_match: ?Match = null;
-        errdefer if (best_match) |*m| m.deinit(allocator);
-
-        // Start with initial candidates for the first term
-        var current_queue = try self.matchAllTerms(allocator, bound, bindings, pattern.root[0]);
-        defer {
-            for (current_queue.items) |*candidate| candidate.deinit(allocator);
-            current_queue.deinit(allocator);
-        }
-
+        debug(
+            "=== Starting match for pattern of length {} from bound {} ===",
+            .{ pattern.root.len, bound },
+        );
+        var node_list = ArrayList(Node).empty;
+        errdefer for (node_list.items) |term| term.deinit(allocator);
+        var current = self;
+        var index = bound;
         // For each subsequent term, extend candidates that can continue matching
-        var term_idx: usize = 1;
-        while (term_idx < pattern.root.len) : (term_idx += 1) {
-            var next_queue = MatchQueue.empty;
-            errdefer {
-                for (next_queue.items) |*candidate| candidate.deinit(allocator);
-                next_queue.deinit(allocator);
+        var pattern_idx: usize = 0;
+        while (pattern_idx < pattern.root.len) : (pattern_idx += 1) {
+            // Start with initial candidates for the first term
+            const index_branch_trie = try current
+                .matchTerm(allocator, bound, bindings, pattern.root[pattern_idx]) orelse break;
+            index, const branch = .{ index_branch_trie.index, index_branch_trie.branch };
+            switch (branch) {
+                .key => |key| {
+                    debug("Matched key branch at index {}", .{index});
+                    try node_list.append(allocator, Node{ .key = key.entry.key_ptr.* });
+                },
+                .variable => |variable| {
+                    debug("Matched variable branch at index {}", .{index});
+                    try node_list.append(allocator, Node{ .variable = variable.entry.key_ptr.* });
+                },
+                .var_pattern => |var_pattern| {
+                    debug("Matched var_pattern branch at index {}", .{index});
+                    try node_list.append(allocator, Node{ .var_pattern = var_pattern.entry.key_ptr.* });
+                },
+                .value => {
+                    debug("Matched value branch at index {}", .{index});
+                    break;
+                },
             }
-
-            debug("Extending matches for term {} of {}", .{ term_idx, pattern.root.len });
-
-            for (current_queue.items) |*candidate| {
-                const node = pattern.root[term_idx];
-                var term_matches = try candidate.trie.matchAllTerms(
-                    allocator,
-                    candidate.index,
-                    candidate.bindings,
-                    node,
-                );
-                defer term_matches.deinit(allocator);
-
-                for (term_matches.items) |*term_match| {
-                    // Update matched_len to include this term
-                    var extended = term_match.*;
-                    term_match.bindings = .{}; // Transfer ownership
-                    extended.matched_len = candidate.matched_len + 1;
-                    try next_queue.append(allocator, extended);
-                }
-            }
-
-            current_queue = next_queue;
-
-            if (current_queue.items.len == 0) {
-                debug("No candidates remain after term {}", .{term_idx});
-                break;
-            }
+            current = index_branch_trie.trie;
         }
+        const full_match = pattern_idx == pattern.root.len;
+        if (!full_match)
+            debug("No full match found", .{});
 
-        // Find the candidate with the lowest index that matched all terms
-        for (current_queue.items) |*candidate| {
-            if (candidate.matched_len == pattern.root.len) {
-                // Check if we have a value at this point
-                const maybe_value = if (candidate.trie.findNextValue(candidate.index)) |value_branch| blk: {
-                    _, const branch = value_branch;
-                    break :blk branch.value;
-                } else null;
-
-                if (best_match == null or candidate.index < best_match.?.index) {
-                    if (best_match) |*old| old.deinit(allocator);
-
-                    best_match = Match{
-                        .key = pattern,
-                        .value = maybe_value,
-                        .node_ptr = candidate.trie,
-                        .index = candidate.index,
-                        .len = candidate.matched_len,
-                        .bindings = try candidate.bindings.clone(allocator),
-                    };
-                }
-            }
-        }
-
-        if (best_match) |m| {
-            debug("Found full match at index {} with {} terms", .{ m.index, m.len });
-            return m;
-        }
-
-        // No full match found - return partial match info
-        debug("No full match found", .{});
         return Match{
-            .key = pattern,
+            .key = Pattern{ .root = try node_list.toOwnedSlice(allocator) },
+            .value = if (full_match) blk: {
+                _, const branch = current.findNextValue(index) orelse
+                    break :blk null;
+                break :blk branch.value;
+            } else null,
             .node_ptr = self,
-            .index = bound,
-            .len = 0,
-            .bindings = try bindings.clone(allocator),
+            .index = index,
+            .len = pattern_idx,
         };
     }
 
@@ -1415,8 +1365,9 @@ pub const Trie = struct {
         var matched: Match = .{ .node_ptr = self };
         var index: usize = bound;
         var current: Pattern = pattern;
+        var bindings = VarBindings{};
         while (index < self.size()) : (matched.deinit(allocator)) {
-            matched = try self.match(allocator, index, matched.bindings, current);
+            matched = try self.match(allocator, index, &bindings, current);
             index = matched.index + 1;
             if (matched.len != pattern.root.len) {
                 debug("No complete match, skipping index {}.", .{matched.index});
@@ -1436,7 +1387,7 @@ pub const Trie = struct {
                 // }
 
             }
-            debug("vars in map: {}", .{matched.bindings.size});
+            debug("vars in map: {}", .{bindings.size});
             const slice = .{};
             if (matched.value) |next| {
                 // Prevent infinite recursion at this index. Recursion
@@ -1454,7 +1405,7 @@ pub const Trie = struct {
                 // next.write(streams.err) catch unreachable;
                 // streams.err.writeByte('\n') catch unreachable;
                 current =
-                    try rewrite(allocator, next, matched.bindings, &buffer);
+                    try rewrite(allocator, next, bindings, &buffer);
             } else {
                 debug("Match, but no value", .{});
                 break;
