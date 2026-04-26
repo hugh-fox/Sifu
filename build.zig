@@ -15,6 +15,11 @@ pub fn build(b: *std.Build) void {
     // set a preferred release mode, allowing the user to decide how to optimize.
     const optimize = b.standardOptimizeOption(.{});
 
+    const tree_sitter_sifu = b.dependency("tree_sitter_sifu", .{
+        .target = target,
+        .optimize = optimize,
+    });
+
     const module = b.addModule("sifu", .{
         .root_source_file = b.path("src/root.zig"),
         .target = target,
@@ -39,10 +44,6 @@ pub fn build(b: *std.Build) void {
                 .{ .name = "module", .module = module },
             },
         }),
-    });
-    const tree_sitter_sifu = b.dependency("tree_sitter_sifu", .{
-        .target = target,
-        .optimize = optimize,
     });
     exe.root_module.addImport("tree_sitter_sifu", tree_sitter_sifu.module("tree_sitter_sifu"));
 
@@ -83,6 +84,7 @@ pub fn build(b: *std.Build) void {
             .optimize = std.builtin.OptimizeMode.ReleaseSmall,
         }),
     });
+    wasm_lib.root_module.addImport("tree_sitter_sifu", tree_sitter_sifu.module("tree_sitter_sifu"));
     wasm_lib.entry = .disabled;
     wasm_lib.rdynamic = true;
     wasm_lib.root_module.pic = true;
@@ -105,6 +107,11 @@ pub fn build(b: *std.Build) void {
             .optimize = optimize,
         }),
     });
+    wasi_exe.root_module.addImport("tree_sitter_sifu", tree_sitter_sifu.module("tree_sitter_sifu"));
+    wasi_exe.entry = .disabled;
+    wasi_exe.rdynamic = true;
+    wasi_exe.root_module.pic = true;
+    wasi_exe.import_memory = true;
     const run_wasi = b.addInstallArtifact(wasi_exe, .{});
     run_wasi.step.dependOn(b.getInstallStep());
     const wasi_step = b.step("wasi", "Build a wasm exe");

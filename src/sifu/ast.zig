@@ -11,7 +11,6 @@ const AutoContext = std.array_hash_map.AutoContext;
 const StringContext = std.array_hash_map.StringContext;
 const ArrayListUnmanaged = std.ArrayListUnmanaged;
 const DoublyLinkedList = std.DoublyLinkedList;
-const print = util.print;
 const first = util.first;
 const last = util.last;
 const streams = util.streams;
@@ -26,6 +25,7 @@ const AstCursor = parser.TreeCursor;
 const Trie = @import("trie.zig").Trie;
 const Pattern = @import("trie.zig").Pattern;
 const Node = @import("trie.zig").Node;
+const debug = std.log.debug;
 
 pub const parser = @import("tree_sitter_sifu");
 
@@ -72,7 +72,7 @@ pub fn astToPattern(
 ) error{OutOfMemory}!Pattern {
     const node_kind = node.kind();
 
-    print("Parsing node of type '{s}' with {} children\n", .{ node_kind, node.childCount() });
+    debug("Parsing node of type '{s}' with {} children\n", .{ node_kind, node.childCount() });
 
     // Check if this is an operator node
     const is_operator = mem.eql(u8, node_kind, "semicolon") or
@@ -91,13 +91,13 @@ pub fn astToPattern(
     // since the grammar wraps everything in optional(_op)
     if ((mem.eql(u8, node_kind, "nested_pattern"))) {
         if (node.childByFieldName("inner")) |child| {
-            print("  Unwrapping nested_pattern, child kind {s}\n", .{child.kind()});
+            debug("  Unwrapping nested_pattern, child kind {s}\n", .{child.kind()});
             return try astToPattern(allocator, source, child);
         }
     }
 
     // Handle non-operator nodes by flattening their children
-    var nodes = std.ArrayList(Node){};
+    var nodes = std.ArrayList(Node).empty;
     errdefer {
         for (nodes.items) |n| n.deinit(allocator);
         nodes.deinit(allocator);
@@ -140,9 +140,9 @@ fn parseOperatorNode(
     node: AstNode,
     node_kind: []const u8,
 ) error{OutOfMemory}!Pattern {
-    print("Parsing operator '{s}'\n", .{node_kind});
+    debug("Parsing operator '{s}'\n", .{node_kind});
 
-    var nodes = std.ArrayList(Node){};
+    var nodes = std.ArrayList(Node).empty;
     errdefer {
         for (nodes.items) |n| n.deinit(allocator);
         nodes.deinit(allocator);
@@ -160,7 +160,7 @@ fn parseOperatorNode(
             const field_name = cursor.fieldName();
 
             if (field_name) |fname| {
-                print("  Field '{s}': {s}\n", .{ fname, child.kind() });
+                debug("  Field '{s}': {s}\n", .{ fname, child.kind() });
                 if (mem.eql(u8, fname, "lhs")) {
                     lhs_node = child;
                 } else if (mem.eql(u8, fname, "rhs")) {
@@ -204,7 +204,7 @@ fn parseOperatorNode(
         if (h > max_height) max_height = h;
     }
 
-    print("Operator result: {} nodes, height {}\n", .{ node_slice.len, max_height });
+    debug("Operator result: {} nodes, height {}\n", .{ node_slice.len, max_height });
     return .{ .root = node_slice, .height = max_height + 1 };
 }
 
@@ -271,7 +271,7 @@ fn convertRHS(
         Node{ .arrow = rhs_pattern }
     else if (mem.eql(u8, node_kind, "infix")) blk: {
         // For infix, include the operator symbol in the pattern
-        var infix_nodes = std.ArrayList(Node){};
+        var infix_nodes = std.ArrayList(Node).empty;
         errdefer {
             for (infix_nodes.items) |n| n.deinit(allocator);
             infix_nodes.deinit(allocator);

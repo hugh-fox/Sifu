@@ -3,9 +3,9 @@
 Map fn () -> ()
 
 # `,` is the cons operator
-Map fn (x, *xs) -> fn x, Map fn *xs
+Map fn (x, *xs) -> (fn x, Map fn *xs)
 
-# Alternative, minimal definition
+# Alternative, minimal definition as a function that takes variable args
 Empty ->
 Map fn -> Empty
 Map fn x, *xs -> fn x, Map fn *xs

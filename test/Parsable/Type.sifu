@@ -1,0 +1,2 @@
+# Type syntax is actually a bit backwards. This is a rule for types in the standard library:
+*value : type -> type (*value)

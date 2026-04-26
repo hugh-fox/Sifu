@@ -5,21 +5,19 @@ const Node = @import("sifu/trie.zig").Node;
 const ArenaAllocator = std.heap.ArenaAllocator;
 const Allocator = std.mem.Allocator;
 const ArrayList = std.ArrayList; // Update import
-const io = std.io;
 const fs = std.fs;
+const Io = std.Io;
 const mem = std.mem;
 const wasm = @import("wasm.zig");
 const builtin = @import("builtin");
 const no_os = builtin.target.os.tag == .freestanding;
 const util = @import("util.zig");
+const Streams = @import("streams.zig").Streams;
 const panic = util.panic;
-const print = util.print;
 const detect_leaks = @import("build_options").detect_leaks;
 const debug_mode = @import("builtin").mode == .Debug;
-const Reader = io.Reader;
-const Writer = io.Writer;
-const Streams = @import("streams.zig").Streams;
-const streams = @import("streams.zig").streams;
+const Reader = Io.Reader;
+const Writer = Io.Writer;
 const verbose_tests = @import("build_options").verbose_errors;
 const parser = @import("sifu/ast.zig").parser;
 const astNodeToTrie = @import("sifu/ast.zig").astNodeToTrie;
@@ -27,29 +25,31 @@ const astToPattern = @import("sifu/ast.zig").astToPattern;
 const parseAll = @import("sifu/ast.zig").parseAll;
 // TODO: merge these into just GPA, when it eventually implements wasm_allocator
 // itself
-var gpa = if (no_os) {} else GPA{};
+// var gpa = if (no_os) {} else GPA{};
 const GPA = util.GPA;
+const debug = std.log.debug;
 
-pub fn main() void {
+pub fn main(init: std.process.Init) void {
     // @compileLog(@sizeOf(Pat));
     // @compileLog(@sizeOf(Pat.Node));
     // @compileLog(@sizeOf(ArrayListUnmanaged(Pat.Node)));
 
-    const backing_allocator = if (no_os)
-        std.heap.wasm_allocator
-    else
-        std.heap.page_allocator;
+    // const backing_allocator = if (no_os)
+    //     std.heap.wasm_allocator
+    // else
+    //     std.heap.page_allocator;
 
-    var arena = if (comptime detect_leaks)
-        gpa
-    else
-        ArenaAllocator.init(backing_allocator);
-
-    repl(arena.allocator()) catch |e|
+    // var arena = if (comptime detect_leaks)
+    //     gpa
+    // else
+    //     ArenaAllocator.init(backing_allocator);
+    var arena = ArenaAllocator.init(init.gpa);
+    const streams = Streams.init(init.io);
+    repl(arena.allocator(), streams) catch |e|
         panic("{}", .{e});
 
     if (comptime detect_leaks)
-        _ = gpa.detectLeaks()
+        _ = init.gpa.detectLeaks()
     else
         arena.deinit();
 }
@@ -57,10 +57,11 @@ pub fn main() void {
 // TODO: Implement repl/file specific behavior
 fn repl(
     allocator: Allocator,
+    streams: Streams,
 ) !void {
     var trie = Trie{}; // This will be cleaned up with the arena
 
-    while (replStep(allocator, &trie)) |_| {
+    while (replStep(allocator, streams, &trie)) |_| {
         try streams.out.flush();
         try streams.err.flush();
     } else |err| switch (err) {
@@ -72,6 +73,7 @@ fn repl(
 
 fn replStep(
     allocator: Allocator,
+    streams: Streams,
     trie: *Trie,
 ) !?void {
     var buffer = std.Io.Writer.Allocating.init(allocator);
@@ -88,9 +90,9 @@ fn replStep(
     {
         const node = ast_ptr.rootNode();
         const text = buffer.written()[node.startByte()..node.endByte()];
-        print("Parsing term node of type '{s}' and {} children with text: '{s}'\n", .{ node.kind(), node.childCount(), text });
+        debug("Parsing term node of type '{s}' and {} children with text: '{s}'\n", .{ node.kind(), node.childCount(), text });
         try node.format(streams.err);
-        print("\n", .{});
+        debug("\n", .{});
     }
     const pattern = if (ast_ptr.rootNode().child(0)) |pattern_root|
         astToPattern(allocator, buffer.written(), pattern_root) catch |e|
@@ -108,16 +110,16 @@ fn replStep(
 
     // streams.out.print("replStep\n", .{}) catch unreachable;
     // streams.out.flush() catch unreachable;
-    print(
+    debug(
         "Converted pattern {} high and {} wide, of types: ",
         .{ pattern.height, pattern.root.len },
     );
     for (root) |app| {
-        print("{s} ", .{@tagName(app)});
+        debug("{s} ", .{@tagName(app)});
         app.writeSExp(streams.err, 0) catch unreachable;
         streams.err.writeByte(' ') catch unreachable;
     }
-    print("\nPattern: ", .{});
+    debug("\nPattern: ", .{});
     pattern.write(streams.err) catch unreachable;
     streams.err.writeByte('\n') catch unreachable;
     streams.err.flush() catch unreachable;
@@ -172,7 +174,7 @@ fn replStep(
         // try step.write(writer);
         // try writer.writeByte('\n');
 
-        var buff = ArrayList(Node){};
+        var buff = ArrayList(Node).empty;
         defer buff.deinit(allocator);
         // const result = try trie.evaluateSlice(allocator, pattern, &buff);
         const eval = try trie.evaluateComplete(allocator, 0, pattern);

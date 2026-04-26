@@ -9,9 +9,9 @@ const Allocator = std.mem.Allocator;
 const assert = std.debug.assert;
 const no_os = @import("builtin").target.os.tag == .freestanding;
 const wasm = @import("wasm.zig");
-const Writer = std.io.Writer;
+const Writer = std.Io.Writer;
 
-pub const streams = @import("streams.zig").streams;
+pub const Streams = @import("streams.zig").Streams;
 pub const panic = std.debug.panic;
 const detect_leaks = @import("build_options").detect_leaks;
 pub const GPA = std.heap.GeneralPurposeAllocator(
@@ -28,12 +28,7 @@ pub const GPA = std.heap.GeneralPurposeAllocator(
 pub fn toUntagged(comptime TaggedUnion: type) type {
     var info = @typeInfo(TaggedUnion);
     info.Union.tag_type = null;
-    return @Type(info);
-}
-
-/// Shorthand for printing to stderr or null writer and panicking on errors.
-pub fn print(comptime fmt: []const u8, args: anytype) void {
-    streams.err.print(fmt, args) catch panic(fmt, args);
+    return info;
 }
 
 pub fn popMany(comptime Elem: type, unmanaged_list_ptr: anytype, index: usize, allocator: Allocator) !std.ArrayList(Elem) {
