@@ -216,7 +216,9 @@ pub const Node = union(enum) {
         var buff: std.ArrayList(u8) = try .initCapacity(allocator, 1024);
         defer buff.deinit(allocator);
         var writer = Io.Writer.fromArrayList(&buff);
+        // TODO: figure out why this is empty string
         try self.writeSExp(&writer, null);
+        // std.log.debug("Formatted s-exp: {}", .{buff.items.len});
         return buff.toOwnedSlice(allocator);
     }
 
@@ -308,7 +310,8 @@ pub const Pattern = struct {
     }
 
     pub fn toString(self: Pattern, allocator: Allocator) ![]const u8 {
-        var buff: std.ArrayList(u8) = try .initCapacity(allocator, 1024);
+        // TODO: properly grow buff
+        var buff: std.ArrayList(u8) = try .initCapacity(allocator, 4096);
         var writer = Io.Writer.fromArrayList(&buff);
         try self.write(&writer);
         return buff.toOwnedSlice(allocator);
@@ -361,10 +364,16 @@ pub const Pattern = struct {
     }
 
     pub fn debug(self: Pattern, comptime fmt: []const u8) void {
-        const allocator = std.debug.getDebugInfoAllocator();
+        var buffer: [4096]u8 = undefined;
+        var fba: std.heap.FixedBufferAllocator = .init(&buffer);
+        const allocator = fba.allocator();
+
         const node_str = self.toString(allocator) catch unreachable;
-        std.log.debug(fmt, .{node_str});
-        defer allocator.free(node_str);
+        _ = node_str;
+        _ = fmt;
+        // std.log.debug("Node str len: {}", .{node_str.len});
+        // std.log.debug("Pattern len: {}", .{self.root.len});
+        // std.log.debug(fmt, .{node_str});
     }
 };
 
@@ -735,7 +744,8 @@ pub const Trie = struct {
                 const next = try trie.getOrPutKey(allocator, index, key);
                 break :blk next;
             },
-            .variable => |variable| try trie.getOrPutVar(allocator, index, variable),
+            .variable => |variable| try trie
+                .getOrPutVar(allocator, index, variable),
             .var_pattern => |var_pattern| {
                 _ = var_pattern;
                 @panic("unimplemented\n");
@@ -1002,8 +1012,10 @@ pub const Trie = struct {
     /// freed with destroy/deinit without freeing references in self.
     // Add this struct near the top with other Match/Eval structs
 
-    /// Finds all possible branches that could match the given node at or after bound.
-    /// Returns a queue of all candidate matches with their indices, branches, and updated bindings.
+    /// Finds all possible branches that could match the given node at or after
+    /// bound.
+    /// Returns a queue of all candidate matches with their indices, branches,
+    /// and updated bindings.
     fn matchAllTerms(
         self: *const Self,
         // allocator: Allocator,
@@ -1024,7 +1036,7 @@ pub const Trie = struct {
         node: Node,
     ) Allocator.Error!?IndexBranchTrie {
         debug("Branching `", .{});
-        node.debug("{s}");
+        // node.debug("{s}");
         debug("` from bound {}", .{bound});
 
         // Check for variable branches that match anything
@@ -1059,6 +1071,8 @@ pub const Trie = struct {
 
                     // Bind the variable to this node
                     try new_bindings.put(allocator, variable, node);
+                    // TODO: save for later, we still need to compare indices
+                    // with possible matches below to find the smallest
                     return IndexBranchTrie{
                         .index = var_bound,
                         .branch = var_branch,
@@ -1077,7 +1091,8 @@ pub const Trie = struct {
                     // Find the next valid index for this key
                     const key_trie = entry.value_ptr;
                     if (key_trie.findNextByIndex(bound)) |key_candidate_index| {
-                        const key_index, _ = self.branches.items[key_candidate_index];
+                        const key_index, _ =
+                            self.branches.items[key_candidate_index];
 
                         return IndexBranchTrie{
                             .index = key_index,
@@ -1102,7 +1117,10 @@ pub const Trie = struct {
                     // Variable already bound - need to match the bound value
                     return self.matchTerm(allocator, bound, bindings, bound_node);
                 } else {
-                    debug("Variable {s} not yet bound - matches anything", .{variable});
+                    debug(
+                        "Variable {s} not yet bound - matches anything",
+                        .{variable},
+                    );
                     // Variable not bound - it can match any single term
                     // We need to try matching each possible branch
                     if (self.findNext(bound)) |next_candidate| {
@@ -1111,9 +1129,15 @@ pub const Trie = struct {
 
                         // Bind the variable to what we're matching
                         const bound_value = switch (next_branch) {
-                            .key => |branch_node| Node.ofKey(branch_node.entry.key_ptr.*),
-                            .variable => |branch_node| Node.ofVar(branch_node.entry.key_ptr.*),
-                            .var_pattern => |branch_node| Node{ .var_pattern = branch_node.entry.key_ptr.* },
+                            .key => |branch_node| Node.ofKey(
+                                branch_node.entry.key_ptr.*,
+                            ),
+                            .variable => |branch_node| Node.ofVar(
+                                branch_node.entry.key_ptr.*,
+                            ),
+                            .var_pattern => |branch_node| Node{
+                                .var_pattern = branch_node.entry.key_ptr.*,
+                            },
                             .value => {
                                 // TODO
                                 // new_bindings.deinit(allocator);
@@ -1177,9 +1201,11 @@ pub const Trie = struct {
             .trie => {
                 @panic("trie matching not yet implemented");
             },
-
-            else => {
-                @panic("unimplemented node type in matchTerm");
+            inline .arrow, .match, .list, .infix => |_, tag| {
+                std.debug.panic(
+                    "unimplemented node type {s} in matchTerm",
+                    .{@tagName(tag)},
+                );
             },
         }
 
@@ -1206,22 +1232,37 @@ pub const Trie = struct {
         // For each subsequent term, extend candidates that can continue matching
         var pattern_idx: usize = 0;
         while (pattern_idx < pattern.root.len) : (pattern_idx += 1) {
+            debug("pattern.root[0] = {s}", .{@tagName(pattern.root[0])});
             // Start with initial candidates for the first term
-            const index_branch_trie = try current
-                .matchTerm(allocator, bound, bindings, pattern.root[pattern_idx]) orelse break;
-            index, const branch = .{ index_branch_trie.index, index_branch_trie.branch };
+            const index_branch_trie = try current.matchTerm(
+                allocator,
+                bound,
+                bindings,
+                pattern.root[pattern_idx],
+            ) orelse break;
+            index, const branch =
+                .{ index_branch_trie.index, index_branch_trie.branch };
             switch (branch) {
                 .key => |key| {
                     debug("Matched key branch at index {}", .{index});
-                    try node_list.append(allocator, Node{ .key = key.entry.key_ptr.* });
+                    try node_list.append(
+                        allocator,
+                        Node{ .key = key.entry.key_ptr.* },
+                    );
                 },
                 .variable => |variable| {
                     debug("Matched variable branch at index {}", .{index});
-                    try node_list.append(allocator, Node{ .variable = variable.entry.key_ptr.* });
+                    try node_list.append(
+                        allocator,
+                        Node{ .variable = variable.entry.key_ptr.* },
+                    );
                 },
                 .var_pattern => |var_pattern| {
                     debug("Matched var_pattern branch at index {}", .{index});
-                    try node_list.append(allocator, Node{ .var_pattern = var_pattern.entry.key_ptr.* });
+                    try node_list.append(
+                        allocator,
+                        Node{ .var_pattern = var_pattern.entry.key_ptr.* },
+                    );
                 },
                 .value => {
                     debug("Matched value branch at index {}", .{index});
