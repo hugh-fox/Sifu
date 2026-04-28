@@ -752,6 +752,7 @@ pub const Trie = struct {
             },
             .pattern => |sub_pat| blk: {
                 var next = trie;
+                debug("Processing pattern node", .{});
                 next = try next.getOrPutKey(allocator, index, "(");
                 next = try next.ensurePath(allocator, index, sub_pat);
                 next = try next.getOrPutKey(allocator, index, ")");
@@ -764,6 +765,16 @@ pub const Trie = struct {
                 // next = try next.getOrPutKey(allocator, index, "}");
                 // break :blk next;
                 @panic("unimplemented\n");
+            },
+            .list => |comma| blk: {
+                var next = trie;
+                for (0..comma.root.len - 1) |i| {
+                    next = try next.ensurePathTerm(allocator, index, comma.root[i]);
+                }
+                next = try next.getOrPutKey(allocator, index, ",");
+                next = try next.ensurePath(allocator, index, comma);
+
+                break :blk next;
             },
             // Pattern trie's values will always be tries too, which will
             // map nested pattern to the next trie on the current level.
@@ -1168,6 +1179,7 @@ pub const Trie = struct {
                 const open_entry = self.map.getEntry("(") orelse return null;
                 const open_trie = open_entry.value_ptr;
                 const open_index = open_trie.findNextByIndex(bound) orelse return null;
+                // TODO: should this be open_trie instead of self?
                 const idx, _ = self.branches.items[open_index];
 
                 // Recursively match the pattern contents
@@ -1175,9 +1187,15 @@ pub const Trie = struct {
                     .match(allocator, idx, bindings, pattern);
                 defer pattern_match.deinit(allocator);
 
-                if (pattern_match.len != pattern.root.len) return null;
+                if (pattern_match.len != pattern.root.len) {
+                    debug("Sub-pattern match failed: only matched {} of {} terms", .{
+                        pattern_match.len,
+                        pattern.root.len,
+                    });
+                    return null;
+                }
                 // Successfully matched entire pattern, now match closing paren
-                const close_entry = self.map.getEntry(")") orelse return null;
+                const close_entry = open_trie.map.getEntry(")") orelse return null;
                 const close_trie = close_entry.value_ptr;
                 const close_index = close_trie
                     .findNextByIndex(pattern_match.index) orelse return null;
@@ -1197,11 +1215,29 @@ pub const Trie = struct {
             .var_pattern => {
                 @panic("var_pattern matching not yet implemented");
             },
-
+            .list => |pattern| {
+                const open_entry = self.map.getEntry(",") orelse return null;
+                const open_trie = open_entry.value_ptr;
+                const open_index = open_trie.findNextByIndex(bound) orelse return null;
+                const idx, _ = self.branches.items[open_index];
+                var pattern_match = try open_trie
+                    .match(allocator, idx, bindings, pattern);
+                defer pattern_match.deinit(allocator);
+                return IndexBranchTrie{
+                    .index = open_index,
+                    .branch = .{
+                        .key = .{
+                            .entry = open_entry,
+                            .next_index = open_index,
+                        },
+                    },
+                    .trie = open_trie,
+                };
+            },
             .trie => {
                 @panic("trie matching not yet implemented");
             },
-            inline .arrow, .match, .list, .infix => |_, tag| {
+            inline .arrow, .match, .infix => |_, tag| {
                 std.debug.panic(
                     "unimplemented node type {s} in matchTerm",
                     .{@tagName(tag)},
@@ -1232,8 +1268,9 @@ pub const Trie = struct {
         // For each subsequent term, extend candidates that can continue matching
         var pattern_idx: usize = 0;
         while (pattern_idx < pattern.root.len) : (pattern_idx += 1) {
-            debug("pattern.root[0] = {s}", .{@tagName(pattern.root[0])});
+            // debug("pattern.root[0] = {s}", .{@tagName(pattern.root[0])});
             // Start with initial candidates for the first term
+            debug("pattern index: {}", .{pattern_idx});
             const index_branch_trie = try current.matchTerm(
                 allocator,
                 bound,

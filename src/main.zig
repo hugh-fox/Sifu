@@ -98,6 +98,7 @@ fn replStep(
         streams.err.writeByte('\n') catch unreachable;
         try streams.err.flush();
     }
+    // Get the optional list of one or more terms
     const pattern = if (ast_ptr.rootNode().child(0)) |pattern_root|
         astToPattern(allocator, buffer.written(), pattern_root) catch |e|
             panic("Error parsing stdin: {}", .{e})
@@ -122,9 +123,6 @@ fn replStep(
     //     // streams.err.writeByte(' ') catch unreachable;
     // }
     pattern.debug("Pattern: {s}");
-
-    if (pattern.isEmpty())
-        return null;
 
     // TODO: read a "file" from stdin first, until eof, then start eval/matching
     // until another eof.
