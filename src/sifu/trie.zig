@@ -739,6 +739,7 @@ pub const Trie = struct {
         index: usize,
         term: Node,
     ) Allocator.Error!*Self {
+        debug("This address: {*}", .{trie});
         return switch (term) {
             .key => |key| blk: {
                 const next = try trie.getOrPutKey(allocator, index, key);
@@ -754,8 +755,11 @@ pub const Trie = struct {
                 var next = trie;
                 debug("Processing pattern node", .{});
                 next = try next.getOrPutKey(allocator, index, "(");
+                debug("Next address: {*}", .{next});
                 next = try next.ensurePath(allocator, index, sub_pat);
+                debug("Next address: {*}", .{next});
                 next = try next.getOrPutKey(allocator, index, ")");
+                debug("Next address: {*}", .{next});
                 break :blk next;
             },
             .trie => |sub_trie| {
@@ -840,25 +844,29 @@ pub const Trie = struct {
     pub fn append(
         trie: *Self,
         allocator: Allocator,
-        key: Pattern,
+        pattern: Pattern,
         optional_value: ?Pattern,
     ) Allocator.Error!*Self {
         // The length of values will be the next entry index after insertion
         const index = trie.size();
         var current = trie;
-        current = try current.ensurePath(allocator, index, key);
-        // If there isn't a value, use the key as the value instead
+        current = try current.ensurePath(allocator, index, pattern);
+        // If there isn't a value, use the pattern as the value instead
         const value = optional_value orelse
-            try key.copy(allocator);
+            try pattern.copy(allocator);
         try current.value_cache.append(
             allocator,
             current.branches.items.len,
+        );
+        debug(
+            "Added value of len {} at index {} on trie {*}",
+            .{ value.root.len, current.branches.items.len, current },
         );
         try current.branches.append(
             allocator,
             IndexBranch{ index, .{ .value = value } },
         );
-        debug("Value cache: {any}", .{current.value_cache.items});
+        // debug("Value cache: {any}", .{current.value_cache.items});
         return current;
     }
 
@@ -1046,9 +1054,10 @@ pub const Trie = struct {
         bindings: *VarBindings,
         node: Node,
     ) Allocator.Error!?IndexBranchTrie {
-        debug("Branching `", .{});
+        // debug("Branching `", .{});
         // node.debug("{s}");
-        debug("` from bound {}", .{bound});
+        // debug("` from bound {}", .{bound});
+        debug("Matching {*}", .{self});
 
         // Check for variable branches that match anything
         if (self.findNextVar(bound)) |var_candidate| {
@@ -1097,7 +1106,7 @@ pub const Trie = struct {
         switch (node) {
             .key => |key| {
                 if (self.map.getEntry(key)) |entry| {
-                    debug("Found key match: {s}", .{key});
+                    debug("Found key match: {s} at {*}", .{ key, entry.value_ptr });
 
                     // Find the next valid index for this key
                     const key_trie = entry.value_ptr;
@@ -1174,10 +1183,10 @@ pub const Trie = struct {
                 }
             },
             .pattern => |pattern| {
-                debug("Matching sub-pattern", .{});
                 // Match opening paren
                 const open_entry = self.map.getEntry("(") orelse return null;
                 const open_trie = open_entry.value_ptr;
+                debug("Matching sub-pattern on {*}", .{open_trie});
                 const open_index = open_trie.findNextByIndex(bound) orelse return null;
                 // TODO: should this be open_trie instead of self?
                 const idx, _ = self.branches.items[open_index];
@@ -1194,12 +1203,18 @@ pub const Trie = struct {
                     });
                     return null;
                 }
+                const match_index = pattern_match.node_ptr.findNextByIndex(bound) orelse return null;
+                const pattern_match_index, _ = pattern_match.node_ptr.branches.items[match_index];
+
+                debug("Closing value matched {*}", .{pattern_match.node_ptr});
                 // Successfully matched entire pattern, now match closing paren
-                const close_entry = open_trie.map.getEntry(")") orelse return null;
+                const close_entry = pattern_match.node_ptr.map.getEntry(")") orelse return null;
                 const close_trie = close_entry.value_ptr;
+                debug("Closing paren matched {*}", .{close_trie});
                 const close_index = close_trie
-                    .findNextByIndex(pattern_match.index) orelse return null;
+                    .findNextByIndex(pattern_match_index) orelse return null;
                 const close_idx, _ = close_trie.branches.items[close_index];
+                debug("Sub-pattern matched, returning trie: {*}", .{close_trie});
                 return IndexBranchTrie{
                     .index = close_idx,
                     .branch = .{
@@ -1267,16 +1282,21 @@ pub const Trie = struct {
         var index = bound;
         // For each subsequent term, extend candidates that can continue matching
         var pattern_idx: usize = 0;
+        debug("pattern root len: {}", .{pattern.root.len});
         while (pattern_idx < pattern.root.len) : (pattern_idx += 1) {
+            debug("pattern index: {}", .{pattern_idx});
             // debug("pattern.root[0] = {s}", .{@tagName(pattern.root[0])});
             // Start with initial candidates for the first term
-            debug("pattern index: {}", .{pattern_idx});
             const index_branch_trie = try current.matchTerm(
                 allocator,
                 bound,
                 bindings,
                 pattern.root[pattern_idx],
-            ) orelse break;
+            ) orelse {
+                debug("matchTerm failed at pattern index {}", .{pattern_idx});
+                pattern_idx += 1;
+                break;
+            };
             index, const branch =
                 .{ index_branch_trie.index, index_branch_trie.branch };
             switch (branch) {
@@ -1309,6 +1329,7 @@ pub const Trie = struct {
             current = index_branch_trie.trie;
         }
         const full_match = pattern_idx == pattern.root.len;
+        debug("pattern_idx {} == pattern root len: {}", .{ pattern_idx, pattern.root.len });
         if (!full_match)
             debug("No full match found", .{});
 
@@ -1319,7 +1340,7 @@ pub const Trie = struct {
                     break :blk null;
                 break :blk branch.value;
             } else null,
-            .node_ptr = self,
+            .node_ptr = current,
             .index = index,
             .len = pattern_idx,
         };

@@ -73,7 +73,7 @@ pub fn astToPattern(
 ) error{OutOfMemory}!Pattern {
     const node_kind = node.kind();
 
-    debug("Parsing node of type '{s}' with {} children", .{ node_kind, node.childCount() });
+    // debug("Parsing node of type '{s}' with {} children", .{ node_kind, node.childCount() });
 
     // Check if this is an operator node
     const is_operator = mem.eql(u8, node_kind, "semicolon") or
@@ -92,7 +92,7 @@ pub fn astToPattern(
     // since the grammar wraps everything in optional(_op)
     if ((mem.eql(u8, node_kind, "nested_pattern"))) {
         if (node.childByFieldName("terms")) |child| {
-            debug("  Unwrapping nested_pattern, child kind {s}", .{child.kind()});
+            // debug("  Unwrapping nested_pattern, child kind {s}", .{child.kind()});
             return try astToPattern(allocator, source, child);
         }
     }
@@ -141,7 +141,7 @@ fn parseOperatorNode(
     node: AstNode,
     node_kind: []const u8,
 ) error{OutOfMemory}!Pattern {
-    debug("Parsing operator '{s}'", .{node_kind});
+    // debug("Parsing operator '{s}'", .{node_kind});
 
     var nodes = std.ArrayList(Node).empty;
     errdefer {
@@ -161,7 +161,7 @@ fn parseOperatorNode(
             const field_name = cursor.fieldName();
 
             if (field_name) |fname| {
-                debug("  Field '{s}': {s}", .{ fname, child.kind() });
+                // debug("  Field '{s}': {s}", .{ fname, child.kind() });
                 if (mem.eql(u8, fname, "lhs")) {
                     lhs_node = child;
                 } else if (mem.eql(u8, fname, "rhs")) {
@@ -205,7 +205,7 @@ fn parseOperatorNode(
         if (h > max_height) max_height = h;
     }
 
-    debug("Operator result: {} nodes, height {}", .{ node_slice.len, max_height });
+    // debug("Operator result: {} nodes, height {}", .{ node_slice.len, max_height });
     return .{ .root = node_slice, .height = max_height + 1 };
 }
 
