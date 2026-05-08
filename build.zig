@@ -84,11 +84,7 @@ pub fn build(b: *std.Build) void {
             .optimize = std.builtin.OptimizeMode.ReleaseSmall,
         }),
     });
-    wasm_lib.root_module.addImport("tree_sitter_sifu", tree_sitter_sifu.module("tree_sitter_sifu"));
-    wasm_lib.entry = .disabled;
-    wasm_lib.rdynamic = true;
-    wasm_lib.root_module.pic = true;
-    wasm_lib.import_memory = true;
+    // wasm_lib.root_module.addImport("tree_sitter_sifu", tree_sitter_sifu.module("tree_sitter_sifu"));
     const run_wasm = b.addInstallArtifact(wasm_lib, .{});
     run_wasm.step.dependOn(b.getInstallStep());
     const wasm_step = b.step("wasm", "Build a wasm lib");
@@ -108,10 +104,6 @@ pub fn build(b: *std.Build) void {
         }),
     });
     wasi_exe.root_module.addImport("tree_sitter_sifu", tree_sitter_sifu.module("tree_sitter_sifu"));
-    wasi_exe.entry = .disabled;
-    wasi_exe.rdynamic = true;
-    wasi_exe.root_module.pic = true;
-    wasi_exe.import_memory = true;
     const run_wasi = b.addInstallArtifact(wasi_exe, .{});
     run_wasi.step.dependOn(b.getInstallStep());
     const wasi_step = b.step("wasi", "Build a wasm exe");
