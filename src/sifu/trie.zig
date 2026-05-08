@@ -794,11 +794,17 @@ pub const Trie = struct {
             },
             .list => |comma| blk: {
                 var next = trie;
-                for (0..comma.root.len - 1) |i| {
-                    next = try next.ensurePathTerm(allocator, index, comma.root[i]);
-                }
                 next = try next.getOrPutKey(allocator, index, ",");
                 next = try next.ensurePath(allocator, index, comma);
+                // debug("Comma literal address: {*}", .{next});
+                // debug("Comma len {} at {*}", .{ comma.root.len, next });
+                // for (0..comma.root.len - 1) |i| {
+                //     next = try next.ensurePathTerm(allocator, index, comma.root[i]);
+                //     debug("Comma Prefix address: {*}", .{next});
+                // }
+                // debug("last: {s}", .{comma.root[comma.root.len - 1].key});
+                // next = try next.ensurePath(allocator, index, comma.root[comma.root.len - 1].pattern);
+                // debug("Comma rhs address: {*}", .{next});
 
                 break :blk next;
             },
@@ -972,7 +978,7 @@ pub const Trie = struct {
         branches_bound: usize,
         cache: []const usize,
     ) ?IndexBranch {
-        debug("Cache: {any}", .{cache});
+        // debug("Cache: {any}", .{cache});
         const cache_index = sort.lowerBound(
             usize,
             cache,
@@ -984,7 +990,7 @@ pub const Trie = struct {
                 ) Order {
                     const bound, const branches = ctx;
                     const index, _ = branches[cmp_index];
-                    debug("Compare cached: {} < {}", .{ bound, index });
+                    // debug("Compare cached: {} < {}", .{ bound, index });
                     return math.order(bound, index);
                 }
             }.lessThan,
@@ -1084,7 +1090,13 @@ pub const Trie = struct {
         // debug("Branching `", .{});
         // node.debug("{s}");
         // debug("` from bound {}", .{bound});
-        debug("Matching {*}", .{self});
+        debug("Matching term {s} from {*}", .{
+            switch (node) {
+                .key, .variable, .var_pattern => |ident| ident,
+                else => |tag| @tagName(tag),
+            },
+            self,
+        });
 
         // Check for variable branches that match anything
         if (self.findNextVar(bound)) |var_candidate| {
@@ -1257,6 +1269,7 @@ pub const Trie = struct {
                 @panic("var_pattern matching not yet implemented");
             },
             .list => |pattern| {
+                debug("Matched list with len {}", .{pattern.root.len});
                 const open_entry = self.map.getEntry(",") orelse return null;
                 const open_trie = open_entry.value_ptr;
                 const open_index = open_trie.findNextByIndex(bound) orelse return null;
@@ -1264,15 +1277,13 @@ pub const Trie = struct {
                 var pattern_match = try open_trie
                     .match(allocator, idx, term_bindings, pattern_bindings, pattern);
                 defer pattern_match.deinit(allocator);
+                const match_index = pattern_match.node_ptr.findNextByIndex(bound) orelse return null;
+                const pattern_match_index, const pattern_match_branch = pattern_match.node_ptr.branches.items[match_index];
+
                 return IndexBranchTrie{
-                    .index = open_index,
-                    .branch = .{
-                        .key = .{
-                            .entry = open_entry,
-                            .next_index = open_index,
-                        },
-                    },
-                    .trie = open_trie,
+                    .index = pattern_match_index,
+                    .branch = pattern_match_branch,
+                    .trie = pattern_match.node_ptr,
                 };
             },
             .trie => {
@@ -1357,7 +1368,7 @@ pub const Trie = struct {
         }
         debug("pattern root len: {}", .{pattern.root.len});
         while (pattern_idx < pattern.root.len) : (pattern_idx += 1) {
-            debug("pattern index: {}", .{pattern_idx});
+            // debug("pattern index: {}", .{pattern_idx});
             // debug("pattern.root[0] = {s}", .{@tagName(pattern.root[0])});
             // Start with initial candidates for the first term
             const index_branch_trie = try current.matchTerm(
@@ -1373,29 +1384,42 @@ pub const Trie = struct {
             };
             index, const branch =
                 .{ index_branch_trie.index, index_branch_trie.branch };
+            debug("Matched term at {*}", .{index_branch_trie.trie});
             switch (branch) {
                 .key => |key| {
-                    debug("Matched key branch at index {}", .{index});
+                    debug(
+                        "Matched key branch at index {} at {s}",
+                        .{ index, key.entry.key_ptr.* },
+                    );
                     try node_list.append(
                         allocator,
                         Node{ .key = key.entry.key_ptr.* },
                     );
                 },
                 .variable => |variable| {
-                    debug("Matched variable branch at index {}", .{index});
+                    debug(
+                        "Matched key branch at index {} at {*}",
+                        .{ index, variable.entry.key_ptr.* },
+                    );
                     try node_list.append(
                         allocator,
                         Node{ .variable = variable.entry.key_ptr.* },
                     );
                 },
                 .var_pattern => |var_pattern| {
-                    debug("Matched var_pattern branch at index {}", .{index});
+                    debug(
+                        "Matched key branch at index {} at {*}",
+                        .{ index, var_pattern.entry.key_ptr.* },
+                    );
                     try node_list.append(
                         allocator,
                         Node{ .var_pattern = var_pattern.entry.key_ptr.* },
                     );
                 },
-                .value => {
+                .value => |value| {
+                    current = index_branch_trie.trie;
+                    pattern_idx += 1;
+                    _ = value;
                     debug("Matched value branch at index {}", .{index});
                     break;
                 },
@@ -1580,7 +1604,7 @@ pub const Trie = struct {
                 current =
                     try rewrite(allocator, next, term_bindings, pattern_bindings, &buffer);
             } else {
-                debug("Match, but no value", .{});
+                debug("Eval match at {*}, but no value", .{matched.node_ptr});
                 break;
             }
         }
@@ -1751,7 +1775,8 @@ pub const Trie = struct {
             // if (comptime debug_mode)
             //     try writer.debug("[{}] ", .{index});
         }
-        try writer.writeAll("-> ");
+        // TODO print correct precedence
+        try writer.writeAll("==> ");
         try branch.value.writeIndent(writer, null);
     }
 

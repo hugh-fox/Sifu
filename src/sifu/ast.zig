@@ -149,6 +149,7 @@ fn parseOperatorNode(
         nodes.deinit(allocator);
     }
 
+    // For built-in operators without operands, all three of these are null
     var lhs_node: ?AstNode = null;
     var rhs_node: ?AstNode = null;
     var op_symbol: ?[]const u8 = null;
@@ -176,7 +177,6 @@ fn parseOperatorNode(
             if (!cursor.gotoNextSibling()) break;
         }
     }
-
     // Distribute LHS into the array
     if (lhs_node) |lhs| {
         const lhs_pattern = try astToPattern(allocator, source, lhs);
@@ -184,6 +184,12 @@ fn parseOperatorNode(
             try nodes.append(allocator, try lhs_child.copy(allocator));
         }
     }
+
+    // Create LHS wrapper node
+    // const lhs_pattern = if (lhs_node) |lhs|
+    //     try astToPattern(allocator, source, lhs)
+    // else
+    //     Pattern{ .root = &[_]Node{}, .height = 0 };
 
     // Create RHS wrapper node
     const rhs_pattern = if (rhs_node) |rhs|
@@ -196,6 +202,8 @@ fn parseOperatorNode(
         panic("Error converting RHS for operator '{s}': {}", .{ node_kind, e });
     };
 
+    // try nodes.append(allocator, Node{ .pattern = lhs_pattern });
+    debug("wrapper node type {s}", .{@tagName(wrapper_node)});
     try nodes.append(allocator, wrapper_node);
 
     const node_slice = try nodes.toOwnedSlice(allocator);
@@ -251,7 +259,7 @@ fn parseTermNode(
 fn getNodeHeight(node: Node) usize {
     return switch (node) {
         .pattern, .infix, .match, .arrow, .list => |p| p.height,
-        .trie => 1,
+        .trie => 1, // TODO store height in Tries and retrieve it here
         else => 0,
     };
 }
@@ -265,7 +273,7 @@ fn convertRHS(
     return if (mem.eql(u8, node_kind, "terms"))
         Node{ .pattern = rhs_pattern }
     else if (mem.eql(u8, node_kind, "semicolon"))
-        Node{ .list = rhs_pattern }
+        Node{ .list = rhs_pattern } // TODO: add node type of semicolon list
     else if (mem.eql(u8, node_kind, "comma"))
         Node{ .list = rhs_pattern }
     else if (mem.eql(u8, node_kind, "long_match") or mem.eql(u8, node_kind, "match"))
