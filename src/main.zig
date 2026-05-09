@@ -133,7 +133,8 @@ fn replStep(
         _ = try trie.append(
             allocator,
             .{ .root = key, .height = pattern.height },
-            try val.copy(allocator),
+            // try val.copy(allocator),
+            val,
         );
     } else {
         // Free the rest of the match's string allocations. Those used in
@@ -189,6 +190,6 @@ fn replStep(
         try streams.out.writeByte('\n');
     }
 
-    try trie.writeIndent(streams.out, 0);
+    // try trie.writeIndent(streams.out, 0);
     try trie.writeCanonical(streams.out);
 }

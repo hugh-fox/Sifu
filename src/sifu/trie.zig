@@ -148,7 +148,8 @@ pub const Node = union(enum) {
             .variable => other == .variable,
             .var_pattern => other == .var_pattern,
             .trie => |trie| trie.eql(other.trie),
-            inline else => |pattern, tag| pattern.eql(@field(other, @tagName(tag))),
+            inline else => |pattern, tag| pattern
+                .eql(@field(other, @tagName(tag))),
         };
     }
     pub fn ofKey(key: []const u8) Node {
@@ -227,6 +228,12 @@ pub const Node = union(enum) {
         writer: *Writer,
         optional_indent: ?usize,
     ) !void {
+        // std.log.debug("WriteSExp {s}", .{
+        //     switch (self) {
+        //         .key, .variable, .var_pattern => |ident| ident,
+        //         else => |tag| @tagName(tag),
+        //     },
+        // });
         for (0..optional_indent orelse 0) |_|
             try writer.writeByte(' ');
         switch (self) {
@@ -261,11 +268,11 @@ pub const Node = union(enum) {
                     .list => try writer.writeAll(", "),
                     else => {},
                 }
+                try pattern.writeIndent(writer, optional_indent);
                 // Don't write an s-exp as its redundant for ops
                 // if (pattern.root.len > 0)
                 //     try pattern.root[pattern.root.len - 1]
                 //         .writeSExp(writer, optional_indent);
-                try pattern.writeIndent(writer, optional_indent);
             },
         }
     }
@@ -1479,8 +1486,11 @@ pub const Trie = struct {
         pattern: Pattern,
         term_bindings: VarBindings,
         pattern_bindings: VarPatternBindings,
-        result: *ArrayList(Node),
     ) Allocator.Error!Pattern {
+        debug("Rewrite pattern of len {}", .{pattern.root.len});
+        var result = ArrayList(Node).empty;
+        errdefer result.deinit(allocator);
+
         for (pattern.root) |node| switch (node) {
             .key => |key| try result.append(allocator, Node.ofKey(key)),
             .variable => |variable| {
@@ -1508,14 +1518,20 @@ pub const Trie = struct {
                 } else try result.append(allocator, node);
             },
             inline .pattern, .arrow, .match, .list, .infix => |nested, tag| {
+                debug("Rewrite recursing on {s} len {}", .{ @tagName(tag), nested.root.len });
                 try result.append(allocator, @unionInit(
                     Node,
                     @tagName(tag),
-                    try rewrite(allocator, nested, term_bindings, pattern_bindings, result),
+                    try rewrite(allocator, nested, term_bindings, pattern_bindings),
                 ));
             },
             else => panic("unimplemented", .{}),
         };
+        debug(
+            "Rewrite returning on pattern len {} with result len {}",
+            .{ pattern.root.len, result.items.len },
+        );
+
         return Pattern{ .root = try result.toOwnedSlice(allocator) };
     }
 
@@ -1546,9 +1562,10 @@ pub const Trie = struct {
             );
             if (matched.value) |value| {
                 debug("matched value: {}", .{value});
+                // return value;
+                // _ = result;
                 return try rewrite(allocator, value, matched.bindings, result);
             } else debug("but no match", .{});
-            debug("", .{});
             total_matched += matched.len;
             if (total_matched < pattern.root.len)
                 break;
@@ -1565,8 +1582,6 @@ pub const Trie = struct {
         bound: usize,
         pattern: Pattern,
     ) Allocator.Error!Eval {
-        var buffer = ArrayList(Node).empty;
-        defer buffer.deinit(allocator); // shouldn't be necessary, but just in case
         var matched: Match = .{ .node_ptr = self };
         var index: usize = bound;
         var current: Pattern = pattern;
@@ -1606,12 +1621,12 @@ pub const Trie = struct {
                         if (!trie.asEmpty().eql(next_trie))
                             break;
                     } else break; // Don't evaluate the same trie
-                debug("Eval matched {}: ", .{next.root.len});
-                next.debug("{s}");
+                // debug("Eval matched len {}", .{next.root.len});
+                // next.debug("{s}");
                 // next.write(streams.err) catch unreachable;
                 // streams.err.writeByte('\n') catch unreachable;
                 current =
-                    try rewrite(allocator, next, term_bindings, pattern_bindings, &buffer);
+                    try rewrite(allocator, next, term_bindings, pattern_bindings);
             } else {
                 debug("Eval match at {*}, but no value", .{matched.node_ptr});
                 break;
