@@ -4,6 +4,8 @@ const ArenaAllocator = std.heap.ArenaAllocator;
 const Trie = @import("sifu/trie.zig").Trie;
 const Node = @import("sifu/trie.zig").Node;
 const Pattern = @import("sifu/trie.zig").Pattern;
+const VarBindings = @import("sifu/trie.zig").VarBindings;
+const VarPatternBindings = @import("sifu/trie.zig").VarPatternBindings;
 
 test "Submodules" {}
 
@@ -66,8 +68,10 @@ test "Pattern: simple vals" {
     _ = try actual.append(allocator, key2, val2);
     try testing.expect(expected.eql(actual));
 
+    var term_bindings = VarBindings{};
+    var pattern_bindings = VarPatternBindings{};
     // Verify match returns value
-    var res = try actual.match(allocator, 0, .{}, key);
+    var res = try actual.match(allocator, 0, &term_bindings, &pattern_bindings, key);
     defer res.deinit(allocator);
     try testing.expect(res.value orelse null != null);
     try testing.expect(res.value.?.eql(val));

@@ -189,5 +189,6 @@ fn replStep(
         try streams.out.writeByte('\n');
     }
 
+    try trie.writeIndent(streams.out, 0);
     try trie.writeCanonical(streams.out);
 }
