@@ -122,7 +122,7 @@ fn replStep(
     //     // app.writeSExp(streams.err, 0) catch unreachable;
     //     // streams.err.writeByte(' ') catch unreachable;
     // }
-    pattern.debug("Pattern: {s}");
+    // pattern.debug("Pattern: {s}");
 
     // TODO: read a "file" from stdin first, until eof, then start eval/matching
     // until another eof.
@@ -186,10 +186,12 @@ fn replStep(
         } else try streams.out.print("No match.\n", .{});
         const result = eval.value orelse return;
 
+        // std.log.debug("WriteIndent on pattern len {}", .{result.root.len});
         try result.writeIndent(streams.out, 0);
+        // for (result.root) |r| try r.writeSExp(streams.out, 0);
         try streams.out.writeByte('\n');
     }
 
     // try trie.writeIndent(streams.out, 0);
-    try trie.writeCanonical(streams.out);
+    // try trie.writeCanonical(streams.out);
 }
