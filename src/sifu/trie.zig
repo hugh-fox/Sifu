@@ -1332,43 +1332,46 @@ pub const Trie = struct {
         var index = bound;
         // For each subsequent term, extend candidates that can continue matching
         var pattern_idx: usize = 0;
-        if (self.findNextVarPattern(bound)) |var_candidate| {
-            const var_bound, const var_pattern_branch = var_candidate;
-            debug("Found var_pattern branch at index: {}", .{var_bound});
-
-            const branch_node = var_pattern_branch.variable;
-            const var_pattern = branch_node.entry.key_ptr.*;
-
-            const get_or_put = try pattern_bindings.getOrPut(allocator, var_pattern);
-
-            // Variable already bound - only match if node equals bound value
-            if (get_or_put.found_existing) {
-                if (get_or_put.value_ptr.eql(pattern))
-                    // return IndexBranchTrie{
-                    //     .index = var_bound,
-                    //     .branch = var_pattern_branch,
-                    //     .trie = branch_node.entry.value_ptr,
-                    // }
-                    @panic("unimplemented\n")
-                else {
-                    // TODO
-                    // new_bindings.deinit(allocator);
-                    @panic("unimplemented\n");
-                }
-            } else {
-                get_or_put.value_ptr.* = pattern;
-
-                // Bind the variable to this node
-                try pattern_bindings.put(allocator, var_pattern, pattern);
-                // TODO: save for later, we still need to compare indices
-                // with possible matches below to find the smallest
-                current = branch_node.entry.value_ptr;
-            }
-            // Already bound the full pattern, so skip the loop below
-            pattern_idx = pattern.root.len;
-        }
-        debug("pattern root len: {}", .{pattern.root.len});
         while (pattern_idx < pattern.root.len) : (pattern_idx += 1) {
+            const rest = Pattern{ .root = pattern.root[pattern_idx..], .height = pattern.height };
+            if (current.findNextVarPattern(bound)) |var_candidate| {
+                const var_bound, const var_pattern_branch = var_candidate;
+                debug("Found var_pattern branch at index: {}", .{var_bound});
+
+                const branch_node = var_pattern_branch.variable;
+                const var_pattern = branch_node.entry.key_ptr.*;
+
+                const get_or_put = try pattern_bindings.getOrPut(allocator, var_pattern);
+
+                // Variable already bound - only match if node equals bound value
+                if (get_or_put.found_existing) {
+                    if (get_or_put.value_ptr.eql(rest))
+                        // return IndexBranchTrie{
+                        //     .index = var_bound,
+                        //     .branch = var_pattern_branch,
+                        //     .trie = branch_node.entry.value_ptr,
+                        // }
+                        @panic("unimplemented\n")
+                    else {
+                        // TODO
+                        // new_bindings.deinit(allocator);
+                        @panic("unimplemented\n");
+                    }
+                } else {
+                    get_or_put.value_ptr.* = rest;
+
+                    // Bind the variable to this node
+                    try pattern_bindings.put(allocator, var_pattern, rest);
+                    // TODO: save for later, we still need to compare indices
+                    // with possible matches below to find the smallest
+                    current = branch_node.entry.value_ptr;
+                }
+                // Already bound the full pattern, so skip the loop below
+                pattern_idx = pattern.root.len;
+                break;
+            }
+            debug("pattern root len: {}", .{pattern.root.len});
+
             // debug("pattern index: {}", .{pattern_idx});
             // debug("pattern.root[0] = {s}", .{@tagName(pattern.root[0])});
             // Start with initial candidates for the first term
