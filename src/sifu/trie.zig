@@ -1133,7 +1133,7 @@ pub const Trie = struct {
                 else {
                     // TODO
                     // new_bindings.deinit(allocator);
-                    @panic("unimplemented\n");
+                    // @panic("unimplemented\n");
                 }
             } else {
                 get_or_put.value_ptr.* = node;
@@ -1275,7 +1275,7 @@ pub const Trie = struct {
             },
 
             .var_pattern => {
-                @panic("var_pattern matching not yet implemented");
+                // @panic("var_pattern matching not yet implemented");
             },
             .list => |pattern| {
                 debug("Matched list with len {}", .{pattern.root.len});
@@ -1333,7 +1333,10 @@ pub const Trie = struct {
         // For each subsequent term, extend candidates that can continue matching
         var pattern_idx: usize = 0;
         while (pattern_idx < pattern.root.len) : (pattern_idx += 1) {
-            const rest = Pattern{ .root = pattern.root[pattern_idx..], .height = pattern.height };
+            const rest = Pattern{
+                .root = pattern.root[pattern_idx..],
+                .height = pattern.height,
+            };
             if (current.findNextVarPattern(bound)) |var_candidate| {
                 const var_bound, const var_pattern_branch = var_candidate;
                 debug("Found var_pattern branch at index: {}", .{var_bound});
@@ -1368,6 +1371,7 @@ pub const Trie = struct {
                 }
                 // Already bound the full pattern, so skip the loop below
                 pattern_idx = pattern.root.len;
+                debug("break with remaining len: {}", .{rest.root.len});
                 break;
             }
             debug("pattern root len: {}", .{pattern.root.len});
@@ -1431,7 +1435,10 @@ pub const Trie = struct {
             current = index_branch_trie.trie;
         }
         const full_match = pattern_idx == pattern.root.len;
-        debug("pattern_idx {} == pattern root len: {}", .{ pattern_idx, pattern.root.len });
+        debug(
+            "pattern_idx {} == pattern root len: {}",
+            .{ pattern_idx, pattern.root.len },
+        );
         if (!full_match)
             debug("No full match found", .{});
 
@@ -1468,10 +1475,12 @@ pub const Trie = struct {
     /// This function takes an arraylist instead of an allocator, which is
     /// assumed empty and returned empty.
     pub fn rewrite(
+        self: Self,
         allocator: Allocator,
+        bound: usize,
         pattern: Pattern,
-        term_bindings: VarBindings,
-        pattern_bindings: VarPatternBindings,
+        term_bindings: *VarBindings,
+        pattern_bindings: *VarPatternBindings,
     ) Allocator.Error!Pattern {
         // debug("Rewrite pattern of len {}", .{pattern.root.len});
         var result = ArrayList(Node).empty;
@@ -1499,16 +1508,32 @@ pub const Trie = struct {
                 if (pattern_bindings.get(var_pattern)) |sub_pattern| {
                     // TODO: calculate correct height with sub_pattern's
                     // height
-                    for (sub_pattern.root) |sub_node|
-                        try result.append(allocator, sub_node);
+                    // for (sub_pattern.root) |sub_node|
+                    //     try result.append(allocator, sub_node);
+
+                    try result.appendSlice(
+                        allocator,
+                        sub_pattern.root,
+                        // (next.value orelse sub_pattern).root,
+                    );
                 } else try result.append(allocator, node);
             },
             inline .pattern, .arrow, .match, .list, .infix => |nested, tag| {
+                const rewritten = try self.rewrite(allocator, bound, nested, term_bindings, pattern_bindings);
+                term_bindings.clearRetainingCapacity();
+                pattern_bindings.clearRetainingCapacity();
+                const nested_eval = try self.evaluateComplete(
+                    allocator,
+                    bound,
+                    rewritten,
+                    term_bindings.*,
+                    pattern_bindings.*,
+                );
                 // debug("Rewrite recursing on {s} len {}", .{ @tagName(tag), nested.root.len });
                 try result.append(allocator, @unionInit(
                     Node,
                     @tagName(tag),
-                    try rewrite(allocator, nested, term_bindings, pattern_bindings),
+                    nested_eval.value orelse nested,
                 ));
             },
             else => panic("unimplemented", .{}),
@@ -1563,37 +1588,46 @@ pub const Trie = struct {
     /// (unlike concatenative evaluation, that supports partial matches)
     /// Caller frees with `Pattern.deinit(allocator)`
     pub fn evaluateComplete(
-        self: *Self,
+        self: Self,
         allocator: Allocator,
         bound: usize,
         pattern: Pattern,
+        option_term_bindings: ?VarBindings,
+        option_pattern_bindings: ?VarPatternBindings,
     ) Allocator.Error!Eval {
-        var matched: Match = .{ .node_ptr = self };
+        var matched: Match = .{ .node_ptr = &self };
         var index: usize = bound;
         var current: Pattern = pattern;
-        var term_bindings = VarBindings{};
-        var pattern_bindings = VarPatternBindings{};
+        var term_bindings = option_term_bindings orelse VarBindings{};
+        var pattern_bindings = option_pattern_bindings orelse VarPatternBindings{};
+        // var len_matched: usize = 0;
+        if (pattern.root.len > 0 and pattern.root[0] == .key)
+            debug("Eval Complete from: {s}", .{pattern.root[0].key});
         while (index < self.size()) : (matched.deinit(allocator)) {
+            debug("Index: {}", .{index});
+            // while (len_matched < pattern.root.len) : (len_matched += matched.len) {
             matched = try self.match(allocator, index, &term_bindings, &pattern_bindings, current);
-            index = matched.index + 1;
-            if (matched.len != pattern.root.len) {
-                debug("No complete match, skipping index {}.", .{matched.index});
-                // Evaluate nested patterns that failed to match
-                // TODO: replace recursion with a continue
-                // switch (pattern) {
-                //     inline .pattern, .match, .arrow, .list => |slice, tag|
-                //     // Recursively eval nested list but preserve node type
-                //     @unionInit(
-                //         Node,
-                //         @tagName(tag),
-                //         // Sub-expressions start over from 0 (structural
-                //         // recursion)
-                //         try self.evaluateComplete(allocator, 0, slice),
-                //     ),
-                //     else => try pattern.copy(allocator),
-                // }
+            // debug("Matched len: {}", .{matched.len});
+            // }
+            // debug("Matched all", .{});
 
-            }
+            // if (matched.len != pattern.root.len) {
+            // debug("No complete match, skipping index {}.", .{matched.index});
+            // Evaluate nested patterns that failed to match
+            // TODO: replace recursion with a continue
+            // switch (pattern) {
+            //     inline .pattern, .match, .arrow, .list => |slice, tag|
+            //     // Recursively eval nested list but preserve node type
+            //     @unionInit(
+            //         Node,
+            //         @tagName(tag),
+            //         // Sub-expressions start over from 0 (structural
+            //         // recursion)
+            //         try self.evaluateComplete(allocator, 0, slice),
+            //     ),
+            //     else => try pattern.copy(allocator),
+            // }
+            // }
             // debug("vars in map: {}", .{bindings.size});
             const slice = .{};
             if (matched.value) |next| {
@@ -1611,12 +1645,24 @@ pub const Trie = struct {
                 // next.debug("{s}");
                 // next.write(streams.err) catch unreachable;
                 // streams.err.writeByte('\n') catch unreachable;
-                current =
-                    try rewrite(allocator, next, term_bindings, pattern_bindings);
+                current = try self
+                    .rewrite(allocator, bound, next, &term_bindings, &pattern_bindings);
             } else {
                 debug("Eval match at {*}, but no value", .{matched.node_ptr});
                 break;
             }
+            debug(
+                "Current height: {}, len: {}",
+                .{ current.height, current.root.len },
+            );
+            debug(
+                "Comparing heights: current {} >= query {}",
+                .{ current.height, pattern.height },
+            );
+            if (current.height < pattern.height)
+                continue
+            else
+                index = matched.index + 1;
         }
         const eval = Eval{
             .value = current,
@@ -1786,7 +1832,7 @@ pub const Trie = struct {
             //     try writer.debug("[{}] ", .{index});
         }
         // TODO print correct precedence
-        try writer.writeAll("==> ");
+        try writer.writeAll("--> ");
         try branch.value.writeIndent(writer, null);
     }
 

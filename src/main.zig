@@ -105,24 +105,22 @@ fn replStep(
     else
         Pattern{ .root = &.{}, .height = 0 };
     // defer pattern.deinit(allocator);
+    const root = pattern.root;
+    debug(
+        "Converted pattern {} high and {} wide, of types: ",
+        .{ pattern.height, pattern.root.len },
+    );
+    // for (root) |app| {
+    // debug("{s} ", .{@tagName(app)});
+    // app.writeSExp(streams.err, 0) catch unreachable;
+    // streams.err.writeByte(' ') catch unreachable;
+    // }
+    // pattern.debug("Pattern: {s}");
 
     // if (comptime detect_leaks) try debug(
     //     "String Arena Allocated: {} bytes",
     //     .{str_arena.queryCapacity()},
     // );
-
-    const root = pattern.root;
-
-    // debug(
-    //     "Converted pattern {} high and {} wide, of types: ",
-    //     .{ pattern.height, pattern.root.len },
-    // );
-    // for (root) |app| {
-    //     debug("{s} ", .{@tagName(app)});
-    //     // app.writeSExp(streams.err, 0) catch unreachable;
-    //     // streams.err.writeByte(' ') catch unreachable;
-    // }
-    // pattern.debug("Pattern: {s}");
 
     // TODO: read a "file" from stdin first, until eof, then start eval/matching
     // until another eof.
@@ -175,7 +173,7 @@ fn replStep(
         var buff = ArrayList(Node).empty;
         defer buff.deinit(allocator);
         // const result = try trie.evaluateSlice(allocator, pattern, &buff);
-        const eval = try trie.evaluateComplete(allocator, 0, pattern);
+        const eval = try trie.evaluateComplete(allocator, 0, pattern, null, null);
         // defer if (comptime detect_leaks)
         //     eval.deinit(allocator)
         // else

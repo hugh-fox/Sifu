@@ -92,7 +92,7 @@ pub fn astToPattern(
     // since the grammar wraps everything in optional(_op)
     if ((mem.eql(u8, node_kind, "nested_pattern"))) {
         if (node.childByFieldName("inner")) |child| {
-            // debug("  Unwrapping nested_pattern, child kind {s}", .{child.kind()});
+            debug("  Unwrapping nested_pattern, child kind {s}", .{child.kind()});
             return try astToPattern(allocator, source, child);
         }
     }
@@ -108,14 +108,6 @@ pub fn astToPattern(
     if (cursor.gotoFirstChild()) {
         while (true) {
             const child = cursor.node();
-            const child_kind = child.kind();
-
-            // Skip comments
-            if (mem.eql(u8, child_kind, "comment")) {
-                if (!cursor.gotoNextSibling()) break;
-                continue;
-            }
-
             // Parse the child
             if (try parseTermNode(allocator, source, child)) |parsed_node| {
                 try nodes.append(allocator, parsed_node);
@@ -203,7 +195,7 @@ fn parseOperatorNode(
     };
 
     // try nodes.append(allocator, Node{ .pattern = lhs_pattern });
-    debug("wrapper node type {s}", .{@tagName(wrapper_node)});
+    // debug("wrapper node type {s}", .{@tagName(wrapper_node)});
     try nodes.append(allocator, wrapper_node);
 
     const node_slice = try nodes.toOwnedSlice(allocator);
