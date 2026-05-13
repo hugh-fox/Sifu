@@ -288,7 +288,7 @@ pub const Node = union(enum) {
 };
 
 pub const Pattern = struct {
-    root: []const Node = &.{},
+    root: []Node = &.{},
     height: usize = 1, // patterns have a height because they are a branch
 
     pub fn isEmpty(self: Pattern) bool {
@@ -1007,6 +1007,7 @@ pub const Trie = struct {
                     cmp_index: usize,
                 ) Order {
                     const bound, const branches = ctx;
+                    debug("Comparison branch index {}\n", .{cmp_index});
                     const index, _ = branches[cmp_index];
                     // debug("Compare cached: {} < {}", .{ bound, index });
                     return math.order(bound, index);
@@ -1112,7 +1113,7 @@ pub const Trie = struct {
         // Check for variable branches that match anything
         if (self.findNextVar(bound)) |var_candidate| {
             const var_bound, const var_branch = var_candidate;
-            debug("Found var branch at index: {}", .{var_bound});
+            // debug("Found var branch at index: {}", .{var_bound});
 
             const branch_node = var_branch.variable;
             const variable = branch_node.entry.key_ptr.*;
@@ -1154,7 +1155,7 @@ pub const Trie = struct {
         switch (node) {
             .key => |key| {
                 if (self.map.getEntry(key)) |entry| {
-                    debug("Found key match: {s} at {*}", .{ key, entry.value_ptr });
+                    // debug("Found key match: {s} at {*}", .{ key, entry.value_ptr });
 
                     // Find the next valid index for this key
                     const key_trie = entry.value_ptr;
@@ -1174,7 +1175,7 @@ pub const Trie = struct {
                         };
                     }
                 } else {
-                    debug("Key '{s}' not found in map", .{key});
+                    // debug("Key '{s}' not found in map", .{key});
                 }
             },
 
@@ -1233,7 +1234,7 @@ pub const Trie = struct {
                 // Match opening paren
                 const open_entry = self.map.getEntry("(") orelse return null;
                 const open_trie = open_entry.value_ptr;
-                debug("Matching sub-pattern on {*}", .{open_trie});
+                // debug("Matching sub-pattern on {*}", .{open_trie});
                 const open_index = open_trie.findNextByIndex(bound) orelse return null;
                 // TODO: should this be open_trie instead of self?
                 const idx, _ = self.branches.items[open_index];
@@ -1253,11 +1254,11 @@ pub const Trie = struct {
                 const match_index = pattern_match.node_ptr.findNextByIndex(bound) orelse return null;
                 const pattern_match_index, _ = pattern_match.node_ptr.branches.items[match_index];
 
-                debug("Closing value matched {*}", .{pattern_match.node_ptr});
+                // debug("Closing value matched {*}", .{pattern_match.node_ptr});
                 // Successfully matched entire pattern, now match closing paren
                 const close_entry = pattern_match.node_ptr.map.getEntry(")") orelse return null;
                 const close_trie = close_entry.value_ptr;
-                debug("Closing paren matched {*}", .{close_trie});
+                // debug("Closing paren matched {*}", .{close_trie});
                 const close_index = close_trie
                     .findNextByIndex(pattern_match_index) orelse return null;
                 const close_idx, _ = close_trie.branches.items[close_index];
@@ -1278,10 +1279,10 @@ pub const Trie = struct {
                 // @panic("var_pattern matching not yet implemented");
             },
             .list => |pattern| {
-                debug("Matched list with len {}", .{pattern.root.len});
+                // debug("Matched list with len {}", .{pattern.root.len});
                 const open_entry = self.map.getEntry(",") orelse return null;
                 const open_trie = open_entry.value_ptr;
-                debug("Matched comma at {*}", .{open_trie});
+                // debug("Matched comma at {*}", .{open_trie});
                 const open_index = open_trie.findNextByIndex(bound) orelse return null;
                 const idx, _ = self.branches.items[open_index];
                 var pattern_match = try open_trie
@@ -1371,10 +1372,10 @@ pub const Trie = struct {
                 }
                 // Already bound the full pattern, so skip the loop below
                 pattern_idx = pattern.root.len;
-                debug("break with remaining len: {}", .{rest.root.len});
+                // debug("break with remaining len: {}", .{rest.root.len});
                 break;
             }
-            debug("pattern root len: {}", .{pattern.root.len});
+            // debug("pattern root len: {}", .{pattern.root.len});
 
             // debug("pattern index: {}", .{pattern_idx});
             // debug("pattern.root[0] = {s}", .{@tagName(pattern.root[0])});
@@ -1395,8 +1396,8 @@ pub const Trie = struct {
             switch (branch) {
                 .key => |key| {
                     debug(
-                        "Matching on key branch at index {} at {s}",
-                        .{ index, key.entry.key_ptr.* },
+                        "Matching on key branch at index {} address {*} of {s}",
+                        .{ index, key.entry.value_ptr, key.entry.key_ptr.* },
                     );
                     try node_list.append(
                         allocator,
@@ -1405,8 +1406,8 @@ pub const Trie = struct {
                 },
                 .variable => |variable| {
                     debug(
-                        "Matching on variable branch at index {} at {*}",
-                        .{ index, variable.entry.key_ptr.* },
+                        "Matching on variable branch at index {} address {*} of {s}",
+                        .{ index, variable.entry.value_ptr, variable.entry.key_ptr.* },
                     );
                     try node_list.append(
                         allocator,
@@ -1415,8 +1416,8 @@ pub const Trie = struct {
                 },
                 .var_pattern => |var_pattern| {
                     debug(
-                        "Matching on var_pattern branch at index {} at {*}",
-                        .{ index, var_pattern.entry.key_ptr.* },
+                        "Matching on var_pattern branch at index {} address {*} of {s}",
+                        .{ index, var_pattern.entry.value_ptr, var_pattern.entry.key_ptr.* },
                     );
                     try node_list.append(
                         allocator,
@@ -1426,8 +1427,11 @@ pub const Trie = struct {
                 .value => |value| {
                     current = index_branch_trie.trie;
                     pattern_idx += 1;
-                    _ = value;
-                    debug("Found value branch at index {}", .{index});
+                    _ = value; // TODO
+                    debug(
+                        "Found value branch at index {} address {*}",
+                        .{ index, current },
+                    );
                     break;
                 },
             }
@@ -1520,20 +1524,13 @@ pub const Trie = struct {
             },
             inline .pattern, .arrow, .match, .list, .infix => |nested, tag| {
                 const rewritten = try self.rewrite(allocator, bound, nested, term_bindings, pattern_bindings);
-                term_bindings.clearRetainingCapacity();
-                pattern_bindings.clearRetainingCapacity();
-                const nested_eval = try self.evaluateComplete(
-                    allocator,
-                    bound,
-                    rewritten,
-                    term_bindings.*,
-                    pattern_bindings.*,
-                );
+
                 // debug("Rewrite recursing on {s} len {}", .{ @tagName(tag), nested.root.len });
                 try result.append(allocator, @unionInit(
                     Node,
                     @tagName(tag),
-                    nested_eval.value orelse nested,
+                    // nested_eval.value orelse nested,
+                    rewritten,
                 ));
             },
             else => panic("unimplemented", .{}),
@@ -1592,65 +1589,57 @@ pub const Trie = struct {
         allocator: Allocator,
         bound: usize,
         pattern: Pattern,
-        option_term_bindings: ?VarBindings,
-        option_pattern_bindings: ?VarPatternBindings,
     ) Allocator.Error!Eval {
         var matched: Match = .{ .node_ptr = &self };
         var index: usize = bound;
         var current: Pattern = pattern;
-        var term_bindings = option_term_bindings orelse VarBindings{};
-        var pattern_bindings = option_pattern_bindings orelse VarPatternBindings{};
+        var term_bindings = VarBindings{};
+        var pattern_bindings = VarPatternBindings{};
         // var len_matched: usize = 0;
-        if (pattern.root.len > 0 and pattern.root[0] == .key)
-            debug("Eval Complete from: {s}", .{pattern.root[0].key});
+        // if (pattern.root.len > 0 and pattern.root[0] == .key)
+        //     debug("Eval Complete from: {s}", .{pattern.root[0].key});
         while (index < self.size()) : (matched.deinit(allocator)) {
-            debug("Index: {}", .{index});
+            debug("Eval Complete from index: {}", .{index});
             // while (len_matched < pattern.root.len) : (len_matched += matched.len) {
             matched = try self.match(allocator, index, &term_bindings, &pattern_bindings, current);
+
+            const next = matched.value orelse {
+                debug("Eval match at {*}, but no value", .{matched.node_ptr});
+                break;
+            };
             // debug("Matched len: {}", .{matched.len});
             // }
             // debug("Matched all", .{});
 
-            // if (matched.len != pattern.root.len) {
-            // debug("No complete match, skipping index {}.", .{matched.index});
-            // Evaluate nested patterns that failed to match
-            // TODO: replace recursion with a continue
-            // switch (pattern) {
-            //     inline .pattern, .match, .arrow, .list => |slice, tag|
-            //     // Recursively eval nested list but preserve node type
-            //     @unionInit(
-            //         Node,
-            //         @tagName(tag),
-            //         // Sub-expressions start over from 0 (structural
-            //         // recursion)
-            //         try self.evaluateComplete(allocator, 0, slice),
-            //     ),
-            //     else => try pattern.copy(allocator),
-            // }
-            // }
+            // Rewrite all current bindings into the matched value
+            current = try self.rewrite(
+                allocator,
+                bound,
+                next,
+                &term_bindings,
+                &pattern_bindings,
+            );
+
             // debug("vars in map: {}", .{bindings.size});
             const slice = .{};
-            if (matched.value) |next| {
-                // Prevent infinite recursion at this index. Recursion
-                // through other indices will be terminated by match index
-                // shrinking.
-                if (slice.len == next.root.len)
-                    for (slice, next.root) |trie, next_trie| {
-                        // check if the same trie's shape could be matched
-                        // TODO: use a trie match function here instead of eql
-                        if (!trie.asEmpty().eql(next_trie))
-                            break;
-                    } else break; // Don't evaluate the same trie
-                // debug("Eval matched len {}", .{next.root.len});
-                // next.debug("{s}");
-                // next.write(streams.err) catch unreachable;
-                // streams.err.writeByte('\n') catch unreachable;
-                current = try self
-                    .rewrite(allocator, bound, next, &term_bindings, &pattern_bindings);
-            } else {
-                debug("Eval match at {*}, but no value", .{matched.node_ptr});
-                break;
+
+            // Prevent infinite recursion at this index. Recursion
+            // through other indices will be terminated by match index
+            // shrinking.
+            if (slice.len == next.root.len) {
+                panic("unimplemented\n", .{});
+                // for (slice, next.root) |trie, next_trie| {
+                //     // check if the same trie's shape could be matched
+                //     // TODO: use a trie match function here instead of eql
+                //     if (!trie.asEmpty().eql(next_trie))
+                //         break;
+                // } else break; // Don't evaluate the same trie
             }
+            // debug("Eval matched len {}", .{next.root.len});
+            // next.debug("{s}");
+            // next.write(streams.err) catch unreachable;
+            // streams.err.writeByte('\n') catch unreachable;
+
             debug(
                 "Current height: {}, len: {}",
                 .{ current.height, current.root.len },
@@ -1664,6 +1653,33 @@ pub const Trie = struct {
             else
                 index = matched.index + 1;
         }
+
+        // if (matched.len != pattern.root.len) {
+        // debug("No complete match, skipping index {}.", .{matched.index});
+        // Evaluate nested patterns that failed to match
+        // TODO: replace recursion with a continue
+        // Recurse into nested expressions
+        for (current.root) |*nested| {
+            switch (nested.*) {
+                inline .pattern, .match, .arrow, .list => |sub_pattern, tag| {
+                    // Sub-expressions start over from 0 (structural recursion)
+                    const nested_eval = try self.evaluateComplete(
+                        allocator,
+                        0,
+                        sub_pattern,
+                    );
+                    // Recursively eval nested list but preserve node type
+                    nested.* = @unionInit(
+                        Node,
+                        @tagName(tag),
+                        nested_eval.value orelse sub_pattern,
+                    );
+                },
+                // else => try pattern.copy(allocator),
+                else => {},
+            }
+        }
+
         const eval = Eval{
             .value = current,
             .index = matched.index,
