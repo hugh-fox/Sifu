@@ -1388,7 +1388,6 @@ pub const Trie = struct {
                 pattern.root[pattern_idx],
             ) orelse {
                 debug("matchTerm failed at pattern index {}", .{pattern_idx});
-                pattern_idx += 1;
                 break;
             };
             index, const branch =
@@ -1619,6 +1618,9 @@ pub const Trie = struct {
                 &term_bindings,
                 &pattern_bindings,
             );
+            // Reset bindings for each new match index
+            term_bindings.clearRetainingCapacity();
+            pattern_bindings.clearRetainingCapacity();
 
             // debug("vars in map: {}", .{bindings.size});
             const slice = .{};
@@ -1659,26 +1661,28 @@ pub const Trie = struct {
         // Evaluate nested patterns that failed to match
         // TODO: replace recursion with a continue
         // Recurse into nested expressions
-        for (current.root) |*nested| {
-            switch (nested.*) {
-                inline .pattern, .match, .arrow, .list => |sub_pattern, tag| {
-                    // Sub-expressions start over from 0 (structural recursion)
-                    const nested_eval = try self.evaluateComplete(
-                        allocator,
-                        0,
-                        sub_pattern,
-                    );
-                    // Recursively eval nested list but preserve node type
-                    nested.* = @unionInit(
-                        Node,
-                        @tagName(tag),
-                        nested_eval.value orelse sub_pattern,
-                    );
-                },
-                // else => try pattern.copy(allocator),
-                else => {},
-            }
-        }
+        for (current.root, 0..) |*nested, i| switch (nested.*) {
+            inline else => |sub_pattern, tag| if (@TypeOf(sub_pattern) == Pattern) {
+                debug("Recursing into pattern at index {}  {}", .{
+                    i,
+                    sub_pattern.root.len,
+                });
+                // Sub-expressions start over from 0 (structural recursion)
+                const nested_eval = try self.evaluateComplete(
+                    allocator,
+                    0,
+                    sub_pattern,
+                );
+                // Recursively eval nested list but preserve node type
+                nested.* = @unionInit(
+                    Node,
+                    @tagName(tag),
+                    nested_eval.value orelse sub_pattern,
+                );
+            },
+            // else => try pattern.copy(allocator),
+            // else => {},
+        };
 
         const eval = Eval{
             .value = current,
