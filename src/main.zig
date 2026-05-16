@@ -173,6 +173,7 @@ fn replStep(
         var buff = ArrayList(Node).empty;
         defer buff.deinit(allocator);
         // const result = try trie.evaluateSlice(allocator, pattern, &buff);
+        debug("Eval Complete from {*}", .{trie});
         const eval = try trie.evaluateComplete(allocator, 0, pattern);
         // defer if (comptime detect_leaks)
         //     eval.deinit(allocator)

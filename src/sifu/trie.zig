@@ -417,6 +417,10 @@ const BranchNode = struct {
     // and never for values.
     next_index: usize,
 
+    pub fn this(branch_node: BranchNode) *Trie {
+        return branch_node.entry.value_ptr;
+    }
+
     pub fn next(branch_node: BranchNode) IndexBranch {
         return branch_node.entry.value_ptr.*
             .branches.items[branch_node.next_index];
@@ -439,22 +443,22 @@ const Branch = union(enum) {
         };
     }
 
-    pub fn next(self: Branch) ?*Trie {
+    pub fn this(self: Branch) ?*Trie {
         switch (self) {
-            .key => |branch_node| {
-                return branch_node.entry.value_ptr;
-            },
-            .variable => |branch_node| {
-                return branch_node.entry.value_ptr;
-            },
-            .var_pattern => |branch_node| {
-                return branch_node.entry.value_ptr;
-            },
             .value => |value| {
                 _ = value;
                 return null;
             },
+            inline else => |branch_node| {
+                return branch_node.this();
+            },
         }
+    }
+
+    pub fn next(self: Branch) ?Branch {
+        const branch_node = self.node() orelse
+            return null;
+        return branch_node; //.next();
     }
 };
 
@@ -464,7 +468,7 @@ const IndexBranch = struct {
 };
 
 pub const BranchList = ArrayList(IndexBranch);
-pub const IndexList = ArrayList(usize);
+pub const CacheList = ArrayList(usize);
 
 /// For directing evaluations to completion. Initially, lower bound begins
 /// at 0, for the upper bound, the length of the pattern (inclusive/exclusive
@@ -491,10 +495,11 @@ pub const Trie = struct {
     pub const Self = @This();
 
     map: HashMap = .{},
-    branches: BranchList = .empty,
-    var_cache: BranchList = .empty,
-    var_pattern_cache: BranchList = .empty,
-    value_cache: BranchList = .empty,
+    branches: BranchList = .empty, // TODO remove and store in caches
+    key_cache: CacheList = .empty,
+    var_cache: CacheList = .empty,
+    var_pattern_cache: CacheList = .empty,
+    value_cache: CacheList = .empty,
     height: usize = 0, // TODO: implement height caching
 
     /// The results of matching a trie exactly (vars are matched literally
@@ -517,7 +522,7 @@ pub const Trie = struct {
         var branch: Branch = undefined;
         while (current.findNextBranch(index)) |next| {
             _, branch = next;
-            current = branch.next() orelse
+            current = branch.this() orelse
                 return branch.value;
         }
         return null;
@@ -659,7 +664,7 @@ pub const Trie = struct {
     ) ?Self {
         return switch (node) {
             .key => |key| trie.map.get(key),
-            .variable => |variable| trie.vars.get(variable),
+            .variable => |variable| trie.map.get(variable),
             .pattern => |sub_pattern| blk: {
                 var current = trie.map.get("(") orelse
                     break :blk null;
@@ -710,6 +715,7 @@ pub const Trie = struct {
         const entry = try trie.map
             .getOrPutValue(allocator, key, Self{});
         const next = entry.value_ptr;
+        try next.key_cache.append(allocator, trie.branches.items.len);
         try trie.branches.append(
             allocator,
             IndexBranch{ index, .{
@@ -719,7 +725,7 @@ pub const Trie = struct {
                 },
             } },
         );
-        return entry.value_ptr;
+        return next;
     }
 
     fn getOrPutVar(
@@ -731,8 +737,7 @@ pub const Trie = struct {
         const entry = try trie.map
             .getOrPutValue(allocator, variable, Self{});
         const next = entry.value_ptr;
-        try trie.var_cache.append(allocator, index);
-
+        try trie.var_cache.append(allocator, trie.branches.items.len);
         try trie.branches.append(
             allocator,
             IndexBranch{ index, .{
@@ -754,11 +759,11 @@ pub const Trie = struct {
         const entry = try trie.map
             .getOrPutValue(allocator, var_pattern, Self{});
         const next = entry.value_ptr;
-        try trie.var_pattern_cache.append(allocator, index);
+        try trie.var_pattern_cache.append(allocator, trie.branches.items.len);
         try trie.branches.append(
             allocator,
             IndexBranch{ index, .{
-                .variable = .{
+                .var_pattern = .{
                     .entry = entry,
                     .next_index = next.branches.items.len,
                 },
@@ -775,9 +780,9 @@ pub const Trie = struct {
         index: usize,
         term: Node,
     ) Allocator.Error!*Self {
-        debug("This address: {*}", .{trie});
         return switch (term) {
             .key => |key| blk: {
+                debug("getOrPutKey: {*} put {s} at index {}", .{ trie, key, index });
                 const next = try trie.getOrPutKey(allocator, index, key);
                 break :blk next;
             },
@@ -856,8 +861,13 @@ pub const Trie = struct {
         pattern: Pattern,
     ) !*Self {
         var current = trie;
-        for (pattern.root) |node|
+        debug(
+            "Ensure Path for {*} at index {} for pattern len {}",
+            .{ trie, index, pattern.root.len },
+        );
+        for (pattern.root) |node| {
             current = try current.ensurePathTerm(allocator, index, node);
+        }
         return current;
     }
 
@@ -887,6 +897,7 @@ pub const Trie = struct {
         pattern: Pattern,
         optional_value: ?Pattern,
     ) Allocator.Error!*Self {
+        debug("Appending to {*}", .{trie});
         // The length of values will be the next entry index after insertion
         const index = trie.size();
         var current = trie;
@@ -899,14 +910,14 @@ pub const Trie = struct {
             current.branches.items.len,
         );
         debug(
-            "Added value of len {} at index {} on trie {*}",
-            .{ value.root.len, current.branches.items.len, current },
+            "Added value of len {} at index {} and branch index {} on trie {*}",
+            .{ value.root.len, index, current.branches.items.len, current },
         );
         try current.branches.append(
             allocator,
             IndexBranch{ index, .{ .value = value } },
         );
-        // debug("Value cache: {any}", .{current.value_cache.items});
+        debug("Value cache: {any}", .{current.value_cache.items});
         return current;
     }
 
@@ -951,7 +962,6 @@ pub const Trie = struct {
     // Find the index of the next branch starting from bound.
     fn findNextByIndex(self: Self, bound: usize) ?usize {
         const branches = self.branches;
-
         // To compare by bound with other branches, it must be put into a Branch
         // first. Its kind can be undefined since it will never be returned.
         // const elem = IndexBranch{ bound, undefined };
@@ -984,6 +994,8 @@ pub const Trie = struct {
             null;
     }
 
+    /// Compares branches in the cache by first looking them up in the branch-
+    /// indices list, then comparing the index to the bound.
     fn findNextByCache(
         self: Self,
         branches_bound: usize,
@@ -993,25 +1005,45 @@ pub const Trie = struct {
         const cache_index = sort.lowerBound(
             usize,
             cache,
-            .{ branches_bound, self.branches.items },
+            .{ branches_bound, self.branches.items }, // [branches_bound..]
             struct {
                 fn lessThan(
-                    ctx: @TypeOf(.{ branches_bound, self.branches.items }),
+                    ctx: struct { usize, []IndexBranch },
                     cmp_index: usize,
                 ) Order {
-                    const bound, const branches = ctx;
-                    debug("Comparison branch index {}", .{cmp_index});
-                    const index, _ = branches[cmp_index];
-                    // debug("Compare cached: {} < {}", .{ bound, index });
-                    return math.order(bound, index);
+                    const b, const branches = ctx;
+                    const index, _ = branches[b];
+                    debug("Compare cached: {} < {}", .{ index, cmp_index });
+                    return math.order(index, cmp_index);
                 }
             }.lessThan,
         );
+        const branch_index = cache_index + branches_bound;
         // No index found if lowerBound returned the length of branches
-        return if (cache_index < cache.len)
-            self.branches.items[cache[cache_index]]
+        return if (branch_index < cache.len)
+            self.branches.items[branch_index]
         else
             null;
+    }
+
+    /// Finds the next minimum key at this node by index.
+    fn findNextKey(self: Self, bound: usize) ?IndexBranch {
+        const branches_bound = self.findNextByIndex(bound) orelse
+            return null;
+        return self.findNextByCache(branches_bound, self.key_cache.items);
+    }
+
+    /// Finds the next minimum variable at this node by index.
+    fn findNextVar(self: Self, bound: usize) ?IndexBranch {
+        const branches_bound = self.findNextByIndex(bound) orelse
+            return null;
+        return self.findNextByCache(branches_bound, self.var_cache.items);
+    }
+
+    fn findNextVarPattern(self: Self, bound: usize) ?IndexBranch {
+        const branches_bound = self.findNextByIndex(bound) orelse
+            return null;
+        return self.findNextByCache(branches_bound, self.var_pattern_cache.items);
     }
 
     /// Finds the next minimum value at this node by index.
@@ -1021,53 +1053,12 @@ pub const Trie = struct {
         return self.findNextByCache(branches_bound, self.value_cache.items);
     }
 
-    /// Finds the next minimum variable at this node by index.
-    fn findNextVar(self: Self, bound: usize) ?IndexBranch {
-        if (self.findNextByIndex(bound)) |index|
-            return self.branches.items[index];
-
-        const cache_index = sort.lowerBound(
-            usize,
-            self.var_cache.items,
-            bound,
-            struct {
-                fn lessThan(
-                    ctx: usize,
-                    index: usize,
-                ) Order {
-                    // debug("Compare cached: {} < {}", .{ bound, index });
-                    return math.order(ctx, index);
-                }
-            }.lessThan,
-        );
-        return if (cache_index < self.var_cache.items.len)
-            self.getIndex(self.var_cache.items[cache_index])
-        else
-            null;
-    }
-
-    fn findNextVarPattern(self: Self, bound: usize) ?IndexBranch {
+    // // Finds the next minimum key, variable or value.
+    fn findNext(self: Self, bound: usize) ?IndexBranch {
         const branches_bound = self.findNextByIndex(bound) orelse
             return null;
-        return self.findNextByCache(branches_bound, self.var_pattern_cache.items);
-    }
 
-    // Finds the next minimum key, variable or value.
-    fn findNext(self: Self, bound: usize) ?IndexBranch {
-        // Find the next var and value efficiently using their caches
-        // TODO: find next var pattern
-        const value_branch = self.findNextValue(bound) orelse
-            return self.findNextVar(bound);
-        // Check if there is a need to search for a var before doing so
-        if (value_branch[0] == bound)
-            return value_branch;
-        const var_branch = self.findNextVar(bound) orelse
-            return value_branch;
-        return switch (math.order(value_branch[0], var_branch[0])) {
-            .lt => value_branch,
-            .eq => panic("Duplicate indices found", .{}),
-            .gt => var_branch,
-        };
+        return self.branches.items[branches_bound];
     }
 
     // // If the index is unchanged, its trivially the minimum match. If the
@@ -1131,7 +1122,14 @@ pub const Trie = struct {
             const var_bound, const var_branch = var_candidate;
             // debug("Found var branch at index: {}", .{var_bound});
 
-            const branch_node = var_branch.variable;
+            const branch_node = switch (var_branch) {
+                .variable => |variable| variable,
+                .value => panic("Expected variable, found value", .{}),
+                inline else => |b, tag| panic(
+                    "Expected variable, found {s} {s} at {*}",
+                    .{ @tagName(tag), b.entry.key_ptr.*, b.entry.value_ptr },
+                ),
+            };
             const variable = branch_node.entry.key_ptr.*;
 
             var new_bindings = VarBindings{};
@@ -1168,18 +1166,30 @@ pub const Trie = struct {
         // Now check for exact matches based on node type
         switch (node) {
             .key => |key| {
+                debug(
+                    "Checking {*} for key match {s} at bound {}",
+                    .{ self, key, bound },
+                );
                 if (self.map.getEntry(key)) |entry| {
-                    // debug("Found key match: {s} at {*}", .{ key, entry.value_ptr });
+                    debug("Found key match: {s} at {*}", .{ entry.key_ptr.*, entry.value_ptr });
                     // Find the next valid index for this key
-                    const key_trie = entry.value_ptr;
-                    if (key_trie.findNextBranch(bound)) |index_branch| {
+                    debug(
+                        "Found key {s} in {*} at bound {}",
+                        .{ key, self, bound },
+                    );
+                    // Find the next index from bound in the next trie, as it
+                    // will be the minimum index for this key
+                    if (entry.value_ptr.findNext(bound)) |index_branch| {
                         const index, const branch = index_branch;
+                        debug(
+                            "Found branch in {*} for key {s} at index: {}",
+                            .{ entry.value_ptr, key, index },
+                        );
                         //     self.branches.items[key_candidate_index];
                         // if (bound < key_index) panic(
                         //     "Bound {} is less than key index {}\n",
                         //     .{ bound, key_index },
                         // );
-                        debug("Match term key {s} at index: {}", .{ key, index });
                         _ = branch;
                         return index_branch;
                     }
@@ -1324,17 +1334,19 @@ pub const Trie = struct {
         var index = bound;
         var result: ?Pattern = null;
         // For each subsequent term, extend candidates that can continue matching
-        var pattern_idx: usize = 0;
-        while (pattern_idx < pattern.root.len) : (pattern_idx += 1) {
+        var pattern_index: usize = 0;
+        while (pattern_index < pattern.root.len) : (pattern_index += 1) {
+            debug("Matching {*} at pattern index: {}", .{ current, pattern_index });
             const rest = Pattern{
-                .root = pattern.root[pattern_idx..],
+                .root = pattern.root[pattern_index..],
                 .height = pattern.height,
             };
+            // TODO: stop early if there are more terms in trie and they match
             if (current.findNextVarPattern(bound)) |var_candidate| {
                 const var_bound, const var_pattern_branch = var_candidate;
                 debug("Found var_pattern branch at index: {}", .{var_bound});
 
-                const branch_node = var_pattern_branch.variable;
+                const branch_node = var_pattern_branch.var_pattern;
                 const var_pattern = branch_node.entry.key_ptr.*;
 
                 const get_or_put = try pattern_bindings.getOrPut(allocator, var_pattern);
@@ -1363,13 +1375,13 @@ pub const Trie = struct {
                     current = branch_node.entry.value_ptr;
                 }
                 // Already bound the full pattern, so skip the loop below
-                pattern_idx = pattern.root.len;
+                pattern_index = pattern.root.len;
                 // debug("break with remaining len: {}", .{rest.root.len});
                 break;
             }
             // debug("pattern root len: {}", .{pattern.root.len});
 
-            // debug("pattern index: {}", .{pattern_idx});
+            // debug("pattern index: {}", .{pattern_index});
             // debug("pattern.root[0] = {s}", .{@tagName(pattern.root[0])});
             // Start with initial candidates for the first term
             const index_branch = try current.matchTerm(
@@ -1377,16 +1389,16 @@ pub const Trie = struct {
                 bound,
                 term_bindings,
                 pattern_bindings,
-                pattern.root[pattern_idx],
+                pattern.root[pattern_index],
             ) orelse {
-                debug("matchTerm failed at pattern index {}", .{pattern_idx});
+                debug("matchTerm failed at pattern index {}", .{pattern_index});
                 break;
             };
             index, const branch = index_branch;
             switch (branch) {
                 .key => |key| {
                     debug(
-                        "Matching on key branch at index {} address {*} of {s}",
+                        "Appending key branch at index {} address {*} of {s}",
                         .{ index, key.entry.value_ptr, key.entry.key_ptr.* },
                     );
                     try node_list.append(
@@ -1396,7 +1408,7 @@ pub const Trie = struct {
                 },
                 .variable => |variable| {
                     debug(
-                        "Matching on variable branch at index {} address {*} of {s}",
+                        "Appending variable branch at index {} address {*} of {s}",
                         .{ index, variable.entry.value_ptr, variable.entry.key_ptr.* },
                     );
                     try node_list.append(
@@ -1406,7 +1418,7 @@ pub const Trie = struct {
                 },
                 .var_pattern => |var_pattern| {
                     debug(
-                        "Matching on var_pattern branch at index {} address {*} of {s}",
+                        "Appending var_pattern branch at index {} address {*} of {s}",
                         .{ index, var_pattern.entry.value_ptr, var_pattern.entry.key_ptr.* },
                     );
                     try node_list.append(
@@ -1425,26 +1437,30 @@ pub const Trie = struct {
                 },
             }
             // debug("Next trie term at {*}", .{index_branch_trie.trie});
-            current = branch.next() orelse {
+            current = branch.this() orelse {
                 debug("No next trie found at index {}", .{index});
-                pattern_idx += 1;
+                pattern_index += 1;
                 break;
             };
         }
-        const full_match = pattern_idx == pattern.root.len;
+        const full_match = pattern_index == pattern.root.len;
         debug(
-            "pattern_idx {} == pattern root len: {}",
-            .{ pattern_idx, pattern.root.len },
+            "pattern_index {} == pattern root len: {}",
+            .{ pattern_index, pattern.root.len },
         );
         if (!full_match)
-            debug("No full match found", .{});
+            debug("No full match found", .{})
+        else if (current.findNextValue(bound)) |value_candidate| {
+            _, const value_branch = value_candidate;
+            result = value_branch.value;
+        }
 
         return Match{
             .key = Pattern{ .root = try node_list.toOwnedSlice(allocator) },
-            .value = if (full_match) result else null,
+            .value = if (full_match) (result) else null,
             .node_ptr = current,
             .index = index,
-            .len = pattern_idx,
+            .len = pattern_index,
         };
     }
 
@@ -1588,10 +1604,10 @@ pub const Trie = struct {
         // if (pattern.root.len > 0 and pattern.root[0] == .key)
         //     debug("Eval Complete from: {s}", .{pattern.root[0].key});
         while (index < self.size()) : (matched.deinit(allocator)) {
-            debug("Eval Complete from index: {}", .{index});
+            debug("Eval Complete on {*} from index: {}", .{ matched.node_ptr, index });
             // while (len_matched < pattern.root.len) : (len_matched += matched.len) {
             matched = try self.match(allocator, index, &term_bindings, &pattern_bindings, current);
-            debug("Matched at index: {}", .{matched.index});
+            debug("Matched {*} at index: {}", .{ matched.node_ptr, matched.index });
             if (matched.index < index)
                 panic("Match index bug: matched.index {} < index {}", .{ matched.index, index });
 
@@ -1654,14 +1670,20 @@ pub const Trie = struct {
         // Recurse into nested expressions
         for (current.root, 0..) |*nested, i| switch (nested.*) {
             inline else => |sub_pattern, tag| if (@TypeOf(sub_pattern) == Pattern) {
-                debug("Recursing into pattern at index {}  {}", .{
+                debug("Recursing into pattern at index {} of len {}", .{
                     i,
                     sub_pattern.root.len,
                 });
-                // Sub-expressions start over from 0 (structural recursion)
+                // Sub-expressions start over from 0 (structural recursion) if
+                // the sub_pattern length is less than the original
                 const nested_eval = try self.evaluateComplete(
                     allocator,
-                    0,
+                    matched.index,
+                    // TODO
+                    // if (sub_pattern.height < pattern.height)
+                    //     0
+                    // else
+                    //     matched.index + 1,
                     sub_pattern,
                 );
                 // Recursively eval nested list but preserve node type
@@ -1862,8 +1884,8 @@ pub const Trie = struct {
         optional_indent: ?usize,
     ) Writer.Error!void {
         try writer.writeAll("❬");
-        for (self.value_cache.items) |value_index| {
-            _, const branch = self.branches.items[value_index];
+        for (self.value_cache.items) |value_index_branch| {
+            _, const branch = self.branches.items[value_index_branch];
             try branch.value.writeIndent(writer, null);
             try writer.writeAll(", ");
         }
@@ -2047,4 +2069,29 @@ test "Pattern: equal to clone" {
     const clone = try pattern.clone(testing.allocator);
     assert(pattern.eql(clone.*));
     assert(clone.eql(pattern));
+}
+
+test "findNextByCache" {
+    var trie = Trie{};
+    defer trie.deinit(testing.allocator);
+
+    const key = Pattern{ .root = &.{
+        .{ .key = "A" },
+        .{ .key = "B" },
+    } };
+    const value1 = Pattern{ .root = &.{.{ .key = "123" }} };
+    _ = try trie.append(testing.allocator, key, value1);
+    const value2 = Pattern{ .root = &.{.{ .key = "456" }} };
+    _ = try trie.append(testing.allocator, key, value2);
+
+    const value_trie = trie.get(key) orelse unreachable;
+    var branch_index = value_trie.findNextByIndex(0) orelse unreachable;
+    var value_index, var value_branch = value_trie.branches.items[branch_index];
+    try testing.expect(value_index == 0);
+    try testing.expect(value_branch.value.eql(value1));
+
+    branch_index = value_trie.findNextByIndex(1) orelse unreachable;
+    value_index, value_branch = value_trie.branches.items[branch_index];
+    try testing.expect(value_index == 1);
+    try testing.expect(value_branch.value.eql(value2));
 }
