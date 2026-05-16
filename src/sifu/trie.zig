@@ -715,7 +715,7 @@ pub const Trie = struct {
         const entry = try trie.map
             .getOrPutValue(allocator, key, Self{});
         const next = entry.value_ptr;
-        try next.key_cache.append(allocator, trie.branches.items.len);
+        try trie.key_cache.append(allocator, trie.branches.items.len);
         try trie.branches.append(
             allocator,
             IndexBranch{ index, .{
@@ -972,9 +972,9 @@ pub const Trie = struct {
             struct {
                 fn lessThan(
                     ctx: usize,
-                    cmp_branch: IndexBranch,
+                    branch: IndexBranch,
                 ) Order {
-                    const i, _ = cmp_branch;
+                    const i, _ = branch;
                     // debug("Compare branches: {} < {}\n", .{ lhs_index, rhs_index });
                     return math.order(ctx, i);
                 }
@@ -996,6 +996,7 @@ pub const Trie = struct {
 
     /// Compares branches in the cache by first looking them up in the branch-
     /// indices list, then comparing the index to the bound.
+    /// TODO: search only the remaining cache from branches_bound
     fn findNextByCache(
         self: Self,
         branches_bound: usize,
@@ -1009,12 +1010,12 @@ pub const Trie = struct {
             struct {
                 fn lessThan(
                     ctx: struct { usize, []IndexBranch },
-                    cmp_index: usize,
+                    other_index: usize,
                 ) Order {
-                    const b, const branches = ctx;
-                    const index, _ = branches[b];
-                    debug("Compare cached: {} < {}", .{ index, cmp_index });
-                    return math.order(index, cmp_index);
+                    const branch_index, const branches = ctx;
+                    const index, _ = branches[branch_index];
+                    debug("Compare cached: {} < {}", .{ other_index, index });
+                    return math.order(other_index, index);
                 }
             }.lessThan,
         );
@@ -1171,27 +1172,38 @@ pub const Trie = struct {
                     .{ self, key, bound },
                 );
                 if (self.map.getEntry(key)) |entry| {
-                    debug("Found key match: {s} at {*}", .{ entry.key_ptr.*, entry.value_ptr });
-                    // Find the next valid index for this key
                     debug(
                         "Found key {s} in {*} at bound {}",
                         .{ key, self, bound },
                     );
                     // Find the next index from bound in the next trie, as it
                     // will be the minimum index for this key
-                    if (entry.value_ptr.findNext(bound)) |index_branch| {
-                        const index, const branch = index_branch;
+                    if (entry.value_ptr.findNextByIndex(bound)) |branch_index| {
+                        const index, _ = entry.value_ptr.branches.items[branch_index];
                         debug(
                             "Found branch in {*} for key {s} at index: {}",
                             .{ entry.value_ptr, key, index },
                         );
-                        //     self.branches.items[key_candidate_index];
-                        // if (bound < key_index) panic(
-                        //     "Bound {} is less than key index {}\n",
-                        //     .{ bound, key_index },
-                        // );
-                        _ = branch;
-                        return index_branch;
+                        if (index < bound) panic(
+                            "Index {} is less than bound {}\n",
+                            .{ index, bound },
+                        );
+                        // Return the minimum index from the next trie but the
+                        // branch from this one
+                        return .{
+                            index,
+                            .{
+                                .key = .{
+                                    .entry = entry,
+                                    .next_index = branch_index,
+                                },
+                            },
+                        };
+                    } else {
+                        panic(
+                            "Key {s} found in trie, but no branches at or after bound {}",
+                            .{ key, bound },
+                        );
                     }
                 } else {
                     // debug("Key '{s}' not found in map", .{key});
@@ -1336,7 +1348,6 @@ pub const Trie = struct {
         // For each subsequent term, extend candidates that can continue matching
         var pattern_index: usize = 0;
         while (pattern_index < pattern.root.len) : (pattern_index += 1) {
-            debug("Matching {*} at pattern index: {}", .{ current, pattern_index });
             const rest = Pattern{
                 .root = pattern.root[pattern_index..],
                 .height = pattern.height,
@@ -1604,10 +1615,8 @@ pub const Trie = struct {
         // if (pattern.root.len > 0 and pattern.root[0] == .key)
         //     debug("Eval Complete from: {s}", .{pattern.root[0].key});
         while (index < self.size()) : (matched.deinit(allocator)) {
-            debug("Eval Complete on {*} from index: {}", .{ matched.node_ptr, index });
             // while (len_matched < pattern.root.len) : (len_matched += matched.len) {
             matched = try self.match(allocator, index, &term_bindings, &pattern_bindings, current);
-            debug("Matched {*} at index: {}", .{ matched.node_ptr, matched.index });
             if (matched.index < index)
                 panic("Match index bug: matched.index {} < index {}", .{ matched.index, index });
 
