@@ -8,11 +8,9 @@ const Wyhash = std.hash.Wyhash;
 const Allocator = std.mem.Allocator;
 const assert = std.debug.assert;
 const no_os = @import("builtin").target.os.tag == .freestanding;
-const wasm = @import("wasm.zig");
 const Writer = std.Io.Writer;
 
-pub const Streams = @import("streams.zig").Streams;
-pub const panic = std.debug.panic;
+const panic = std.debug.panic;
 const detect_leaks = @import("build_options").detect_leaks;
 pub const GPA = std.heap.GeneralPurposeAllocator(
     .{

@@ -4,10 +4,10 @@ const ArrayList = std.ArrayList; // Update import
 const mem = std.mem;
 const math = std.math;
 const compare = math.compare;
-const util = @import("../util.zig");
+const util = @import("util.zig");
 const parse = @import("tree_sitter_sifu").parse;
 const assert = std.debug.assert;
-const panic = util.panic;
+const panic = std.debug.panic;
 const Order = math.Order;
 const Wyhash = std.hash.Wyhash;
 const array_hash_map = std.array_hash_map;
@@ -1503,11 +1503,12 @@ pub const Trie = struct {
 
         return Match{
             .key = Pattern{ .root = try node_list.toOwnedSlice(allocator) },
-            .value = if (full_match) result else blk: {
-                _, const branch = current.findNextValue(index) orelse
-                    break :blk null;
-                break :blk branch.value;
-            },
+            .value = if (full_match) result else null,
+            //  blk: {
+            //     _, const branch = current.findNextValue(index) orelse
+            //         break :blk null;
+            //     break :blk branch.value;
+            // },
             .node_ptr = current,
             .index = index,
             .len = pattern_index,
@@ -1741,19 +1742,13 @@ pub const Trie = struct {
                     nested_eval.value orelse sub_pattern,
                 );
             },
-            // else => try pattern.copy(allocator),
-            // else => {},
         };
-
         const eval = Eval{
             .value = current,
             .index = matched.index,
             .len = matched.len,
         };
         debug("Evaluated {} nodes at index {}\n", .{ eval.len, eval.index });
-        // if (eval.value) |value| {
-        //     value.debug("{s}");
-        // }
         return eval;
     }
 
