@@ -71,6 +71,7 @@ pub fn build(b: *std.Build) void {
     const run_step = b.step("run", "Run the pattern");
     run_step.dependOn(&run_cmd.step);
 
+    // TODO: use Tree-Sitter wasm bindings instead of linking libc so this builds
     const wasm_lib = b.addExecutable(.{
         .name = "sifu",
         // In this case the main source file is merely a path, however, in more
@@ -84,7 +85,7 @@ pub fn build(b: *std.Build) void {
             .optimize = std.builtin.OptimizeMode.ReleaseSmall,
         }),
     });
-    // wasm_lib.root_module.addImport("tree_sitter_sifu", tree_sitter_sifu.module("tree_sitter_sifu"));
+    wasm_lib.root_module.addImport("tree_sitter_sifu", tree_sitter_sifu.module("tree_sitter_sifu"));
     const run_wasm = b.addInstallArtifact(wasm_lib, .{});
     run_wasm.step.dependOn(b.getInstallStep());
     const wasm_step = b.step("wasm", "Build a wasm lib");

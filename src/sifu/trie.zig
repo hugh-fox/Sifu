@@ -288,7 +288,7 @@ pub const Node = union(enum) {
 };
 
 pub const Pattern = struct {
-    root: []Node = &.{},
+    root: []const Node = &.{},
     height: usize = 1, // patterns have a height because they are a branch
 
     pub fn isEmpty(self: Pattern) bool {
@@ -1515,13 +1515,14 @@ pub const Trie = struct {
         };
     }
 
+    /// Convenience function for directly passing a string to parse
     pub fn matchStr(
         self: Self,
         allocator: Allocator,
         bound: usize,
         query_str: []const u8,
     ) !Match {
-        var fbs = std.io.fixedBufferStream(query_str);
+        var fbs = std.Io.Reader.fixed(query_str);
         var arena, const query = try parse(allocator, fbs.reader());
         defer arena.deinit();
         return self.match(allocator, bound, query);
@@ -2099,6 +2100,7 @@ test "Pattern: equal to copy" {
         .{ .key = "tree" },
     } };
     const copy = try pattern.copy(testing.allocator);
+    defer copy.deinit(testing.allocator);
     assert(pattern.eql(copy));
     assert(copy.eql(pattern));
 }
@@ -2110,6 +2112,7 @@ test "Pattern: equal to clone" {
         .{ .list = .{ .root = &.{.{ .key = "tree" }} } },
     } };
     const clone = try pattern.clone(testing.allocator);
+    defer clone.destroy(testing.allocator);
     assert(pattern.eql(clone.*));
     assert(clone.eql(pattern));
 }

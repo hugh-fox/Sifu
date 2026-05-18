@@ -71,11 +71,11 @@ data instead of evaluating it.
   
   - [x] Parser/Lexer
     - [x] Lexer (Text → Token)
-    - [ ] Parser (Tokens → AST)
+    - [x] Parser (Tokens → AST)
       - [x] Non-recursive parsing
       - [ ] Newline delimited pattern for top level and operators' rhs
       - [x] Nested pattern for parentheses
-      - [ ] Patterns
+      - [x] Patterns
       - [x] Infix
       - [x] Match
       - [x] Arrow
@@ -93,7 +93,8 @@ data instead of evaluating it.
       - [x] Vars
     - [ ] Evaluation
       - [ ] Index-based limiting
-      - [ ] Multi
+      - [x] Recursion
+      - [ ] Height-based recursion limiting
 
 ### Sifu Interpreter
 
@@ -103,12 +104,17 @@ data instead of evaluating it.
     - [ ] Load files
     - [ ] REPL specific keywords (delete entry, etc.)
 
-  - [ ] Effects / FFI
-    - [ ] Driver API
-    - [ ] Builtin Tries
-    - [ ] File I/O
+---
 
-  - [ ] Basic Stdlib using the Core Language
+#### Possible add-ons
+- [ ] Effects / FFI
+  - [ ] Driver API
+  - [ ] Builtin Tries
+  - [ ] File I/O
+
+- [ ] Basic Stdlib using the Core Language
+
+---
 
 - ### Sifu Compiler
 

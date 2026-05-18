@@ -23,26 +23,13 @@ const parser = @import("sifu/ast.zig").parser;
 const astNodeToTrie = @import("sifu/ast.zig").astNodeToTrie;
 const astToPattern = @import("sifu/ast.zig").astToPattern;
 const parseAll = @import("sifu/ast.zig").parseAll;
-// TODO: merge these into just GPA, when it eventually implements wasm_allocator
-// itself
-// var gpa = if (no_os) {} else GPA{};
 const GPA = util.GPA;
 const debug = std.log.debug;
+// @compileLog(@sizeOf(Pat));
+// @compileLog(@sizeOf(Pat.Node));
+// @compileLog(@sizeOf(ArrayListUnmanaged(Pat.Node)));
 
 pub fn main(init: std.process.Init) void {
-    // @compileLog(@sizeOf(Pat));
-    // @compileLog(@sizeOf(Pat.Node));
-    // @compileLog(@sizeOf(ArrayListUnmanaged(Pat.Node)));
-
-    // const backing_allocator = if (no_os)
-    //     std.heap.wasm_allocator
-    // else
-    //     std.heap.page_allocator;
-
-    // var arena = if (comptime detect_leaks)
-    //     gpa
-    // else
-    //     ArenaAllocator.init(backing_allocator);
     var arena = ArenaAllocator.init(init.gpa);
     const streams = Streams.init(init.io);
     repl(arena.allocator(), streams) catch |e|
