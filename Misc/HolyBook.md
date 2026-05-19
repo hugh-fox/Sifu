@@ -20,7 +20,7 @@ demon was born. A most insidious creature, it thrived on the corruption of
 holy simplicity. The People were forever cursed, never to return to the perfect
 simplicity of the first isomorphism yet endlessly, desperately striving for it.
 
-And the She made the one true language, such that the people of Man could
+And then She made the one true language, such that the people of Man could
 understand the beauty of simplicity.
 But a half measure it was not, for She made this mapping an isomorphism, as
 was right.
