@@ -983,10 +983,7 @@ pub const Trie = struct {
         /// Node entries are just references, so they aren't freed by this
         /// function.
         pub fn deinit(self: *Match, allocator: Allocator) void {
-            // TODO: properly free
-            _ = allocator;
-            _ = self;
-            // defer self.bindings.deinit(allocator);
+            self.key.deinit(allocator);
         }
     };
 
@@ -1189,9 +1186,6 @@ pub const Trie = struct {
             };
             const variable = branch_node.entry.key_ptr.*;
 
-            var new_bindings = VarBindings{};
-            errdefer new_bindings.deinit(allocator);
-
             const get_or_put = try term_bindings.getOrPut(allocator, variable);
 
             // Variable already bound - only match if node equals bound value
@@ -1204,14 +1198,10 @@ pub const Trie = struct {
                     }
                 else {
                     // TODO
-                    // new_bindings.deinit(allocator);
-                    // @panic("unimplemented\n");
                 }
             } else {
-                get_or_put.value_ptr.* = node;
-
                 // Bind the variable to this node
-                try new_bindings.put(allocator, variable, node);
+                get_or_put.value_ptr.* = node;
                 // TODO: save for later, we still need to compare indices
                 // with possible matches below to find the smallest
                 return .{
@@ -2074,19 +2064,174 @@ test "Behavior: vars" {
 }
 
 test "Behavior: nesting" {
-    // assert(false);
+    var trie = Trie{};
+    defer trie.deinit(testing.allocator);
+
+    // Insert a key with a nested sub-pattern: (A B) -> Result
+    var inner_root = [_]Node{ .{ .key = "A" }, .{ .key = "B" } };
+    var key_root = [_]Node{.{ .pattern = .{ .root = &inner_root } }};
+    var val_root = [_]Node{.{ .key = "Result" }};
+
+    const key = Pattern{ .root = &key_root };
+    const val = Pattern{ .root = &val_root };
+    _ = try trie.append(testing.allocator, key, val);
+
+    // The nested pattern should be encoded as "(" -> "A" -> "B" -> ")"
+    try testing.expect(trie.map.contains("("));
+    const open_trie = trie.map.get("(").?;
+    try testing.expect(open_trie.map.contains("A"));
+    const a_trie = open_trie.map.get("A").?;
+    try testing.expect(a_trie.map.contains("B"));
+    const b_trie = a_trie.map.get("B").?;
+    try testing.expect(b_trie.map.contains(")"));
+
+    // Should be retrievable via get
+    const result = trie.get(key);
+    try testing.expect(result != null);
+
+    // Should retrieve the correct value at index 0
+    try testing.expectEqualDeep(trie.getIndex(0), val);
+
+    // A non-matching nested pattern should return null
+    var wrong_inner = [_]Node{ .{ .key = "A" }, .{ .key = "C" } };
+    var wrong_key_root = [_]Node{.{ .pattern = .{ .root = &wrong_inner } }};
+    const wrong_key = Pattern{ .root = &wrong_key_root };
+    try testing.expect(trie.get(wrong_key) == null);
 }
 
 test "Behavior: equal variables" {
-    // assert(false);
+    // Two entries with variables: both use var "x" but with different values
+    var trie = Trie{};
+    defer trie.deinit(testing.allocator);
+
+    // Entry 0: x -> Val1
+    var key1_root = [_]Node{.{ .variable = "x" }};
+    var val1_root = [_]Node{.{ .key = "Val1" }};
+    _ = try trie.append(
+        testing.allocator,
+        Pattern{ .root = &key1_root },
+        Pattern{ .root = &val1_root },
+    );
+
+    // Entry 1: x -> Val2 (same variable name, different value)
+    var key2_root = [_]Node{.{ .variable = "x" }};
+    var val2_root = [_]Node{.{ .key = "Val2" }};
+    _ = try trie.append(
+        testing.allocator,
+        Pattern{ .root = &key2_root },
+        Pattern{ .root = &val2_root },
+    );
+
+    // Both entries share the same variable name in the map
+    try testing.expect(trie.map.contains("x"));
+    try testing.expectEqual(@as(usize, 2), trie.size());
+
+    // Matching from bound 0 should find index 0
+    var term_bindings = VarBindings{};
+    defer term_bindings.deinit(testing.allocator);
+    var pattern_bindings = VarPatternBindings{};
+    defer pattern_bindings.deinit(testing.allocator);
+
+    var query_root = [_]Node{.{ .key = "anything" }};
+    const query = Pattern{ .root = &query_root };
+
+    var match1 = try trie.match(
+        testing.allocator,
+        0,
+        &term_bindings,
+        &pattern_bindings,
+        query,
+    );
+    defer match1.deinit(testing.allocator);
+    // A variable in the trie should match the literal "anything"
+    try testing.expect(match1.value != null);
+    try testing.expectEqualDeep(
+        match1.value.?,
+        Pattern{ .root = &val1_root },
+    );
+
+    // The variable "x" should now be bound to the key "anything"
+    const bound_val = term_bindings.get("x");
+    try testing.expect(bound_val != null);
+    try testing.expect(std.meta.eql(bound_val.?, Node{ .key = "anything" }));
 }
 
 test "Behavior: equal keys, different indices" {
-    // assert(false);
+    // TODO
 }
 
 test "Behavior: equal keys, different structure" {
-    // assert(false);
+    // Keys that share a prefix but diverge — they should coexist in the trie
+    var trie = Trie{};
+    defer trie.deinit(testing.allocator);
+
+    // Entry 0: A B -> Val1
+    var key1_root = [_]Node{ .{ .key = "A" }, .{ .key = "B" } };
+    var val1_root = [_]Node{.{ .key = "Val1" }};
+    _ = try trie.append(
+        testing.allocator,
+        Pattern{ .root = &key1_root },
+        Pattern{ .root = &val1_root },
+    );
+
+    // Entry 1: A C -> Val2 (shares prefix "A", diverges at second node)
+    var key2_root = [_]Node{ .{ .key = "A" }, .{ .key = "C" } };
+    var val2_root = [_]Node{.{ .key = "Val2" }};
+    _ = try trie.append(
+        testing.allocator,
+        Pattern{ .root = &key2_root },
+        Pattern{ .root = &val2_root },
+    );
+
+    // Entry 2: A B D -> Val3 (extends entry 0's key)
+    var key3_root = [_]Node{ .{ .key = "A" }, .{ .key = "B" }, .{ .key = "D" } };
+    var val3_root = [_]Node{.{ .key = "Val3" }};
+    _ = try trie.append(
+        testing.allocator,
+        Pattern{ .root = &key3_root },
+        Pattern{ .root = &val3_root },
+    );
+
+    // The root should only have "A" (shared prefix)
+    try testing.expectEqual(@as(usize, 1), trie.map.count());
+    try testing.expect(trie.map.contains("A"));
+
+    // Under "A", both "B" and "C" should exist
+    const a_trie = trie.map.get("A").?;
+    try testing.expect(a_trie.map.contains("B"));
+    try testing.expect(a_trie.map.contains("C"));
+
+    // Under "A" -> "B", "D" should also exist (from entry 2)
+    const b_trie = a_trie.map.get("B").?;
+    try testing.expect(b_trie.map.contains("D"));
+
+    // Each path should resolve to its correct value
+    try testing.expectEqualDeep(
+        trie.getIndex(0),
+        Pattern{ .root = &val1_root },
+    );
+    try testing.expectEqualDeep(
+        trie.getIndex(1),
+        Pattern{ .root = &val2_root },
+    );
+    try testing.expectEqualDeep(
+        trie.getIndex(2),
+        Pattern{ .root = &val3_root },
+    );
+
+    // get() with full key should find the right sub-trie
+    const ab_result = trie.get(Pattern{ .root = &key1_root });
+    try testing.expect(ab_result != null);
+
+    const ac_result = trie.get(Pattern{ .root = &key2_root });
+    try testing.expect(ac_result != null);
+
+    const abd_result = trie.get(Pattern{ .root = &key3_root });
+    try testing.expect(abd_result != null);
+
+    // A non-existent path should return null
+    var missing_root = [_]Node{ .{ .key = "A" }, .{ .key = "Z" } };
+    try testing.expect(trie.get(Pattern{ .root = &missing_root }) == null);
 }
 
 test "Trie: equal to copy" {
