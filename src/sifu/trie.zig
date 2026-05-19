@@ -329,6 +329,7 @@ pub const Pattern = struct {
     pub fn toString(self: Pattern, allocator: Allocator) ![]const u8 {
         // TODO: properly grow buff
         var buff: std.ArrayList(u8) = try .initCapacity(allocator, 4096);
+        errdefer buff.deinit(allocator);
         var writer = Io.Writer.fromArrayList(&buff);
         try self.write(&writer);
         return buff.toOwnedSlice(allocator);
@@ -607,11 +608,11 @@ pub const Trie = struct {
             entry.value_ptr.*.hasherUpdate(hasher);
         }
         // No need to hash indices, only vars and values
-        var vars_iter = self.valuess.vars.iterator();
+        var vars_iter = self.vars.iterator();
         while (vars_iter.next()) |*entry| {
             hasher.update(entry.value_ptr.*);
         }
-        var values_iter = self.valuess.values.iterator();
+        var values_iter = self.values.iterator();
         // TODO: recurse
         while (values_iter.next()) |*entry| {
             entry.value_ptr.hasherUpdate(hasher);
@@ -634,7 +635,7 @@ pub const Trie = struct {
             const other_entry = other_map_iter.next() orelse
                 return false;
             if (!(mem.eql(u8, entry.key_ptr.*, other_entry.key_ptr.*)) or
-                entry.value_ptr != other_entry.value_ptr)
+                !entry.value_ptr.eql(other_entry.value_ptr.*))
                 return false;
         }
         return true;
@@ -1029,7 +1030,7 @@ pub const Trie = struct {
                     branch: IndexBranch,
                 ) Order {
                     const i, _ = branch;
-                    debug("Compare branches: {} < {}\n", .{ ctx, i });
+                    debug("Compare branches: {} < {}", .{ ctx, i });
                     return math.order(ctx, i);
                 }
             }.lessThan,
@@ -2088,24 +2089,26 @@ test "Behavior: equal keys, different structure" {
     // assert(false);
 }
 
-// test "Trie: equal to copy" {
-//     var nested_trie = try Trie.create(testing.allocator);
-//     defer nested_trie.destroy(testing.allocator);
+test "Trie: equal to copy" {
+    var nested_trie = try Trie.create(testing.allocator);
+    defer nested_trie.destroy(testing.allocator);
 
-//     var val_root = [_]Node{.{ .key = "Beautiful" }};
-//     _ = try nested_trie.appendKey(
-//         testing.allocator,
-//         &.{
-//             "cherry",
-//             "blossom",
-//             "tree",
-//         },
-//         Pattern{ .root = &val_root },
-//     );
-//     const copy = try nested_trie.*.copy(testing.allocator);
-//     assert(nested_trie.eql(copy));
-//     assert(copy.eql(nested_trie.*));
-// }
+    var val_root = [_]Node{.{ .key = "Beautiful" }};
+    _ = try nested_trie.appendKey(
+        testing.allocator,
+        &.{
+            "cherry",
+            "blossom",
+            "tree",
+        },
+        Pattern{ .root = &val_root },
+    );
+    var copy = try nested_trie.*.copy(testing.allocator);
+    defer copy.deinit(testing.allocator);
+
+    assert(nested_trie.eql(copy));
+    assert(copy.eql(nested_trie.*));
+}
 
 test "Pattern: equal to copy" {
     var root = [_]Node{
