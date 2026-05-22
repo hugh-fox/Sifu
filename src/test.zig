@@ -7,7 +7,9 @@ const Pattern = @import("sifu/trie.zig").Pattern;
 const VarBindings = @import("sifu/trie.zig").VarBindings;
 const VarPatternBindings = @import("sifu/trie.zig").VarPatternBindings;
 
-test "Submodules" {}
+test "Submodules" {
+    _ = @import("sifu/Integrated-Parser/RecursiveDescent.zig");
+}
 
 test "equal strings with different pointers or pos should be equal" {
     const str1 = "abc";
@@ -76,3 +78,5 @@ test "Pattern: simple vals" {
     try testing.expect(res.value orelse null != null);
     try testing.expect(res.value.?.eql(val));
 }
+
+test "Parsable: Bound" {}

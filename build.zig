@@ -15,6 +15,26 @@ pub fn build(b: *std.Build) void {
     // set a preferred release mode, allowing the user to decide how to optimize.
     const optimize = b.standardOptimizeOption(.{});
 
+    const verbose_errors = b.option(
+        bool,
+        "VerboseErrors",
+        "Write all error and debug information to stderr",
+    ) orelse false;
+    const detect_leaks = b.option(
+        bool,
+        "DetectLeaks",
+        "Use GPA's with leak detection instead of arenas",
+    ) orelse false;
+    const use_tree_sitter = b.option(
+        bool,
+        "TreeSitter",
+        "Use the tree-sitter parser instead of the recursive descent parser",
+    ) orelse false;
+    const build_options = b.addOptions();
+    build_options.addOption(bool, "verbose_errors", verbose_errors);
+    build_options.addOption(bool, "detect_leaks", detect_leaks);
+    build_options.addOption(bool, "tree_sitter", use_tree_sitter);
+
     const tree_sitter_sifu = b.dependency("tree_sitter_sifu", .{
         .target = target,
         .optimize = optimize,
@@ -45,7 +65,8 @@ pub fn build(b: *std.Build) void {
             },
         }),
     });
-    exe.root_module.addImport("tree_sitter_sifu", tree_sitter_sifu.module("tree_sitter_sifu"));
+    if (use_tree_sitter)
+        exe.root_module.addImport("tree_sitter_sifu", tree_sitter_sifu.module("tree_sitter_sifu"));
 
     // This is commented out so as to not build the x86 default when targeting
     // wasm.
@@ -127,19 +148,6 @@ pub fn build(b: *std.Build) void {
     const test_step = b.step("test", "Run unit tests");
     test_step.dependOn(&run_unit_tests.step);
 
-    const verbose_errors = b.option(
-        bool,
-        "VerboseErrors",
-        "Write all error and debug information to stderr",
-    ) orelse false;
-    const detect_leaks = b.option(
-        bool,
-        "DetectLeaks",
-        "Use GPA's with leak detection instead of arenas",
-    ) orelse false;
-    const build_options = b.addOptions();
-    build_options.addOption(bool, "verbose_errors", verbose_errors);
-    build_options.addOption(bool, "detect_leaks", detect_leaks);
     unit_tests.root_module.addOptions("build_options", build_options);
     wasm_lib.root_module.addOptions("build_options", build_options);
     wasi_exe.root_module.addOptions("build_options", build_options);

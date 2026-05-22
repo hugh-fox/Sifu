@@ -1,0 +1,743 @@
+///
+/// Created by Claude 4.6 from tree-sitter-sifu/grammar.js
+/// commit b5feade973d991f19dadddc3e83bfe9f74ec611c
+///
+/// A recursive descent parser for Sifu. Follows the grammar defined in
+/// tree-sitter-sifu/grammar.js.
+///
+/// Operator precedence (lowest to highest):
+///   1. semicolon  ;
+///   2. long_match ::  /  long_arrow -->
+///   3. comma      ,
+///   4. infix      <symbol>
+///   5. match      :   /  arrow      ->
+///   6. terms      (juxtaposition)
+const Self = @This();
+
+const std = @import("std");
+const Allocator = std.mem.Allocator;
+const mem = std.mem;
+const math = std.math;
+const assert = std.debug.assert;
+const trie = @import("../trie.zig");
+const Pattern = trie.Pattern;
+const Node = trie.Node;
+const Trie = trie.Trie;
+
+const Oom = Allocator.Error;
+
+// ---------------------------------------------------------------------------
+// Token
+// ---------------------------------------------------------------------------
+
+pub const Tag = enum {
+    key,
+    variable,
+    var_pattern,
+    number,
+    string,
+    symbol,
+    semicolon,
+    long_match,
+    long_arrow,
+    comma,
+    match,
+    arrow,
+    left_paren,
+    right_paren,
+    left_brace,
+    right_brace,
+    backtick,
+    eof,
+};
+
+pub const Token = struct {
+    tag: Tag,
+    start: usize,
+    end: usize,
+
+    pub fn text(self: Token, source: []const u8) []const u8 {
+        return source[self.start..self.end];
+    }
+};
+
+// ---------------------------------------------------------------------------
+// Lexer
+// ---------------------------------------------------------------------------
+
+source: []const u8,
+pos: usize = 0,
+current: Token = .{ .tag = .eof, .start = 0, .end = 0 },
+
+pub fn init(source: []const u8) Self {
+    var self = Self{ .source = source };
+    self.current = self.advance();
+    return self;
+}
+
+fn peek(self: Self) Tag {
+    return self.current.tag;
+}
+
+fn peekToken(self: Self) Token {
+    return self.current;
+}
+
+fn eat(self: *Self) Token {
+    const tok = self.current;
+    self.current = self.advance();
+    return tok;
+}
+
+fn expect(self: *Self, tag: Tag) ?Token {
+    if (self.current.tag == tag) return self.eat();
+    return null;
+}
+
+fn advance(self: *Self) Token {
+    self.skipExtras();
+    if (self.pos >= self.source.len)
+        return .{ .tag = .eof, .start = self.source.len, .end = self.source.len };
+
+    const c = self.source[self.pos];
+
+    // Single-character delimiters
+    switch (c) {
+        '(' => return self.single(.left_paren),
+        ')' => return self.single(.right_paren),
+        '{' => return self.single(.left_brace),
+        '}' => return self.single(.right_brace),
+        '`' => return self.single(.backtick),
+        ';' => return self.single(.semicolon),
+        ',' => return self.single(.comma),
+        '"' => return self.lexString(),
+        else => {},
+    }
+
+    // VarPattern: * followed by lowercase
+    if (c == '*' and self.pos + 1 < self.source.len and isLower(self.source[self.pos + 1]))
+        return self.lexVarPattern();
+
+    if (isUpper(c)) return self.lexKey();
+    if (isLower(c)) return self.lexVariable();
+    if (isDigit(c)) return self.lexNumber();
+    if (isOpChar(c)) return self.lexOperator();
+
+    // Skip unknown bytes
+    self.pos += 1;
+    return self.advance();
+}
+
+fn single(self: *Self, tag: Tag) Token {
+    const start = self.pos;
+    self.pos += 1;
+    return .{ .tag = tag, .start = start, .end = self.pos };
+}
+
+fn skipExtras(self: *Self) void {
+    while (self.pos < self.source.len) {
+        const c = self.source[self.pos];
+        if (c == ' ' or c == '\t' or c == '\n' or c == '\r') {
+            self.pos += 1;
+        } else if (c == '#') {
+            // Comment: skip to end of line
+            while (self.pos < self.source.len and self.source[self.pos] != '\n')
+                self.pos += 1;
+        } else break;
+    }
+}
+
+fn lexKey(self: *Self) Token {
+    const start = self.pos;
+    self.pos += 1;
+    while (self.pos < self.source.len and isIdentTail(self.source[self.pos]))
+        self.pos += 1;
+    return .{ .tag = .key, .start = start, .end = self.pos };
+}
+
+fn lexVariable(self: *Self) Token {
+    const start = self.pos;
+    self.pos += 1;
+    while (self.pos < self.source.len and isIdentTail(self.source[self.pos]))
+        self.pos += 1;
+    return .{ .tag = .variable, .start = start, .end = self.pos };
+}
+
+fn lexVarPattern(self: *Self) Token {
+    const start = self.pos;
+    self.pos += 1; // skip *
+    self.pos += 1; // skip first lowercase letter
+    while (self.pos < self.source.len and isIdentTail(self.source[self.pos]))
+        self.pos += 1;
+    return .{ .tag = .var_pattern, .start = start, .end = self.pos };
+}
+
+fn lexNumber(self: *Self) Token {
+    const start = self.pos;
+    while (self.pos < self.source.len and isDigit(self.source[self.pos]))
+        self.pos += 1;
+    // Optional decimal part
+    if (self.pos < self.source.len and self.source[self.pos] == '.') {
+        if (self.pos + 1 < self.source.len and isDigit(self.source[self.pos + 1])) {
+            self.pos += 1; // skip '.'
+            while (self.pos < self.source.len and isDigit(self.source[self.pos]))
+                self.pos += 1;
+        }
+    }
+    return .{ .tag = .number, .start = start, .end = self.pos };
+}
+
+fn lexString(self: *Self) Token {
+    const start = self.pos;
+    self.pos += 1; // skip opening "
+    while (self.pos < self.source.len) {
+        if (self.source[self.pos] == '\\' and self.pos + 1 < self.source.len) {
+            self.pos += 2; // skip escape sequence
+        } else if (self.source[self.pos] == '"') {
+            self.pos += 1; // skip closing "
+            break;
+        } else {
+            self.pos += 1;
+        }
+    }
+    return .{ .tag = .string, .start = start, .end = self.pos };
+}
+
+fn lexOperator(self: *Self) Token {
+    const start = self.pos;
+    // Accumulate all consecutive operator characters
+    while (self.pos < self.source.len and isOpChar(self.source[self.pos]))
+        self.pos += 1;
+    const lit = self.source[start..self.pos];
+    // Check for reserved operators (exact match on the full run)
+    const tag: Tag = if (mem.eql(u8, lit, "-->"))
+        .long_arrow
+    else if (mem.eql(u8, lit, "->"))
+        .arrow
+    else if (mem.eql(u8, lit, "::"))
+        .long_match
+    else if (mem.eql(u8, lit, ":"))
+        .match
+    else
+        .symbol;
+    return .{ .tag = tag, .start = start, .end = self.pos };
+}
+
+fn isUpper(c: u8) bool {
+    return c >= 'A' and c <= 'Z';
+}
+
+fn isLower(c: u8) bool {
+    return c >= 'a' and c <= 'z';
+}
+
+fn isDigit(c: u8) bool {
+    return c >= '0' and c <= '9';
+}
+
+fn isIdentTail(c: u8) bool {
+    return isUpper(c) or isLower(c) or isDigit(c) or c == '_' or c == '-';
+}
+
+fn isOpChar(c: u8) bool {
+    return switch (c) {
+        ':',
+        '!',
+        '@',
+        '$',
+        '%',
+        '^',
+        '&',
+        '*',
+        '+',
+        '-',
+        '=',
+        '|',
+        '<',
+        '>',
+        '?',
+        '/',
+        '\\',
+        '~',
+        => true,
+        else => false,
+    };
+}
+
+// ---------------------------------------------------------------------------
+// Parser – produces Pattern / Node values
+// ---------------------------------------------------------------------------
+
+/// Parse the full source into a Pattern. Top-level entry point.
+pub fn parsePattern(self: *Self, allocator: Allocator) Oom!Pattern {
+    if (self.peek() == .eof) return .{};
+    return self.parsePrec1(allocator);
+}
+
+/// Prec 1: semicolon (left-associative)
+///   lhs higher_prec (";" higher_prec)*
+fn parsePrec1(self: *Self, allocator: Allocator) Oom!Pattern {
+    // Handle leading semicolon (empty LHS)
+    if (self.peek() == .semicolon) {
+        var nodes = std.ArrayList(Node).empty;
+        _ = self.eat();
+        const rhs = try self.parseOptionalPrec2(allocator);
+        try nodes.append(allocator, Node{ .list = rhs });
+        while (self.peek() == .semicolon) {
+            _ = self.eat();
+            const next_rhs = try self.parseOptionalPrec2(allocator);
+            try nodes.append(allocator, Node{ .list = next_rhs });
+        }
+        return makePattern(try nodes.toOwnedSlice(allocator));
+    }
+
+    var lhs = try self.parsePrec2(allocator);
+    if (self.peek() != .semicolon) return lhs;
+
+    var nodes = std.ArrayList(Node).empty;
+    try nodes.appendSlice(allocator, lhs.root);
+    lhs.root = &.{};
+
+    while (self.peek() == .semicolon) {
+        _ = self.eat();
+        const rhs = try self.parseOptionalPrec2(allocator);
+        try nodes.append(allocator, Node{ .list = rhs });
+    }
+    return makePattern(try nodes.toOwnedSlice(allocator));
+}
+
+fn parseOptionalPrec2(self: *Self, allocator: Allocator) Oom!Pattern {
+    if (!self.canStartExpr()) return .{};
+    return self.parsePrec2(allocator);
+}
+
+/// Prec 2: long_match :: / long_arrow --> (right-recursive for mixed ops)
+fn parsePrec2(self: *Self, allocator: Allocator) Oom!Pattern {
+    // Handle leading operator (empty LHS)
+    if (self.peek() == .long_match or self.peek() == .long_arrow) {
+        var nodes = std.ArrayList(Node).empty;
+        const op = self.eat();
+        const rhs = try self.parseOptionalPrec2(allocator);
+        try nodes.append(allocator, wrapOp(op.tag, rhs));
+        return makePattern(try nodes.toOwnedSlice(allocator));
+    }
+
+    var lhs = try self.parsePrec3(allocator);
+    if (self.peek() != .long_match and self.peek() != .long_arrow) return lhs;
+
+    var nodes = std.ArrayList(Node).empty;
+    try nodes.appendSlice(allocator, lhs.root);
+    lhs.root = &.{};
+
+    const op = self.eat();
+    const rhs = try self.parseOptionalPrec2(allocator);
+    try nodes.append(allocator, wrapOp(op.tag, rhs));
+    return makePattern(try nodes.toOwnedSlice(allocator));
+}
+
+/// Prec 3: comma (left-associative)
+fn parsePrec3(self: *Self, allocator: Allocator) Oom!Pattern {
+    if (self.peek() == .comma) {
+        var nodes = std.ArrayList(Node).empty;
+        _ = self.eat();
+        const rhs = try self.parseOptionalPrec4(allocator);
+        try nodes.append(allocator, Node{ .list = rhs });
+        while (self.peek() == .comma) {
+            _ = self.eat();
+            const next_rhs = try self.parseOptionalPrec4(allocator);
+            try nodes.append(allocator, Node{ .list = next_rhs });
+        }
+        return makePattern(try nodes.toOwnedSlice(allocator));
+    }
+
+    var lhs = try self.parsePrec4(allocator);
+    if (self.peek() != .comma) return lhs;
+
+    var nodes = std.ArrayList(Node).empty;
+    try nodes.appendSlice(allocator, lhs.root);
+    lhs.root = &.{};
+
+    while (self.peek() == .comma) {
+        _ = self.eat();
+        const rhs = try self.parseOptionalPrec4(allocator);
+        try nodes.append(allocator, Node{ .list = rhs });
+    }
+    return makePattern(try nodes.toOwnedSlice(allocator));
+}
+
+fn parseOptionalPrec4(self: *Self, allocator: Allocator) Oom!Pattern {
+    if (!self.canStartExpr()) return .{};
+    return self.parsePrec4(allocator);
+}
+
+/// Prec 4: infix (left-associative)
+///   User-defined symbol operators. The symbol is prepended to the RHS as
+///   a key inside an .infix node.
+fn parsePrec4(self: *Self, allocator: Allocator) Oom!Pattern {
+    var lhs = try self.parsePrec5(allocator);
+    if (self.peek() != .symbol) return lhs;
+
+    var nodes = std.ArrayList(Node).empty;
+    try nodes.appendSlice(allocator, lhs.root);
+    lhs.root = &.{};
+
+    while (self.peek() == .symbol) {
+        const sym_tok = self.eat();
+        const sym_text = sym_tok.text(self.source);
+        const rhs = try self.parseOptionalPrec5(allocator);
+
+        // Build infix pattern: [op_key, rhs_nodes...]
+        var infix_nodes = std.ArrayList(Node).empty;
+        try infix_nodes.append(allocator, Node{ .key = sym_text });
+        try infix_nodes.appendSlice(allocator, rhs.root);
+        try nodes.append(allocator, Node{
+            .infix = makePattern(try infix_nodes.toOwnedSlice(allocator)),
+        });
+    }
+    return makePattern(try nodes.toOwnedSlice(allocator));
+}
+
+fn parseOptionalPrec5(self: *Self, allocator: Allocator) Oom!Pattern {
+    if (!self.canStartExpr()) return .{};
+    return self.parsePrec5(allocator);
+}
+
+/// Prec 5: match : / arrow -> (right-recursive for mixed ops)
+fn parsePrec5(self: *Self, allocator: Allocator) Oom!Pattern {
+    if (self.peek() == .match or self.peek() == .arrow) {
+        var nodes = std.ArrayList(Node).empty;
+        const op = self.eat();
+        const rhs = try self.parseOptionalPrec5(allocator);
+        try nodes.append(allocator, wrapOp(op.tag, rhs));
+        return makePattern(try nodes.toOwnedSlice(allocator));
+    }
+
+    var lhs = try self.parseTerms(allocator);
+    if (self.peek() != .match and self.peek() != .arrow) return lhs;
+
+    var nodes = std.ArrayList(Node).empty;
+    try nodes.appendSlice(allocator, lhs.root);
+    lhs.root = &.{};
+
+    const op = self.eat();
+    const rhs = try self.parseOptionalPrec5(allocator);
+    try nodes.append(allocator, wrapOp(op.tag, rhs));
+    return makePattern(try nodes.toOwnedSlice(allocator));
+}
+
+/// Prec 6: terms (juxtaposition) – one or more terms
+fn parseTerms(self: *Self, allocator: Allocator) Oom!Pattern {
+    var nodes = std.ArrayList(Node).empty;
+    while (self.canStartTerm()) {
+        const node = try self.parseTerm(allocator);
+        try nodes.append(allocator, node);
+    }
+    return makePattern(try nodes.toOwnedSlice(allocator));
+}
+
+fn parseTerm(self: *Self, allocator: Allocator) Oom!Node {
+    const tok = self.eat();
+    return switch (tok.tag) {
+        .key, .number, .string => Node{ .key = tok.text(self.source) },
+        .variable => Node{ .variable = tok.text(self.source) },
+        .var_pattern => Node{ .var_pattern = tok.text(self.source) },
+        .left_paren => blk: {
+            const inner = try self.parseInner(allocator, .right_paren);
+            break :blk Node{ .pattern = inner };
+        },
+        .left_brace => blk: {
+            const inner = try self.parseInner(allocator, .right_brace);
+            _ = inner;
+            break :blk Node{ .trie = Trie{} };
+        },
+        .backtick => blk: {
+            const inner = try self.parseInner(allocator, .backtick);
+            break :blk Node{ .pattern = inner };
+        },
+        else => Node{ .key = tok.text(self.source) },
+    };
+}
+
+fn parseInner(self: *Self, allocator: Allocator, close: Tag) Oom!Pattern {
+    if (self.peek() == close) {
+        _ = self.eat();
+        return .{};
+    }
+    const inner = try self.parsePrec1(allocator);
+    _ = self.expect(close);
+    return inner;
+}
+
+fn canStartTerm(self: Self) bool {
+    return switch (self.current.tag) {
+        .key,
+        .variable,
+        .var_pattern,
+        .number,
+        .string,
+        .left_paren,
+        .left_brace,
+        .backtick,
+        => true,
+        else => false,
+    };
+}
+
+fn canStartExpr(self: Self) bool {
+    return self.canStartTerm() or
+        self.current.tag == .match or
+        self.current.tag == .arrow or
+        self.current.tag == .long_match or
+        self.current.tag == .long_arrow or
+        self.current.tag == .symbol;
+}
+
+fn wrapOp(tag: Tag, rhs: Pattern) Node {
+    return switch (tag) {
+        .semicolon, .comma => Node{ .list = rhs },
+        .long_match, .match => Node{ .match = rhs },
+        .long_arrow, .arrow => Node{ .arrow = rhs },
+        else => Node{ .pattern = rhs },
+    };
+}
+
+fn makePattern(nodes: []Node) Pattern {
+    var max_height: usize = 0;
+    for (nodes) |n| {
+        const h = nodeHeight(n);
+        if (h > max_height) max_height = h;
+    }
+    return .{ .root = nodes, .height = if (nodes.len > 0) max_height + 1 else 0 };
+}
+
+fn nodeHeight(node: Node) usize {
+    return switch (node) {
+        .pattern, .infix, .match, .arrow, .list => |p| p.height,
+        .trie => 1,
+        else => 0,
+    };
+}
+
+// ---------------------------------------------------------------------------
+// Convenience
+// ---------------------------------------------------------------------------
+
+pub fn parse(allocator: Allocator, source: []const u8) Oom!Pattern {
+    var parser = Self.init(source);
+    return parser.parsePattern(allocator);
+}
+
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
+
+const testing = std.testing;
+
+const NodeTag = enum { key, variable, var_pattern, pattern, infix, match, arrow, list, trie };
+
+fn expectNodes(pattern: Pattern, expected_tags: []const NodeTag) !void {
+    try testing.expectEqual(expected_tags.len, pattern.root.len);
+    for (pattern.root, expected_tags) |node, expected_tag| {
+        const actual_tag: NodeTag = switch (node) {
+            .key => .key,
+            .variable => .variable,
+            .var_pattern => .var_pattern,
+            .pattern => .pattern,
+            .infix => .infix,
+            .match => .match,
+            .arrow => .arrow,
+            .list => .list,
+            .trie => .trie,
+        };
+        try testing.expectEqual(expected_tag, actual_tag);
+    }
+}
+
+test "empty" {
+    const p = try parse(testing.allocator, "");
+    try testing.expectEqual(@as(usize, 0), p.root.len);
+}
+
+test "single key" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const p = try parse(arena.allocator(), "Foo");
+    try testing.expectEqual(@as(usize, 1), p.root.len);
+    try testing.expectEqualStrings("Foo", p.root[0].key);
+}
+
+test "juxtaposition" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const p = try parse(arena.allocator(), "A B C");
+    try expectNodes(p, &.{ .key, .key, .key });
+    try testing.expectEqualStrings("A", p.root[0].key);
+    try testing.expectEqualStrings("B", p.root[1].key);
+    try testing.expectEqualStrings("C", p.root[2].key);
+}
+
+test "variable" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const p = try parse(arena.allocator(), "x");
+    try expectNodes(p, &.{.variable});
+    try testing.expectEqualStrings("x", p.root[0].variable);
+}
+
+test "var_pattern" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const p = try parse(arena.allocator(), "*x");
+    try expectNodes(p, &.{.var_pattern});
+    try testing.expectEqualStrings("*x", p.root[0].var_pattern);
+}
+
+test "number" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const p = try parse(arena.allocator(), "42");
+    try expectNodes(p, &.{.key});
+    try testing.expectEqualStrings("42", p.root[0].key);
+}
+
+test "decimal number" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const p = try parse(arena.allocator(), "3.14");
+    try expectNodes(p, &.{.key});
+    try testing.expectEqualStrings("3.14", p.root[0].key);
+}
+
+test "string" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const p = try parse(arena.allocator(), "\"hello\"");
+    try expectNodes(p, &.{.key});
+    try testing.expectEqualStrings("\"hello\"", p.root[0].key);
+}
+
+test "arrow: A -> B" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const p = try parse(arena.allocator(), "A -> B");
+    // LHS flattened [A], then arrow([B])
+    try expectNodes(p, &.{ .key, .arrow });
+    try testing.expectEqualStrings("A", p.root[0].key);
+    try testing.expectEqualStrings("B", p.root[1].arrow.root[0].key);
+}
+
+test "match: x : Int" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const p = try parse(arena.allocator(), "x : Int");
+    try expectNodes(p, &.{ .variable, .match });
+    try testing.expectEqualStrings("x", p.root[0].variable);
+    try testing.expectEqualStrings("Int", p.root[1].match.root[0].key);
+}
+
+test "match and arrow: x : Int -> x" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const p = try parse(arena.allocator(), "x : Int -> x");
+    // Prec 5 right-recursive: x, match([Int, arrow([x])])
+    try expectNodes(p, &.{ .variable, .match });
+    const match_pat = p.root[1].match;
+    try testing.expectEqual(@as(usize, 2), match_pat.root.len);
+    try testing.expectEqualStrings("Int", match_pat.root[0].key);
+    try testing.expectEqualStrings("x", match_pat.root[1].arrow.root[0].variable);
+}
+
+test "long arrow: A --> B" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const p = try parse(arena.allocator(), "A --> B");
+    try expectNodes(p, &.{ .key, .arrow });
+    try testing.expectEqualStrings("B", p.root[1].arrow.root[0].key);
+}
+
+test "long match: A :: B" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const p = try parse(arena.allocator(), "A :: B");
+    try expectNodes(p, &.{ .key, .match });
+    try testing.expectEqualStrings("B", p.root[1].match.root[0].key);
+}
+
+test "comma: A , B , C" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const p = try parse(arena.allocator(), "A , B , C");
+    // Left-assoc: [A, list([B]), list([C])]
+    try expectNodes(p, &.{ .key, .list, .list });
+    try testing.expectEqualStrings("A", p.root[0].key);
+    try testing.expectEqualStrings("B", p.root[1].list.root[0].key);
+    try testing.expectEqualStrings("C", p.root[2].list.root[0].key);
+}
+
+test "semicolon: A ; B ; C" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const p = try parse(arena.allocator(), "A ; B ; C");
+    // Left-assoc: [A, list([B]), list([C])]
+    try expectNodes(p, &.{ .key, .list, .list });
+    try testing.expectEqualStrings("A", p.root[0].key);
+    try testing.expectEqualStrings("B", p.root[1].list.root[0].key);
+    try testing.expectEqualStrings("C", p.root[2].list.root[0].key);
+}
+
+test "nested pattern: (A B)" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const p = try parse(arena.allocator(), "(A B)");
+    try expectNodes(p, &.{.pattern});
+    const inner = p.root[0].pattern;
+    try testing.expectEqual(@as(usize, 2), inner.root.len);
+    try testing.expectEqualStrings("A", inner.root[0].key);
+    try testing.expectEqualStrings("B", inner.root[1].key);
+}
+
+test "nested empty: ()" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const p = try parse(arena.allocator(), "()");
+    try expectNodes(p, &.{.pattern});
+    try testing.expectEqual(@as(usize, 0), p.root[0].pattern.root.len);
+}
+
+test "mixed precedence: A B : C D -> E F" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const p = try parse(arena.allocator(), "A B : C D -> E F");
+    // [A, B, match([C, D, arrow([E, F])])]
+    try expectNodes(p, &.{ .key, .key, .match });
+    const match_pat = p.root[2].match;
+    try testing.expectEqual(@as(usize, 3), match_pat.root.len);
+    try testing.expectEqualStrings("C", match_pat.root[0].key);
+    try testing.expectEqualStrings("D", match_pat.root[1].key);
+    const arrow_pat = match_pat.root[2].arrow;
+    try testing.expectEqual(@as(usize, 2), arrow_pat.root.len);
+    try testing.expectEqualStrings("E", arrow_pat.root[0].key);
+    try testing.expectEqualStrings("F", arrow_pat.root[1].key);
+}
+
+test "infix: 1 + 2" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const p = try parse(arena.allocator(), "1 + 2");
+    // [1, infix([+, 2])]
+    try expectNodes(p, &.{ .key, .infix });
+    try testing.expectEqualStrings("1", p.root[0].key);
+    const infix_pat = p.root[1].infix;
+    try testing.expectEqual(@as(usize, 2), infix_pat.root.len);
+    try testing.expectEqualStrings("+", infix_pat.root[0].key);
+    try testing.expectEqualStrings("2", infix_pat.root[1].key);
+}
+
+test "comment skipped" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const p = try parse(arena.allocator(), "A # comment\nB");
+    try expectNodes(p, &.{ .key, .key });
+    try testing.expectEqualStrings("A", p.root[0].key);
+    try testing.expectEqualStrings("B", p.root[1].key);
+}

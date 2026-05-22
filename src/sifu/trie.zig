@@ -224,7 +224,7 @@ pub const Node = union(enum) {
     }
 
     pub fn writeSExp(
-        self: Node,
+        self: *Node,
         writer: *Writer,
         optional_indent: ?usize,
     ) !void {
@@ -236,12 +236,12 @@ pub const Node = union(enum) {
         // });
         for (0..optional_indent orelse 0) |_|
             try writer.writeByte(' ');
-        switch (self) {
+        switch (self.*) {
             .key => |key| _ = try writer.writeAll(key),
             .variable, .var_pattern => |variable| {
                 try writer.writeAll(variable);
             },
-            .trie => |trie| try trie.writeIndent(
+            .trie => |*trie| try trie.writeIndent(
                 writer,
                 optional_indent,
             ),
@@ -308,7 +308,7 @@ pub const Pattern = struct {
         try slice[0].writeSExp(writer, optional_indent);
         if (slice.len == 1) {
             return;
-        } else for (slice[1 .. slice.len - 1]) |pattern| {
+        } else for (slice[1 .. slice.len - 1]) |*pattern| {
             // debug("tag: {s}", .{@tagName(pattern)});
             try writer.writeByte(' ');
             try pattern.writeSExp(writer, optional_indent);
@@ -380,19 +380,6 @@ pub const Pattern = struct {
         // information
         for (self.root) |pattern|
             pattern.hasherUpdate(hasher);
-    }
-
-    pub fn debug(self: Pattern, comptime fmt: []const u8) void {
-        var buffer: [4096]u8 = undefined;
-        var fba: std.heap.FixedBufferAllocator = .init(&buffer);
-        const allocator = fba.allocator();
-
-        const node_str = self.toString(allocator) catch unreachable;
-        _ = node_str;
-        _ = fmt;
-        // std.log.debug("Node str len: {}", .{node_str.len});
-        // std.log.debug("Pattern len: {}", .{self.root.len});
-        // std.log.debug(fmt, .{node_str});
     }
 };
 
@@ -497,7 +484,10 @@ pub const Trie = struct {
     pub const Self = @This();
 
     map: HashMap = .{},
-    branches: BranchList = .empty, // TODO remove and store in caches
+    // TODO remove and store in caches. Also possible to skip extra branches
+    // as they can be found within a range. Only need to store one branch for
+    // each trie with its minimum index, but indexing wouldn't be as fast
+    branches: BranchList = .empty,
     key_cache: CacheList = .empty,
     var_cache: CacheList = .empty,
     var_pattern_cache: CacheList = .empty,
@@ -1827,32 +1817,6 @@ pub const Trie = struct {
         return self.branches.items.len;
     }
 
-    /// Caller owns the slice, but not the patterns in it.
-    fn setKeys(
-        self: Self,
-        allocator: Allocator,
-        result: []ArrayList([]const u8),
-    ) !void {
-        for (self.keys) |key| {
-            try result[key.index].appendSlice(allocator, key.name + ' ');
-        }
-        for (self.keys.items) |entry|
-            entry.next.setKeys(result);
-        for (self.vars.items) |entry|
-            entry.next.setKeys(result);
-    }
-
-    /// Caller owns the slice, but not the patterns in it.
-    fn setValues(self: Self, result: []Pattern) void {
-        for (self.values) |value| {
-            result[value.index] = value.pattern;
-        }
-        for (self.keys.items) |entry|
-            entry.next.setValues(result);
-        for (self.vars.items) |entry|
-            entry.next.setValues(result);
-    }
-
     /// Returns a slice of keys, where each key is concatenated into a string.
     pub fn keys(self: Self, allocator: Allocator) ![][]const u8 {
         const result = try allocator.alloc([][]const u8, self.count());
@@ -1870,7 +1834,7 @@ pub const Trie = struct {
         return result;
     }
 
-    /// Pretty debug a trie on multiple lines
+    /// Pretty print a trie on multiple lines
     pub fn pretty(self: Self, writer: anytype) !void {
         try self.writeIndent(writer, 0);
     }
@@ -1881,7 +1845,7 @@ pub const Trie = struct {
         return buff.toOwnedSlice();
     }
 
-    /// debug a trie without newlines
+    /// Print a trie without newlines
     pub fn write(self: Self, writer: anytype) !void {
         try self.writeIndent(writer, null);
     }
@@ -1899,9 +1863,6 @@ pub const Trie = struct {
         while (branch.node()) |branch_node| : (_, branch = branch_node.next()) {
             try writer.writeAll(branch_node.entry.key_ptr.*);
             try writer.writeByte(' ');
-
-            // if (comptime debug_mode)
-            //     try writer.debug("[{}] ", .{index});
         }
         // TODO print correct precedence
         try writer.writeAll("--> ");
@@ -1918,13 +1879,17 @@ pub const Trie = struct {
 
     pub const indent_increment = 2;
     pub fn writeIndent(
-        self: Self,
+        self: *const Self,
         writer: anytype,
         optional_indent: ?usize,
     ) Writer.Error!void {
+        if (debug_mode)
+            try writer.print("{*} ", .{self});
         try writer.writeAll("❬");
         for (self.value_cache.items) |value_index_branch| {
-            _, const branch = self.branches.items[value_index_branch];
+            const index, const branch = self.branches.items[value_index_branch];
+            if (debug_mode)
+                try writer.print("{} ({}): ", .{ index, value_index_branch });
             try branch.value.writeIndent(writer, null);
             try writer.writeAll(", ");
         }

@@ -19,10 +19,9 @@ const debug_mode = @import("builtin").mode == .Debug;
 const Reader = Io.Reader;
 const Writer = Io.Writer;
 const verbose_tests = @import("build_options").verbose_errors;
-const parser = @import("sifu/ast.zig").parser;
-const astNodeToTrie = @import("sifu/ast.zig").astNodeToTrie;
-const astToPattern = @import("sifu/ast.zig").astToPattern;
-const parseAll = @import("sifu/ast.zig").parseAll;
+const use_tree_sitter = @import("build_options").tree_sitter;
+const RecursiveDescent = @import("sifu/Integrated-Parser/RecursiveDescent.zig");
+const ts = if (use_tree_sitter) @import("sifu/ast.zig") else struct {};
 const GPA = util.GPA;
 const debug = std.log.debug;
 // @compileLog(@sizeOf(Pat));
@@ -62,35 +61,35 @@ fn replStep(
     streams: Streams,
     trie: *Trie,
 ) !?void {
-    var buffer = std.Io.Writer.Allocating.init(allocator);
-    buffer.clearRetainingCapacity();
-    // defer buffer.deinit(); // TODO: proper memory management
-    const ast_option = try parser.parseLine(
-        &buffer,
-        streams.in,
-    );
-    // const source = buffer.toOwnedSlice(allocator) catch |e|
-    //     panic("Out of memory allocating source: {}", .{e});
-    const ast_ptr = ast_option orelse panic("Nothing to parse\n", .{});
-    defer ast_ptr.destroy();
-    {
-        const node = ast_ptr.rootNode();
-        const text = buffer.written()[node.startByte()..node.endByte()];
-        debug(
-            "Parsing term node of type '{s}' and {} children with text: '{s}'",
-            .{ node.kind(), node.childCount(), text },
+    const pattern = if (comptime use_tree_sitter) blk: {
+        var buffer = std.Io.Writer.Allocating.init(allocator);
+        buffer.clearRetainingCapacity();
+        const ast_option = try ts.parser.parseLine(
+            &buffer,
+            streams.in,
         );
-        streams.err.writeByte('\t') catch unreachable;
-        node.format(streams.err) catch unreachable;
-        streams.err.writeByte('\n') catch unreachable;
-        try streams.err.flush();
-    }
-    // Get the optional list of one or more terms
-    const pattern = if (ast_ptr.rootNode().child(0)) |pattern_root|
-        astToPattern(allocator, buffer.written(), pattern_root) catch |e|
-            panic("Error parsing stdin: {}", .{e})
-    else
-        Pattern{ .root = &.{}, .height = 0 };
+        const ast_ptr = ast_option orelse panic("Nothing to parse\n", .{});
+        defer ast_ptr.destroy();
+        {
+            const node = ast_ptr.rootNode();
+            const text = buffer.written()[node.startByte()..node.endByte()];
+            debug(
+                "Parsing term node of type '{s}' and {} children with text: '{s}'",
+                .{ node.kind(), node.childCount(), text },
+            );
+            try streams.err.flush();
+        }
+        break :blk try ts.astToPattern(allocator, buffer.written(), ast_ptr);
+    } else blk: {
+        var line_buf = std.Io.Writer.Allocating.init(allocator);
+        streams.in.streamUntilDelimiter(&line_buf.interface, '\n', null) catch |err| switch (err) {
+            error.EndOfStream => if (line_buf.written().len == 0) return error.EndOfStream,
+            else => return err,
+        };
+        const line = line_buf.written();
+        if (line.len == 0) return null;
+        break :blk try RecursiveDescent.parse(allocator, line);
+    };
     // defer pattern.deinit(allocator);
     const root = pattern.root;
     debug(
@@ -162,22 +161,23 @@ fn replStep(
         // const result = try trie.evaluateSlice(allocator, pattern, &buff);
         debug("Eval Complete from {*}", .{trie});
         const eval = try trie.evaluateComplete(allocator, 0, pattern);
-        // defer if (comptime detect_leaks)
-        //     eval.deinit(allocator)
-        // else
-        //     eval.deinit(allocator); // TODO: free an arena instead
+        if (eval.value) |value| {
+            defer if (comptime detect_leaks)
+                value.deinit(allocator)
+            else
+                value.deinit(allocator); // TODO: free an arena instead
 
-        if (eval.value) |_| {
             try streams.out.print("Eval at {} of length {}: ", .{ eval.index, eval.len });
-        } else try streams.out.print("No match.\n", .{});
-        const result = eval.value orelse return;
-
-        // std.log.debug("WriteIndent on pattern len {}", .{result.root.len});
-        try result.writeIndent(streams.out, 0);
-        // for (result.root) |r| try r.writeSExp(streams.out, 0);
-        try streams.out.writeByte('\n');
+            // std.log.debug("WriteIndent on pattern len {}", .{result.root.len});
+            try value.writeIndent(streams.out, 0);
+            // for (result.root) |r| try r.writeSExp(streams.out, 0);
+            try streams.out.writeByte('\n');
+        } else {
+            try streams.out.print("No match.\n", .{});
+            return;
+        }
     }
 
-    // try trie.writeIndent(streams.out, 0);
-    try trie.writeCanonical(streams.out);
+    try trie.writeIndent(streams.out, 0);
+    // try trie.writeCanonical(streams.out);
 }
