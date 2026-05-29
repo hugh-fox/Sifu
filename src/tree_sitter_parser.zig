@@ -178,6 +178,7 @@ fn parseOperatorNode(
     // Distribute LHS into the array
     if (lhs_node) |lhs| {
         const lhs_pattern = try astToPattern(allocator, source, lhs);
+        defer lhs_pattern.deinit(allocator);
         for (lhs_pattern.root) |lhs_child| {
             try nodes.append(allocator, try lhs_child.copy(allocator));
         }
