@@ -106,7 +106,7 @@ pub fn build(b: *std.Build) void {
             .optimize = std.builtin.OptimizeMode.ReleaseSmall,
         }),
     });
-    wasm_lib.root_module.addImport("tree_sitter_sifu", tree_sitter_sifu.module("tree_sitter_sifu"));
+    wasm_lib.entry = .disabled;
     const run_wasm = b.addInstallArtifact(wasm_lib, .{});
     run_wasm.step.dependOn(b.getInstallStep());
     const wasm_step = b.step("wasm", "Build a wasm lib");

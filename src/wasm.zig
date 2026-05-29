@@ -6,16 +6,21 @@ const panic = std.debug.panic;
 const fmt = std.fmt;
 const io = std.io;
 const ArrayList = std.ArrayList;
+const Allocator = std.mem.Allocator;
 // for debugging with zig test --test-filter, comment this import
 const verbose_errors = @import("build_options").verbose_errors;
-const parser = @import("tree_sitter_sifu");
+const use_tree_sitter = @import("build_options").tree_sitter;
+const Parser = @import("sifu/Integrated-Parser/Parser.zig");
+const ts = if (use_tree_sitter) @import("sifu/ast.zig") else struct {};
 const trie_module = @import("sifu/trie.zig");
 const Pattern = trie_module.Pattern;
 const Trie = trie_module.Trie;
+const Match = Trie.Match;
 const Streams = @import("streams.zig").Streams;
+pub const VarBindings = trie_module.VarBindings;
+pub const VarPatternBindings = trie_module.VarPatternBindings;
 
 // const Node = Pattern.Node;
-const Level = parser.Level;
 const wasm_allocator = std.heap.wasm_allocator;
 extern "js" fn log(msg_ptr: [*]const u8, msg_len: usize) void;
 
@@ -27,21 +32,37 @@ const PackedSlice = packed struct(u64) {
 /// Returns an int pointer to a trie, which should be freed with
 /// `Trie.destroy(wasm_allocator)`
 export fn parseSliceAsTrie(ptr: [*]const u8, len: u32) u32 {
-    const trie = parser.parsePattern(wasm_allocator, ptr[0..len]) catch |e|
+    const trie = Parser.parse(wasm_allocator, ptr[0..len]) catch |e|
         panic("Parser error: {}", .{e});
 
-    const trie_ptr = wasm_allocator.create(Trie) catch |e|
-        panic("Allocation of trie failed: {}", .{e});
+    _ = trie;
+    return 1;
+    // const trie_ptr = wasm_allocator.create(Trie) catch |e|
+    //     panic("Allocation of trie failed: {}", .{e});
 
-    trie_ptr.* = trie;
-    return @intFromPtr(trie_ptr);
+    // trie_ptr.* = trie;
+    // return @intFromPtr(trie_ptr);
+}
+
+/// Convenience function for directly passing a string to parse
+fn parseStrMatch(
+    trie: Trie,
+    allocator: Allocator,
+    bound: usize,
+    query_str: []const u8,
+) !Match {
+    var query = try Parser.parse(allocator, query_str);
+    defer query.deinit(allocator);
+    var term_bindings = VarBindings{};
+    var pattern_bindings = VarPatternBindings{};
+    return trie.match(allocator, bound, &term_bindings, &pattern_bindings, query);
 }
 
 /// Caller frees.
 export fn matchStr(trie_ptr: u32, query_ptr: [*]const u8, query_len: u32) u64 {
     const trie: *Trie = @ptrFromInt(trie_ptr);
     const slice = query_ptr[0..query_len];
-    const result = trie.matchStr(wasm_allocator, trie.size(), slice) catch |e|
+    const result = parseStrMatch(trie.*, wasm_allocator, trie.size(), slice) catch |e|
         panic("Match error: {}", .{e});
     const expr = result.value orelse result.key;
     const expr_string = expr.toString(wasm_allocator) catch

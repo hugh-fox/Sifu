@@ -20,9 +20,8 @@ const Reader = Io.Reader;
 const Writer = Io.Writer;
 const verbose_tests = @import("build_options").verbose_errors;
 const use_tree_sitter = @import("build_options").tree_sitter;
-const RecursiveDescent = @import("sifu/Integrated-Parser/RecursiveDescent.zig");
+const Parser = @import("sifu/Integrated-Parser/Parser.zig");
 const ts = if (use_tree_sitter) @import("sifu/ast.zig") else struct {};
-const GPA = util.GPA;
 const debug = std.log.debug;
 // @compileLog(@sizeOf(Pat));
 // @compileLog(@sizeOf(Pat.Node));
@@ -30,12 +29,23 @@ const debug = std.log.debug;
 
 pub fn main(init: std.process.Init) void {
     var arena = ArenaAllocator.init(init.gpa);
+    var debug_allocator = if (comptime detect_leaks)
+        std.heap.DebugAllocator(.{}){}
+    else {};
+    const allocator = if (comptime detect_leaks)
+        debug_allocator.allocator()
+    else
+        arena.allocator();
+
     const streams = Streams.init(init.io);
-    repl(arena.allocator(), streams) catch |e|
+    repl(
+        allocator,
+        streams,
+    ) catch |e|
         panic("{}", .{e});
 
     if (comptime detect_leaks)
-        _ = init.gpa.detectLeaks()
+        _ = debug_allocator.detectLeaks()
     else
         arena.deinit();
 }
@@ -46,6 +56,7 @@ fn repl(
     streams: Streams,
 ) !void {
     var trie = Trie{}; // This will be cleaned up with the arena
+    defer trie.deinit(allocator);
 
     while (replStep(allocator, streams, &trie)) |_| {
         try streams.out.flush();
@@ -61,14 +72,13 @@ fn replStep(
     streams: Streams,
     trie: *Trie,
 ) !?void {
+    var buffer = std.Io.Writer.Allocating.init(allocator);
     const pattern = if (comptime use_tree_sitter) blk: {
-        var buffer = std.Io.Writer.Allocating.init(allocator);
-        buffer.clearRetainingCapacity();
         const ast_option = try ts.parser.parseLine(
             &buffer,
             streams.in,
         );
-        const ast_ptr = ast_option orelse panic("Nothing to parse\n", .{});
+        const ast_ptr = ast_option orelse panic("Empty parse\n", .{});
         defer ast_ptr.destroy();
         {
             const node = ast_ptr.rootNode();
@@ -77,18 +87,17 @@ fn replStep(
                 "Parsing term node of type '{s}' and {} children with text: '{s}'",
                 .{ node.kind(), node.childCount(), text },
             );
-            try streams.err.flush();
         }
-        break :blk try ts.astToPattern(allocator, buffer.written(), ast_ptr);
+        const pattern_node = try ts
+            .astToPattern(allocator, buffer.written(), ast_ptr.rootNode());
+        break :blk pattern_node.root[0].pattern;
     } else blk: {
-        var line_buf = std.Io.Writer.Allocating.init(allocator);
-        streams.in.streamUntilDelimiter(&line_buf.interface, '\n', null) catch |err| switch (err) {
-            error.EndOfStream => if (line_buf.written().len == 0) return error.EndOfStream,
+        _ = streams.in.streamDelimiter(&buffer.writer, '\n') catch |err| switch (err) {
+            error.EndOfStream => return error.EndOfStream,
             else => return err,
         };
-        const line = line_buf.written();
-        if (line.len == 0) return null;
-        break :blk try RecursiveDescent.parse(allocator, line);
+        _ = try streams.in.takeByte(); // consume the newline
+        break :blk try Parser.parse(allocator, buffer.written());
     };
     // defer pattern.deinit(allocator);
     const root = pattern.root;
@@ -156,19 +165,15 @@ fn replStep(
         // try step.write(writer);
         // try writer.writeByte('\n');
 
-        var buff = ArrayList(Node).empty;
-        defer buff.deinit(allocator);
+        // var buff = ArrayList(Node).empty;
+        // defer buff.deinit(allocator);
         // const result = try trie.evaluateSlice(allocator, pattern, &buff);
         debug("Eval Complete from {*}", .{trie});
         const eval = try trie.evaluateComplete(allocator, 0, pattern);
         if (eval.value) |value| {
-            defer if (comptime detect_leaks)
-                value.deinit(allocator)
-            else
-                value.deinit(allocator); // TODO: free an arena instead
-
+            defer value.destroy(allocator);
             try streams.out.print("Eval at {} of length {}: ", .{ eval.index, eval.len });
-            // std.log.debug("WriteIndent on pattern len {}", .{result.root.len});
+            std.log.debug("WriteIndent on pattern len {}", .{value.root.len});
             try value.writeIndent(streams.out, 0);
             // for (result.root) |r| try r.writeSExp(streams.out, 0);
             try streams.out.writeByte('\n');

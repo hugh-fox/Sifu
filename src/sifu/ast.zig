@@ -244,7 +244,7 @@ fn parseTermNode(
         .variable => Node{ .variable = text },
         .var_pattern => Node{ .var_pattern = text },
         .nested_pattern => Node{ .pattern = try astToPattern(allocator, source, node) },
-        .nested_trie => Node{ .trie = @panic("nested_trie unimplemented") },
+        .nested_trie => Node{ .trie = try astToTrie(allocator, source, node.childByFieldName("inner")) },
         .quote => Node{ .pattern = try astToPattern(allocator, source, node) },
     };
 }
@@ -294,4 +294,46 @@ fn convertRHS(
         }
         break :blk Node{ .infix = .{ .root = infix_slice, .height = max_h + 1 } };
     } else Node{ .pattern = .{ .root = &[_]Node{}, .height = 0 } };
+}
+
+fn astToTrie(
+    allocator: Allocator,
+    source: []const u8,
+    inner_node: ?AstNode,
+) error{OutOfMemory}!Trie {
+    var trie = Trie{};
+    errdefer trie.deinit(allocator);
+
+    if (inner_node) |node| {
+        try appendToTrie(allocator, source, &trie, node);
+    }
+
+    return trie;
+}
+
+fn appendToTrie(
+    allocator: Allocator,
+    source: []const u8,
+    trie: *Trie,
+    node: AstNode,
+) error{OutOfMemory}!void {
+    const node_kind = node.kind();
+
+    if (mem.eql(u8, node_kind, "semicolon")) {
+        var cursor = node.walk();
+        if (cursor.gotoFirstChild()) {
+            while (true) {
+                const child = cursor.node();
+                if (cursor.fieldName()) |fname| {
+                    if (mem.eql(u8, fname, "lhs") or mem.eql(u8, fname, "rhs")) {
+                        try appendToTrie(allocator, source, trie, child);
+                    }
+                }
+                if (!cursor.gotoNextSibling()) break;
+            }
+        }
+    } else {
+        const pattern = try astToPattern(allocator, source, node);
+        _ = try trie.append(allocator, pattern, null);
+    }
 }

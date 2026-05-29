@@ -5,7 +5,6 @@ const mem = std.mem;
 const math = std.math;
 const compare = math.compare;
 const util = @import("util.zig");
-const parse = @import("tree_sitter_sifu").parse;
 const assert = std.debug.assert;
 const panic = std.debug.panic;
 const Order = math.Order;
@@ -109,7 +108,7 @@ pub const Node = union(enum) {
         switch (self) {
             .key, .variable, .var_pattern => {},
             .trie => |*trie| @constCast(trie).deinit(allocator),
-            inline else => |pattern| pattern.deinit(allocator),
+            inline else => |*pattern| @constCast(pattern).deinit(allocator),
         }
     }
 
@@ -337,8 +336,8 @@ pub const Pattern = struct {
 
     pub fn copy(self: Pattern, allocator: Allocator) !Pattern {
         const pattern_copy = try allocator.alloc(Node, self.root.len);
-        for (self.root, pattern_copy) |pattern, *node_copy|
-            node_copy.* = try pattern.copy(allocator);
+        for (self.root, pattern_copy) |node, *node_copy|
+            node_copy.* = try node.copy(allocator);
 
         return Pattern{
             .root = pattern_copy,
@@ -354,11 +353,12 @@ pub const Pattern = struct {
     }
 
     // Clears all memory and resets this Pattern's root to an empty pattern.
-    pub fn deinit(pattern: Pattern, allocator: Allocator) void {
+    pub fn deinit(pattern: *Pattern, allocator: Allocator) void {
         for (pattern.root) |*node| {
             @constCast(node).deinit(allocator);
         }
         allocator.free(pattern.root);
+        pattern.* = .{};
     }
 
     pub fn destroy(self: *Pattern, allocator: Allocator) void {
@@ -963,7 +963,7 @@ pub const Trie = struct {
     }
 
     /// A partial or complete match of a given pattern against a trie.
-    const Match = struct {
+    pub const Match = struct {
         key: Pattern = .{}, // The pattern that was attempted to match
         value: ?Pattern = null,
         node_ptr: *const Trie,
@@ -995,7 +995,7 @@ pub const Trie = struct {
 
     /// A partial or complete sequence of matches of a pattern against a trie.
     const Eval = struct {
-        value: ?Pattern = null,
+        value: ?*Pattern = null,
         index: usize = 0,
         len: usize = 0, // For partial matches
     };
@@ -1500,19 +1500,6 @@ pub const Trie = struct {
         };
     }
 
-    /// Convenience function for directly passing a string to parse
-    pub fn matchStr(
-        self: Self,
-        allocator: Allocator,
-        bound: usize,
-        query_str: []const u8,
-    ) !Match {
-        var fbs = std.Io.Reader.fixed(query_str);
-        var arena, const query = try parse(allocator, fbs.reader());
-        defer arena.deinit();
-        return self.match(allocator, bound, query);
-    }
-
     /// The second half of an evaluation step. Rewrites all variable
     /// captures into the matched expression. Copies any variables in node
     /// if they are keys in bindings with their values. If there are no
@@ -1634,20 +1621,25 @@ pub const Trie = struct {
     ) Allocator.Error!Eval {
         var matched: Match = .{ .node_ptr = &self };
         var index: usize = bound;
-        var current: Pattern = pattern;
+        var current: *Pattern = try pattern.clone(allocator);
+        current = current;
         var term_bindings = VarBindings{};
+        defer term_bindings.deinit(allocator);
         var pattern_bindings = VarPatternBindings{};
-        // var len_matched: usize = 0;
-        // if (pattern.root.len > 0 and pattern.root[0] == .key)
-        //     debug("Eval Complete from: {s}", .{pattern.root[0].key});
-        while (index < self.size()) : (matched.deinit(allocator)) {
-            // while (len_matched < pattern.root.len) : (len_matched += matched.len) {
-            matched = try self.match(allocator, index, &term_bindings, &pattern_bindings, current);
+        defer pattern_bindings.deinit(allocator);
+        while (index < self.size()) {
+            // while (current.height < pattern.height) : (len_matched += matched.len) {
+            // } else
+            matched = try self.match(allocator, index, &term_bindings, &pattern_bindings, current.*);
+            // defer matched.deinit(allocator);
             if (matched.index < index)
                 panic("Match index bug: matched.index {} < index {}", .{ matched.index, index });
 
+            index = matched.index + 1;
+
             const next = matched.value orelse {
                 debug("Eval match at {*}, but no value", .{matched.node_ptr});
+                // current.destroy(allocator);
                 break;
             };
             // debug("Matched len: {}", .{matched.len});
@@ -1655,7 +1647,8 @@ pub const Trie = struct {
             // debug("Matched all", .{});
 
             // Rewrite all current bindings into the matched value
-            current = try self.rewrite(
+            // current.destroy(allocator);
+            current.* = try self.rewrite(
                 allocator,
                 bound,
                 next,
@@ -1690,10 +1683,6 @@ pub const Trie = struct {
             //     "Comparing heights: current {} < query {}",
             //     .{ current.height, pattern.height },
             // );
-            if (current.height < pattern.height)
-                index = matched.index
-            else
-                index = matched.index + 1;
 
             debug("Next eval index: {}\n", .{index});
         }
@@ -1721,11 +1710,15 @@ pub const Trie = struct {
                     //     matched.index + 1,
                     sub_pattern,
                 );
+                // nested.deinit(allocator);
                 // Recursively eval nested list but preserve node type
                 nested.* = @unionInit(
                     Node,
                     @tagName(tag),
-                    nested_eval.value orelse sub_pattern,
+                    if (nested_eval.value) |ptr|
+                        ptr.*
+                    else
+                        try sub_pattern.copy(allocator),
                 );
             },
         };
