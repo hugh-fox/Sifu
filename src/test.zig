@@ -8,7 +8,7 @@ const VarBindings = @import("sifu/trie.zig").VarBindings;
 const VarPatternBindings = @import("sifu/trie.zig").VarPatternBindings;
 
 test "Submodules" {
-    _ = @import("sifu/Integrated-Parser/RecursiveDescent.zig");
+    _ = @import("sifu/Integrated-Parser/Parser.zig");
 }
 
 test "equal strings with different pointers or pos should be equal" {

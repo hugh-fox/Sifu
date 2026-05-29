@@ -19,10 +19,10 @@ const Allocator = std.mem.Allocator;
 const mem = std.mem;
 const math = std.math;
 const assert = std.debug.assert;
-const trie = @import("../trie.zig");
-const Pattern = trie.Pattern;
-const Node = trie.Node;
-const Trie = trie.Trie;
+const trie_module = @import("../trie.zig");
+const Pattern = trie_module.Pattern;
+const Node = trie_module.Node;
+const Trie = trie_module.Trie;
 
 const Oom = Allocator.Error;
 
@@ -447,8 +447,8 @@ fn parseTerm(self: *Self, allocator: Allocator) Oom!Node {
         },
         .left_brace => blk: {
             const inner = try self.parseInner(allocator, .right_brace);
-            _ = inner;
-            break :blk Node{ .trie = Trie{} };
+            const trie = try patternToTrie(allocator, inner);
+            break :blk Node{ .trie = trie };
         },
         .backtick => blk: {
             const inner = try self.parseInner(allocator, .backtick);
@@ -499,6 +499,83 @@ fn wrapOp(tag: Tag, rhs: Pattern) Node {
         .long_arrow, .arrow => Node{ .arrow = rhs },
         else => Node{ .pattern = rhs },
     };
+}
+
+/// Parse the inner content of a trie (without braces) into a Trie structure.
+/// The source is expected to be semicolon-separated entries where each entry
+/// is a key-value pair (with arrow) or just a key (value = key).
+/// For example: `A -> B; C D -> E` becomes a trie with two entries.
+pub fn parseTrie(allocator: Allocator, source: []const u8) Oom!Trie {
+    var parser = Self.init(source);
+    const pattern = try parser.parsePattern(allocator);
+    return patternToTrie(allocator, pattern);
+}
+
+fn patternToTrie(allocator: Allocator, pattern: Pattern) Oom!Trie {
+    var result = Trie{};
+
+    if (pattern.root.len == 0) return result;
+
+    // Process the pattern which may contain semicolon-separated entries (as .list nodes)
+    // Check if this is a multi-entry pattern (has .list nodes indicating semicolons)
+    var has_lists = false;
+    for (pattern.root) |node| {
+        if (node == .list) {
+            has_lists = true;
+            break;
+        }
+    }
+
+    if (!has_lists) {
+        // Single entry - the whole pattern is one key-value pair
+        try appendEntry(&result, allocator, pattern);
+    } else {
+        // Multiple entries - first collect all nodes before the first .list as the first entry
+        var first_entry_end: usize = 0;
+        for (pattern.root, 0..) |node, i| {
+            if (node == .list) {
+                first_entry_end = i;
+                break;
+            }
+        }
+        // Append first entry
+        if (first_entry_end > 0) {
+            try appendEntry(&result, allocator, .{ .root = pattern.root[0..first_entry_end] });
+        }
+        // Append remaining entries from .list nodes
+        for (pattern.root[first_entry_end..]) |node| {
+            if (node == .list) {
+                try appendEntry(&result, allocator, node.list);
+            }
+        }
+    }
+
+    return result;
+}
+
+/// Appends a single entry to the trie. The entry_pattern may contain an arrow
+/// indicating key -> value, or just be a pattern (which becomes key = value).
+fn appendEntry(result: *Trie, allocator: Allocator, entry_pattern: Pattern) Oom!void {
+    if (entry_pattern.root.len == 0) return;
+
+    // Look for an arrow node to split key and value
+    var arrow_index: ?usize = null;
+    for (entry_pattern.root, 0..) |node, i| {
+        if (node == .arrow) {
+            arrow_index = i;
+            break;
+        }
+    }
+
+    if (arrow_index) |ai| {
+        // Split at arrow: nodes before arrow are key, arrow's pattern is value
+        const key = Pattern{ .root = entry_pattern.root[0..ai] };
+        const value = entry_pattern.root[ai].arrow;
+        _ = try result.append(allocator, key, value);
+    } else {
+        // No arrow - pattern is both key and value
+        _ = try result.append(allocator, entry_pattern, entry_pattern);
+    }
 }
 
 fn makePattern(nodes: []Node) Pattern {
@@ -740,4 +817,90 @@ test "comment skipped" {
     try expectNodes(p, &.{ .key, .key });
     try testing.expectEqualStrings("A", p.root[0].key);
     try testing.expectEqualStrings("B", p.root[1].key);
+}
+
+test "empty trie: {}" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const p = try parse(arena.allocator(), "{}");
+    try expectNodes(p, &.{.trie});
+    try testing.expectEqual(@as(usize, 0), p.root[0].trie.size());
+}
+
+test "single entry trie: { A -> B }" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const p = try parse(arena.allocator(), "{ A -> B }");
+    try expectNodes(p, &.{.trie});
+    const t = p.root[0].trie;
+    try testing.expectEqual(@as(usize, 1), t.size());
+    // Trie should have entry: A -> B
+    try testing.expect(t.map.contains("A"));
+}
+
+test "multi-key entry trie: { A B -> C }" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const p = try parse(arena.allocator(), "{ A B -> C }");
+    try expectNodes(p, &.{.trie});
+    const t = p.root[0].trie;
+    try testing.expectEqual(@as(usize, 1), t.size());
+    // Trie should have nested entry: A -> B -> value(C)
+    try testing.expect(t.map.contains("A"));
+    const a_trie = t.map.get("A").?;
+    try testing.expect(a_trie.map.contains("B"));
+}
+
+test "multi-entry trie: { A -> B; C -> D }" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const p = try parse(arena.allocator(), "{ A -> B; C -> D }");
+    try expectNodes(p, &.{.trie});
+    const t = p.root[0].trie;
+    try testing.expectEqual(@as(usize, 2), t.size());
+    try testing.expect(t.map.contains("A"));
+    try testing.expect(t.map.contains("C"));
+}
+
+test "trie with variable: { x -> x }" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const p = try parse(arena.allocator(), "{ x -> x }");
+    try expectNodes(p, &.{.trie});
+    const t = p.root[0].trie;
+    try testing.expectEqual(@as(usize, 1), t.size());
+    try testing.expect(t.map.contains("x"));
+}
+
+test "trie key-only entry: { A }" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const p = try parse(arena.allocator(), "{ A }");
+    try expectNodes(p, &.{.trie});
+    const t = p.root[0].trie;
+    try testing.expectEqual(@as(usize, 1), t.size());
+    try testing.expect(t.map.contains("A"));
+}
+
+test "trie in expression: X { A -> B } Y" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const p = try parse(arena.allocator(), "X { A -> B } Y");
+    try expectNodes(p, &.{ .key, .trie, .key });
+    try testing.expectEqualStrings("X", p.root[0].key);
+    try testing.expectEqualStrings("Y", p.root[2].key);
+    const t = p.root[1].trie;
+    try testing.expectEqual(@as(usize, 1), t.size());
+}
+
+test "trie with 3 entries: { A -> 1; B -> 2; C -> 3 }" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const p = try parse(arena.allocator(), "{ A -> 1; B -> 2; C -> 3 }");
+    try expectNodes(p, &.{.trie});
+    const t = p.root[0].trie;
+    try testing.expectEqual(@as(usize, 3), t.size());
+    try testing.expect(t.map.contains("A"));
+    try testing.expect(t.map.contains("B"));
+    try testing.expect(t.map.contains("C"));
 }

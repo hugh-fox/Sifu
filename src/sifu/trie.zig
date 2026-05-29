@@ -870,9 +870,9 @@ pub const Trie = struct {
             // The resulting encoding is counter-intuitive when printed
             // because each level of nesting must be a branch to enable
             // trie matching.
-            inline else => |pattern| {
+            inline else => |pattern, tag| {
                 _ = pattern;
-                @panic("unimplemented");
+                panic("unimplemented tag {s}", .{@tagName(tag)});
                 // var next = try trie.getOrPutKey(allocator, index, "(");
                 // // All op types are encoded the same way after their top
                 // // level hash. These don't need special treatment because
@@ -2220,7 +2220,7 @@ test "Pattern: equal to copy" {
         .{ .key = "tree" },
     };
     const pattern = Pattern{ .root = &root };
-    const copy = try pattern.copy(testing.allocator);
+    var copy = try pattern.copy(testing.allocator);
     defer copy.deinit(testing.allocator);
     assert(pattern.eql(copy));
     assert(copy.eql(pattern));

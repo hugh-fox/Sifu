@@ -32,16 +32,14 @@ const PackedSlice = packed struct(u64) {
 /// Returns an int pointer to a trie, which should be freed with
 /// `Trie.destroy(wasm_allocator)`
 export fn parseSliceAsTrie(ptr: [*]const u8, len: u32) u32 {
-    const trie = Parser.parse(wasm_allocator, ptr[0..len]) catch |e|
-        panic("Parser error: {}", .{e});
+    const trie_ptr = wasm_allocator.create(Trie) catch |e|
+        panic("Allocation of trie failed: {}", .{e});
+    errdefer wasm_allocator.free(trie_ptr);
 
-    _ = trie;
-    return 1;
-    // const trie_ptr = wasm_allocator.create(Trie) catch |e|
-    //     panic("Allocation of trie failed: {}", .{e});
+    trie_ptr.* = Parser.parseTrie(wasm_allocator, ptr[0..len]) catch |e|
+        panic("Error parsing trie: {}", .{e});
 
-    // trie_ptr.* = trie;
-    // return @intFromPtr(trie_ptr);
+    return @intFromPtr(trie_ptr);
 }
 
 /// Convenience function for directly passing a string to parse
@@ -67,6 +65,7 @@ export fn matchStr(trie_ptr: u32, query_ptr: [*]const u8, query_len: u32) u64 {
     const expr = result.value orelse result.key;
     const expr_string = expr.toString(wasm_allocator) catch
         panic("Writing match expr failed", .{});
+
     return @bitCast(PackedSlice{
         .ptr = @intCast(@intFromPtr(expr_string.ptr)),
         .len = @intCast(expr_string.len),
@@ -77,7 +76,7 @@ export fn matchStr(trie_ptr: u32, query_ptr: [*]const u8, query_len: u32) u64 {
 export fn alloc(len: usize) [*]const u8 {
     const slice = std.heap.wasm_allocator.alloc(u8, len) catch
         panic("Allocation of {} bytes failed", .{len});
-    bufDebug("Alloc {} bytes at {*}\n", .{ slice.len, slice.ptr });
+    // bufDebug("Alloc {} bytes at {*}\n", .{ slice.len, slice.ptr });
     return slice.ptr;
 }
 
@@ -86,7 +85,7 @@ export fn free(ptr: [*]const u8, len: usize) void {
     std.heap.wasm_allocator.free(ptr[0..len]);
 }
 
-pub fn bufDebug(comptime fmt_str: []const u8, args: anytype) void {
+fn bufDebug(comptime fmt_str: []const u8, args: anytype) void {
     var buff: [256]u8 = undefined;
     const str = fmt.bufPrint(&buff, fmt_str, args) catch
         unreachable;
@@ -113,7 +112,7 @@ fn readFn(ctx: *InputCtx, bytes: []u8) error{OutOfMemory}!usize {
     // Check if we finished reading and need new input from js
     if (!(ctx.pos < ctx.len)) {
         // makeString(&ctx.ptr, &ctx.len);
-        bufDebug("Read {} bytes at {*}\n", .{ ctx.len, ctx.ptr });
+        // bufDebug("Read {} bytes at {*}\n", .{ ctx.len, ctx.ptr });
         ctx.pos = 0;
         // Avoid continously trying to read empty strings
         if (ctx.len == 0)
@@ -121,7 +120,7 @@ fn readFn(ctx: *InputCtx, bytes: []u8) error{OutOfMemory}!usize {
     }
     const slice = ctx.ptr[ctx.pos..bytes.len];
     std.mem.copyForwards(u8, bytes, slice);
-    bufDebug("Copied `{s}` at {*}\n", .{ slice, bytes.ptr });
+    // bufDebug("Copied `{s}` at {*}\n", .{ slice, bytes.ptr });
     ctx.pos += slice.len;
     return slice.len;
 }
