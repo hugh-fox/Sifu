@@ -19,7 +19,7 @@ const Allocator = std.mem.Allocator;
 const mem = std.mem;
 const math = std.math;
 const assert = std.debug.assert;
-const trie_module = @import("../trie.zig");
+const trie_module = @import("sifu/trie.zig");
 const Pattern = trie_module.Pattern;
 const Node = trie_module.Node;
 const Trie = trie_module.Trie;
@@ -291,12 +291,12 @@ fn parsePrec1(self: *Self, allocator: Allocator) Oom!Pattern {
         return makePattern(try nodes.toOwnedSlice(allocator));
     }
 
-    var lhs = try self.parsePrec2(allocator);
+    const lhs = try self.parsePrec2(allocator);
     if (self.peek() != .semicolon) return lhs;
 
     var nodes = std.ArrayList(Node).empty;
     try nodes.appendSlice(allocator, lhs.root);
-    lhs.root = &.{};
+    allocator.free(lhs.root);
 
     while (self.peek() == .semicolon) {
         _ = self.eat();
@@ -322,12 +322,12 @@ fn parsePrec2(self: *Self, allocator: Allocator) Oom!Pattern {
         return makePattern(try nodes.toOwnedSlice(allocator));
     }
 
-    var lhs = try self.parsePrec3(allocator);
+    const lhs = try self.parsePrec3(allocator);
     if (self.peek() != .long_match and self.peek() != .long_arrow) return lhs;
 
     var nodes = std.ArrayList(Node).empty;
     try nodes.appendSlice(allocator, lhs.root);
-    lhs.root = &.{};
+    allocator.free(lhs.root);
 
     const op = self.eat();
     const rhs = try self.parseOptionalPrec2(allocator);
@@ -412,12 +412,12 @@ fn parsePrec5(self: *Self, allocator: Allocator) Oom!Pattern {
         return makePattern(try nodes.toOwnedSlice(allocator));
     }
 
-    var lhs = try self.parseTerms(allocator);
+    const lhs = try self.parseTerms(allocator);
     if (self.peek() != .match and self.peek() != .arrow) return lhs;
 
     var nodes = std.ArrayList(Node).empty;
     try nodes.appendSlice(allocator, lhs.root);
-    lhs.root = &.{};
+    allocator.free(lhs.root);
 
     const op = self.eat();
     const rhs = try self.parseOptionalPrec5(allocator);
@@ -507,7 +507,8 @@ fn wrapOp(tag: Tag, rhs: Pattern) Node {
 /// For example: `A -> B; C D -> E` becomes a trie with two entries.
 pub fn parseTrie(allocator: Allocator, source: []const u8) Oom!Trie {
     var parser = Self.init(source);
-    const pattern = try parser.parsePattern(allocator);
+    var pattern = try parser.parsePattern(allocator);
+    defer pattern.deinit(allocator);
     return patternToTrie(allocator, pattern);
 }
 

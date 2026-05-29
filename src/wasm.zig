@@ -2,7 +2,6 @@
 /// functions here must have corresponding declarations in the importObject used
 /// by WebAssembly.instantiateStreaming.
 const std = @import("std");
-const panic = std.debug.panic;
 const fmt = std.fmt;
 const io = std.io;
 const ArrayList = std.ArrayList;
@@ -10,8 +9,8 @@ const Allocator = std.mem.Allocator;
 // for debugging with zig test --test-filter, comment this import
 const verbose_errors = @import("build_options").verbose_errors;
 const use_tree_sitter = @import("build_options").tree_sitter;
-const Parser = @import("sifu/Integrated-Parser/Parser.zig");
-const ts = if (use_tree_sitter) @import("sifu/ast.zig") else struct {};
+const Parser = @import("Parser.zig");
+const ts = if (use_tree_sitter) @import("tree_sitter_parser.zig") else struct {};
 const trie_module = @import("sifu/trie.zig");
 const Pattern = trie_module.Pattern;
 const Trie = trie_module.Trie;
@@ -23,21 +22,28 @@ pub const VarPatternBindings = trie_module.VarPatternBindings;
 // const Node = Pattern.Node;
 const wasm_allocator = std.heap.wasm_allocator;
 extern "js" fn log(msg_ptr: [*]const u8, msg_len: usize) void;
+extern "js" fn err(msg_ptr: [*]const u8, msg_len: usize) void;
 
 const PackedSlice = packed struct(u64) {
     ptr: u32,
     len: u32,
 };
 
+fn panic(comptime msg: []const u8) noreturn {
+    err(msg.ptr, msg.len);
+    @trap();
+}
+
 /// Returns an int pointer to a trie, which should be freed with
 /// `Trie.destroy(wasm_allocator)`
 export fn parseSliceAsTrie(ptr: [*]const u8, len: u32) u32 {
-    const trie_ptr = wasm_allocator.create(Trie) catch |e|
-        panic("Allocation of trie failed: {}", .{e});
+    const trie_ptr = wasm_allocator.create(Trie) catch
+        panic("Allocation of trie failed");
     errdefer wasm_allocator.free(trie_ptr);
+    log(ptr, len);
 
-    trie_ptr.* = Parser.parseTrie(wasm_allocator, ptr[0..len]) catch |e|
-        panic("Error parsing trie: {}", .{e});
+    trie_ptr.* = Parser.parseTrie(wasm_allocator, ptr[0..len]) catch
+        panic("Error parsing trie");
 
     return @intFromPtr(trie_ptr);
 }
@@ -60,11 +66,13 @@ fn parseStrMatch(
 export fn matchStr(trie_ptr: u32, query_ptr: [*]const u8, query_len: u32) u64 {
     const trie: *Trie = @ptrFromInt(trie_ptr);
     const slice = query_ptr[0..query_len];
-    const result = parseStrMatch(trie.*, wasm_allocator, trie.size(), slice) catch |e|
-        panic("Match error: {}", .{e});
-    const expr = result.value orelse result.key;
+    const result = parseStrMatch(trie.*, wasm_allocator, trie.size(), slice) catch
+        panic("Match error");
+    const expr = result.value orelse
+        panic("No match");
+    // result.key;
     const expr_string = expr.toString(wasm_allocator) catch
-        panic("Writing match expr failed", .{});
+        panic("Writing match expr failed");
 
     return @bitCast(PackedSlice{
         .ptr = @intCast(@intFromPtr(expr_string.ptr)),
@@ -75,7 +83,7 @@ export fn matchStr(trie_ptr: u32, query_ptr: [*]const u8, query_len: u32) u64 {
 // Allocator `len` bytes using the wasm allocator
 export fn alloc(len: usize) [*]const u8 {
     const slice = std.heap.wasm_allocator.alloc(u8, len) catch
-        panic("Allocation of {} bytes failed", .{len});
+        panic("Allocation failed");
     // bufDebug("Alloc {} bytes at {*}\n", .{ slice.len, slice.ptr });
     return slice.ptr;
 }

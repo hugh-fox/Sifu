@@ -570,10 +570,17 @@ pub const Trie = struct {
         allocator.destroy(self);
     }
 
-    /// The opposite of `copy`.
-    /// TODO: check frees properly for owned and borrowed managers
+    /// The opposite of `copy`. Trie owns copies of all patterns stored via
+    /// append, so this frees all values and internal structures.
     pub fn deinit(self: *Self, allocator: Allocator) void {
         defer self.map.deinit(allocator);
+        for (self.branches.items) |*index_branch| {
+            _, const branch = index_branch.*;
+            switch (branch) {
+                .value => |*val| @constCast(val).deinit(allocator),
+                else => {},
+            }
+        }
         self.branches.deinit(allocator);
         self.key_cache.deinit(allocator);
         self.var_cache.deinit(allocator);
@@ -943,9 +950,9 @@ pub const Trie = struct {
         const index = trie.size();
         var current = trie;
         current = try current.ensurePath(allocator, index, pattern);
-        // If there isn't a value, use the pattern as the value instead
-        const value = optional_value orelse pattern;
-        // try pattern.copy(allocator);
+        // If there isn't a value, use the pattern as the value instead.
+        // Trie owns a copy of the value.
+        const value = try (optional_value orelse pattern).copy(allocator);
         try current.value_cache.append(
             allocator,
             current.branches.items.len,

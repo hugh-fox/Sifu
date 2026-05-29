@@ -1,82 +1,95 @@
 const std = @import("std");
 const testing = std.testing;
 const ArenaAllocator = std.heap.ArenaAllocator;
-const Trie = @import("sifu/trie.zig").Trie;
-const Node = @import("sifu/trie.zig").Node;
-const Pattern = @import("sifu/trie.zig").Pattern;
-const VarBindings = @import("sifu/trie.zig").VarBindings;
-const VarPatternBindings = @import("sifu/trie.zig").VarPatternBindings;
+const trie_mod = @import("sifu/trie.zig");
+const Trie = trie_mod.Trie;
+const Pattern = trie_mod.Pattern;
+const Parser = @import("Parser.zig");
+
+fn parseAndMatch(allocator: std.mem.Allocator, trie: Trie, query_str: []const u8) !?Pattern {
+    var query = try Parser.parse(allocator, query_str);
+    defer query.deinit(allocator);
+    var term_bindings = trie_mod.VarBindings{};
+    defer term_bindings.deinit(allocator);
+    var pattern_bindings = trie_mod.VarPatternBindings{};
+    defer pattern_bindings.deinit(allocator);
+    var result = try trie.match(allocator, 0, &term_bindings, &pattern_bindings, query);
+    defer result.deinit(allocator);
+    if (result.value) |val| {
+        return try val.copy(allocator);
+    }
+    return null;
+}
+
+fn expectMatch(allocator: std.mem.Allocator, trie: Trie, query_str: []const u8, expected_str: []const u8) !void {
+    const result = try parseAndMatch(allocator, trie, query_str);
+    try testing.expect(result != null);
+    var result_mut = result.?;
+    defer result_mut.deinit(allocator);
+    var expected = try Parser.parse(allocator, expected_str);
+    defer expected.deinit(allocator);
+    try testing.expect(result_mut.eql(expected));
+}
+
+fn expectNoMatch(allocator: std.mem.Allocator, trie: Trie, query_str: []const u8) !void {
+    const result = try parseAndMatch(allocator, trie, query_str);
+    try testing.expect(result == null);
+}
 
 test "Submodules" {
-    _ = @import("sifu/Integrated-Parser/Parser.zig");
-}
-
-test "equal strings with different pointers or pos should be equal" {
-    const str1 = "abc";
-    const str2 = try testing.allocator.dupe(u8, str1);
-    defer testing.allocator.free(str2);
-
-    const node1 = Node.ofKey(str1);
-    const node2 = Node.ofKey(str2);
-
-    try testing.expect(node1.eql(node2));
-}
-
-test "equal contexts with different values should not be equal" {
-    const node1 = Node.ofKey("Foo");
-    const node2 = Node.ofKey("Bar");
-
-    try testing.expect(!node1.eql(node2));
+    _ = @import("Parser.zig");
 }
 
 test "Pattern: simple vals" {
-    var arena = ArenaAllocator.init(testing.allocator);
-    defer arena.deinit();
-    const allocator = arena.allocator();
-
-    // Build key: Aa Bb Cc
-    const key_nodes = try allocator.alloc(Node, 3);
-    key_nodes[0] = Node.ofKey("Aa");
-    key_nodes[1] = Node.ofKey("Bb");
-    key_nodes[2] = Node.ofKey("Cc");
-    const key = Pattern{ .root = key_nodes, .height = 1 };
-
-    // Build value: 123
-    const val_nodes = try allocator.alloc(Node, 1);
-    val_nodes[0] = Node.ofKey("123");
-    const val = Pattern{ .root = val_nodes, .height = 1 };
-
-    var actual = Trie{};
-    var expected = Trie{};
-
-    // Append into actual and expected
-    _ = try actual.append(allocator, key, val);
-    _ = try expected.append(allocator, key, val);
-
-    try testing.expect(expected.eql(actual));
+    var trie1 = try Parser.parseTrie(testing.allocator, "Aa Bb Cc -> 123");
+    defer trie1.deinit(testing.allocator);
+    var trie2 = try Parser.parseTrie(testing.allocator, "Aa Bb Cc -> 123");
+    defer trie2.deinit(testing.allocator);
+    try testing.expect(trie1.eql(trie2));
 
     // Test branching: add Aa Bb2 -> 456
-    const key2_nodes = try allocator.alloc(Node, 2);
-    key2_nodes[0] = Node.ofKey("Aa");
-    key2_nodes[1] = Node.ofKey("Bb2");
-    const key2 = Pattern{ .root = key2_nodes, .height = 1 };
+    var trie_with_branch = try Parser.parseTrie(testing.allocator, "Aa Bb Cc -> 123; Aa Bb2 -> 456");
+    defer trie_with_branch.deinit(testing.allocator);
+    try testing.expect(!trie1.eql(trie_with_branch));
 
-    const val2_nodes = try allocator.alloc(Node, 1);
-    val2_nodes[0] = Node.ofKey("456");
-    const val2 = Pattern{ .root = val2_nodes, .height = 1 };
-
-    _ = try expected.append(allocator, key2, val2);
-    try testing.expect(!expected.eql(actual));
-    _ = try actual.append(allocator, key2, val2);
-    try testing.expect(expected.eql(actual));
-
-    var term_bindings = VarBindings{};
-    var pattern_bindings = VarPatternBindings{};
     // Verify match returns value
-    var res = try actual.match(allocator, 0, &term_bindings, &pattern_bindings, key);
-    defer res.deinit(allocator);
-    try testing.expect(res.value orelse null != null);
-    try testing.expect(res.value.?.eql(val));
+    try expectMatch(testing.allocator, trie1, "Aa Bb Cc", "123");
 }
 
-test "Parsable: Bound" {}
+test "parseTrie: single key-value pair" {
+    var trie = try Parser.parseTrie(testing.allocator, "A -> B");
+    defer trie.deinit(testing.allocator);
+    try expectMatch(testing.allocator, trie, "A", "B");
+}
+
+test "parseTrie: multiple entries with semicolon" {
+    var trie = try Parser.parseTrie(testing.allocator, "A -> B; C -> D");
+    defer trie.deinit(testing.allocator);
+    try expectMatch(testing.allocator, trie, "A", "B");
+    try expectMatch(testing.allocator, trie, "C", "D");
+}
+
+test "parseTrie: multi-token key" {
+    var trie = try Parser.parseTrie(testing.allocator, "A B C -> X");
+    defer trie.deinit(testing.allocator);
+    try expectMatch(testing.allocator, trie, "A B C", "X");
+}
+
+test "parseTrie: entry without arrow (key equals value)" {
+    var trie = try Parser.parseTrie(testing.allocator, "Foo");
+    defer trie.deinit(testing.allocator);
+    try expectMatch(testing.allocator, trie, "Foo", "Foo");
+}
+
+test "parseTrie: empty input" {
+    const trie = try Parser.parseTrie(testing.allocator, "");
+    // Shouldn't be anything to free here
+    try expectNoMatch(testing.allocator, trie, "anything");
+}
+
+test "parseTrie: roundtrip" {
+    var trie = try Parser.parseTrie(testing.allocator, "A -> B; B -> A; A -> B");
+    defer trie.deinit(testing.allocator);
+    try expectMatch(testing.allocator, trie, "A", "B");
+    try expectMatch(testing.allocator, trie, "B", "A");
+}

@@ -164,7 +164,7 @@ pub fn AutoSet(comptime T: type) type {
     return std.AutoHashMap(T, void);
 }
 
-// If this is just a const, the compiler complains about self-dependency in ast.zig
+// If this is just a const, the compiler complains about self-dependency in tree_sitter_parser.zig
 // pub fn fsize() type {
 //     return switch (@typeInfo(usize).Int.bits) {
 //         8, 16 => f16,
