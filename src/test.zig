@@ -93,3 +93,55 @@ test "parseTrie: roundtrip" {
     try expectMatch(testing.allocator, trie, "A", "B");
     try expectMatch(testing.allocator, trie, "B", "A");
 }
+
+// evaluateComplete tests
+
+fn expectEval(allocator: std.mem.Allocator, trie: Trie, query_str: []const u8, expected_str: []const u8) !void {
+    var query = try Parser.parse(allocator, query_str);
+    defer query.deinit(allocator);
+    const eval = try trie.evaluateComplete(allocator, 0, query);
+    if (eval.value) |*val| {
+        defer @constCast(val).deinit(allocator);
+        var expected = try Parser.parse(allocator, expected_str);
+        defer expected.deinit(allocator);
+        try testing.expect(val.eql(expected));
+    } else {
+        return error.NoEvalResult;
+    }
+}
+
+test "evaluateComplete: simple rewrite" {
+    var trie = try Parser.parseTrie(testing.allocator, "A -> B");
+    defer trie.deinit(testing.allocator);
+    try expectEval(testing.allocator, trie, "A", "B");
+}
+
+test "evaluateComplete: variable binding" {
+    var trie = try Parser.parseTrie(testing.allocator, "x -> x");
+    defer trie.deinit(testing.allocator);
+    try expectEval(testing.allocator, trie, "Foo", "Foo");
+}
+
+test "evaluateComplete: multi-term with variable" {
+    var trie = try Parser.parseTrie(testing.allocator, "Inc x -> x");
+    defer trie.deinit(testing.allocator);
+    try expectEval(testing.allocator, trie, "Inc 5", "5");
+}
+
+test "evaluateComplete: no match returns original" {
+    var trie = try Parser.parseTrie(testing.allocator, "A -> B");
+    defer trie.deinit(testing.allocator);
+    var query = try Parser.parse(testing.allocator, "C");
+    defer query.deinit(testing.allocator);
+    const eval = try trie.evaluateComplete(testing.allocator, 0, query);
+    if (eval.value) |*val| {
+        defer @constCast(val).deinit(testing.allocator);
+        try testing.expect(val.eql(query));
+    }
+}
+
+test "evaluateComplete: roundtrip" {
+    var trie = try Parser.parseTrie(testing.allocator, "A -> B; B -> A");
+    defer trie.deinit(testing.allocator);
+    try expectEval(testing.allocator, trie, "A", "A");
+}

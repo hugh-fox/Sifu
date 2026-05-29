@@ -112,6 +112,11 @@ pub fn astToPattern(
             // Parse the child
             if (try parseTermNode(allocator, source, child)) |parsed_node| {
                 try nodes.append(allocator, parsed_node);
+            } else if (child.isNamed()) {
+                // Operator node - recurse and append result nodes directly
+                const sub_pattern = try astToPattern(allocator, source, child);
+                defer allocator.free(sub_pattern.root);
+                try nodes.appendSlice(allocator, sub_pattern.root);
             }
 
             if (!cursor.gotoNextSibling()) break;
@@ -235,8 +240,8 @@ fn parseTermNode(
     };
 
     const kind = std.meta.stringToEnum(NodeKind, node_kind) orelse {
-        // For operator nodes at term level, recurse
-        return Node{ .pattern = try astToPattern(allocator, source, node) };
+        // For operator nodes at term level, return null and let caller handle
+        return null;
     };
 
     return switch (kind) {

@@ -1002,7 +1002,7 @@ pub const Trie = struct {
 
     /// A partial or complete sequence of matches of a pattern against a trie.
     const Eval = struct {
-        value: ?*Pattern = null,
+        value: ?Pattern = null,
         index: usize = 0,
         len: usize = 0, // For partial matches
     };
@@ -1628,8 +1628,7 @@ pub const Trie = struct {
     ) Allocator.Error!Eval {
         var matched: Match = .{ .node_ptr = &self };
         var index: usize = bound;
-        var current: *Pattern = try pattern.clone(allocator);
-        current = current;
+        var current: Pattern = try pattern.copy(allocator);
         var term_bindings = VarBindings{};
         defer term_bindings.deinit(allocator);
         var pattern_bindings = VarPatternBindings{};
@@ -1637,8 +1636,8 @@ pub const Trie = struct {
         while (index < self.size()) {
             // while (current.height < pattern.height) : (len_matched += matched.len) {
             // } else
-            matched = try self.match(allocator, index, &term_bindings, &pattern_bindings, current.*);
-            // defer matched.deinit(allocator);
+            matched.deinit(allocator);
+            matched = try self.match(allocator, index, &term_bindings, &pattern_bindings, current);
             if (matched.index < index)
                 panic("Match index bug: matched.index {} < index {}", .{ matched.index, index });
 
@@ -1654,8 +1653,8 @@ pub const Trie = struct {
             // debug("Matched all", .{});
 
             // Rewrite all current bindings into the matched value
-            // current.destroy(allocator);
-            current.* = try self.rewrite(
+            current.deinit(allocator);
+            current = try self.rewrite(
                 allocator,
                 bound,
                 next,
@@ -1722,8 +1721,8 @@ pub const Trie = struct {
                 nested.* = @unionInit(
                     Node,
                     @tagName(tag),
-                    if (nested_eval.value) |ptr|
-                        ptr.*
+                    if (nested_eval.value) |value|
+                        value
                     else
                         try sub_pattern.copy(allocator),
                 );
@@ -1734,6 +1733,7 @@ pub const Trie = struct {
             .index = matched.index,
             .len = matched.len,
         };
+        matched.deinit(allocator);
         debug("Evaluated {} nodes at index {}\n", .{ eval.len, eval.index });
         return eval;
     }

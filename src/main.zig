@@ -73,7 +73,8 @@ fn replStep(
     trie: *Trie,
 ) !?void {
     var buffer = std.Io.Writer.Allocating.init(allocator);
-    const pattern = if (comptime use_tree_sitter) blk: {
+    defer buffer.deinit();
+    var pattern = if (comptime use_tree_sitter) blk: {
         const ast_option = try ts.parser.parseLine(
             &buffer,
             streams.in,
@@ -88,9 +89,8 @@ fn replStep(
                 .{ node.kind(), node.childCount(), text },
             );
         }
-        const pattern_node = try ts
+        break :blk try ts
             .astToPattern(allocator, buffer.written(), ast_ptr.rootNode());
-        break :blk pattern_node.root[0].pattern;
     } else blk: {
         _ = streams.in.streamDelimiter(&buffer.writer, '\n') catch |err| switch (err) {
             error.EndOfStream => return error.EndOfStream,
@@ -99,7 +99,7 @@ fn replStep(
         _ = try streams.in.takeByte(); // consume the newline
         break :blk try Parser.parse(allocator, buffer.written());
     };
-    // defer pattern.deinit(allocator);
+    defer pattern.deinit(allocator);
     const root = pattern.root;
     debug(
         "Converted pattern {} high and {} wide, of types: ",
@@ -170,8 +170,8 @@ fn replStep(
         // const result = try trie.evaluateSlice(allocator, pattern, &buff);
         debug("Eval Complete from {*}", .{trie});
         const eval = try trie.evaluateComplete(allocator, 0, pattern);
-        if (eval.value) |value| {
-            defer value.destroy(allocator);
+        if (eval.value) |*value| {
+            defer @constCast(value).deinit(allocator);
             try streams.out.print("Eval at {} of length {}: ", .{ eval.index, eval.len });
             std.log.debug("WriteIndent on pattern len {}", .{value.root.len});
             try value.writeIndent(streams.out, 0);

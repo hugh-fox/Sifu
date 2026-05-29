@@ -350,12 +350,12 @@ fn parsePrec3(self: *Self, allocator: Allocator) Oom!Pattern {
         return makePattern(try nodes.toOwnedSlice(allocator));
     }
 
-    var lhs = try self.parsePrec4(allocator);
+    const lhs = try self.parsePrec4(allocator);
     if (self.peek() != .comma) return lhs;
 
     var nodes = std.ArrayList(Node).empty;
     try nodes.appendSlice(allocator, lhs.root);
-    lhs.root = &.{};
+    allocator.free(lhs.root);
 
     while (self.peek() == .comma) {
         _ = self.eat();
@@ -374,12 +374,12 @@ fn parseOptionalPrec4(self: *Self, allocator: Allocator) Oom!Pattern {
 ///   User-defined symbol operators. The symbol is prepended to the RHS as
 ///   a key inside an .infix node.
 fn parsePrec4(self: *Self, allocator: Allocator) Oom!Pattern {
-    var lhs = try self.parsePrec5(allocator);
+    const lhs = try self.parsePrec5(allocator);
     if (self.peek() != .symbol) return lhs;
 
     var nodes = std.ArrayList(Node).empty;
     try nodes.appendSlice(allocator, lhs.root);
-    lhs.root = &.{};
+    allocator.free(lhs.root);
 
     while (self.peek() == .symbol) {
         const sym_tok = self.eat();
@@ -390,6 +390,7 @@ fn parsePrec4(self: *Self, allocator: Allocator) Oom!Pattern {
         var infix_nodes = std.ArrayList(Node).empty;
         try infix_nodes.append(allocator, Node{ .key = sym_text });
         try infix_nodes.appendSlice(allocator, rhs.root);
+        if (rhs.root.len > 0) allocator.free(rhs.root);
         try nodes.append(allocator, Node{
             .infix = makePattern(try infix_nodes.toOwnedSlice(allocator)),
         });
