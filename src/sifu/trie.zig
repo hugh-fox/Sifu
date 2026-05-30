@@ -1,6 +1,6 @@
 const std = @import("std");
 const Allocator = std.mem.Allocator;
-const ArrayList = std.ArrayList; // Update import
+const ArrayList = std.ArrayList;
 const mem = std.mem;
 const math = std.math;
 const compare = math.compare;
@@ -44,11 +44,10 @@ pub const Node = union(enum) {
     /// patterns. It only makes sense to match anything after trying to
     /// match something specific, so Vars always successfully match (if
     /// there is a Var) after a Key or Subpat match fails.
+    /// If the variable starts with '*', it matches patterns as a term
+    /// (var_pattern behavior), needed for matching patterns with ops
+    /// where the nested pattern is implicit.
     variable: []const u8,
-    /// Variables that match patterns as a term. These are only strictly
-    /// needed for matching patterns with ops, where the nested patterns
-    /// is implicit.
-    var_pattern: []const u8,
     /// Spaces separated juxtaposition, or lists/parens for nested patterns.
     /// Infix operators add their rhs as a nested patterns after themselves.
     pattern: Pattern,
@@ -82,7 +81,7 @@ pub const Node = union(enum) {
         allocator: Allocator,
     ) Allocator.Error!Node {
         return switch (self) {
-            inline .key, .variable, .var_pattern => self,
+            inline .key, .variable => self,
             .pattern => |p| Node.ofPattern(try p.copy(allocator)),
             inline else => |pattern, tag| @unionInit(
                 Node,
@@ -106,7 +105,7 @@ pub const Node = union(enum) {
 
     pub fn deinit(self: Node, allocator: Allocator) void {
         switch (self) {
-            .key, .variable, .var_pattern => {},
+            .key, .variable => {},
             .trie => |*trie| @constCast(trie).deinit(allocator),
             inline else => |*pattern| @constCast(pattern).deinit(allocator),
         }
@@ -120,7 +119,7 @@ pub const Node = union(enum) {
             // Variables are always the same hash in patterns (in
             // varmaps they need unique hashes)
             // TODO: differentiate between repeated and unique vars
-            .key, .variable, .var_pattern => |slice| hasher.update(
+            .key, .variable => |slice| hasher.update(
                 &mem.toBytes(slice),
             ),
             .pattern => |pattern| pattern.hasherUpdate(hasher),
@@ -145,7 +144,6 @@ pub const Node = union(enum) {
             // pattern in hashmaps
             // .variable => |v| Ctx.eql(undefined, v, other.variable, undefined),
             .variable => other == .variable,
-            .var_pattern => other == .var_pattern,
             .trie => |trie| trie.eql(other.trie),
             inline else => |pattern, tag| pattern
                 .eql(@field(other, @tagName(tag))),
@@ -158,7 +156,7 @@ pub const Node = union(enum) {
         return .{ .variable = variable };
     }
     pub fn ofVarPattern(var_pattern: []const u8) Node {
-        return .{ .var_pattern = var_pattern };
+        return .{ .variable = var_pattern };
     }
 
     pub fn ofPattern(pattern: Pattern) Node {
@@ -186,7 +184,7 @@ pub const Node = union(enum) {
 
     pub fn isOp(self: Node) bool {
         return switch (self) {
-            .key, .variable, .pattern, .var_pattern, .trie => false,
+            .key, .variable, .pattern, .trie => false,
             else => true,
         };
     }
@@ -237,9 +235,7 @@ pub const Node = union(enum) {
             try writer.writeByte(' ');
         switch (self.*) {
             .key => |key| _ = try writer.writeAll(key),
-            .variable, .var_pattern => |variable| {
-                try writer.writeAll(variable);
-            },
+            .variable => |variable| try writer.writeAll(variable),
             .trie => |*trie| try trie.writeIndent(
                 writer,
                 optional_indent,
@@ -416,17 +412,25 @@ const BranchNode = struct {
 
 /// A single index and its next pointer in the trie. The union disambiguates
 /// between values and the next variables/key. Keys are borrowed from the trie's
-/// hashmap, but variables are owned (as they aren't stored as keys in the trie)
+/// hashmap, but variables are owned (as they aren't stored as keys in the trie).
+/// Variables starting with '*' have var_pattern behavior.
 const Branch = union(enum) {
     key: BranchNode,
     variable: BranchNode,
-    var_pattern: BranchNode,
     value: Pattern,
 
     pub fn node(branch: Branch) ?BranchNode {
         return switch (branch) {
-            .key, .variable, .var_pattern => |branch_node| branch_node,
+            .key, .variable => |branch_node| branch_node,
             .value => null,
+        };
+    }
+
+    pub fn isVarPattern(branch: Branch) bool {
+        return switch (branch) {
+            .variable => |branch_node| branch_node.entry.key_ptr.*.len > 0 and
+                branch_node.entry.key_ptr.*[0] == '*',
+            else => false,
         };
     }
 
@@ -489,7 +493,6 @@ pub const Trie = struct {
     branches: BranchList = .empty,
     key_cache: CacheList = .empty,
     var_cache: CacheList = .empty,
-    var_pattern_cache: CacheList = .empty,
     value_cache: CacheList = .empty,
     depth: usize = 0, // TODO: implement depth caching
 
@@ -583,7 +586,6 @@ pub const Trie = struct {
         self.branches.deinit(allocator);
         self.key_cache.deinit(allocator);
         self.var_cache.deinit(allocator);
-        self.var_pattern_cache.deinit(allocator);
         self.value_cache.deinit(allocator);
         var iter = self.map.iterator();
         while (iter.next()) |entry| {
@@ -653,7 +655,7 @@ pub const Trie = struct {
         self: Trie,
         bound: usize,
         key: []const u8,
-        comptime tag: enum { key, variable, var_pattern },
+        comptime tag: enum { key, variable },
     ) ?IndexBranchTrie {
         if (self.map.getEntry(key)) |entry| {
             debug(
@@ -796,28 +798,6 @@ pub const Trie = struct {
         return next;
     }
 
-    fn getOrPutVarPattern(
-        trie: *Self,
-        allocator: Allocator,
-        index: usize,
-        var_pattern: []const u8,
-    ) !*Self {
-        const entry = try trie.map
-            .getOrPutValue(allocator, var_pattern, Self{});
-        const next = entry.value_ptr;
-        try trie.var_pattern_cache.append(allocator, trie.branches.items.len);
-        try trie.branches.append(
-            allocator,
-            IndexBranch{ index, .{
-                .var_pattern = .{
-                    .entry = entry,
-                    .next_index = next.branches.items.len,
-                },
-            } },
-        );
-        return next;
-    }
-
     /// Follows or creates a path as necessary in the trie and
     /// indices. Only adds branches, not values.
     fn ensurePathTerm(
@@ -834,8 +814,6 @@ pub const Trie = struct {
             },
             .variable => |variable| try trie
                 .getOrPutVar(allocator, index, variable),
-            .var_pattern => |var_pattern| try trie
-                .getOrPutVarPattern(allocator, index, var_pattern),
             .pattern => |sub_pat| blk: {
                 var next = trie;
                 debug("Processing pattern node at {*}", .{next});
@@ -871,21 +849,22 @@ pub const Trie = struct {
 
                 break :blk next;
             },
-            // Pattern trie's values will always be tries too, which will
-            // map nested pattern to the next trie on the current level.
-            // The resulting encoding is counter-intuitive when printed
-            // because each level of nesting must be a branch to enable
-            // trie matching.
-            inline else => |pattern, tag| {
-                _ = pattern;
-                panic("unimplemented tag {s}", .{@tagName(tag)});
-                // var next = try trie.getOrPutKey(allocator, index, "(");
-                // // All op types are encoded the same way after their top
-                // // level hash. These don't need special treatment because
-                // // their structure is simple, and their operator unique.
-                // next = try next.ensurePath(allocator, index, pattern);
-                // next = try next.getOrPutKey(allocator, index, ")");
-                // break :blk next;
+            .infix => |sub_pat| blk: {
+                var next = trie;
+                next = try next.ensurePath(allocator, index, sub_pat);
+                break :blk next;
+            },
+            .match => |sub_pat| blk: {
+                var next = trie;
+                next = try next.getOrPutKey(allocator, index, ":");
+                next = try next.ensurePath(allocator, index, sub_pat);
+                break :blk next;
+            },
+            .arrow => |sub_pat| blk: {
+                var next = trie;
+                next = try next.getOrPutKey(allocator, index, "->");
+                next = try next.ensurePath(allocator, index, sub_pat);
+                break :blk next;
             },
         };
     }
@@ -992,7 +971,7 @@ pub const Trie = struct {
         trie: *const Trie,
 
         pub fn deinit(self: *IndexBranchTrie, allocator: Allocator) void {
-            self.deinit(allocator);
+            self.trie.deinit(allocator);
         }
     };
 
@@ -1071,7 +1050,7 @@ pub const Trie = struct {
         // const branch_index = cache_index + branches_bound;
         // No index found if lowerBound returned the length of branches
         return if (cache_index < cache.len)
-            self.branches.items[cache_index]
+            self.branches.items[cache[cache_index]]
         else
             null;
     }
@@ -1088,12 +1067,6 @@ pub const Trie = struct {
         const branches_bound = self.findNextByIndex(bound) orelse
             return null;
         return self.findNextByCache(branches_bound, self.var_cache.items);
-    }
-
-    fn findNextVarPattern(self: Self, bound: usize) ?IndexBranch {
-        const branches_bound = self.findNextByIndex(bound) orelse
-            return null;
-        return self.findNextByCache(branches_bound, self.var_pattern_cache.items);
     }
 
     /// Finds the next minimum value at this node by index.
@@ -1246,9 +1219,6 @@ pub const Trie = struct {
                             .variable => |branch_node| Node.ofVar(
                                 branch_node.entry.key_ptr.*,
                             ),
-                            .var_pattern => |branch_node| Node{
-                                .var_pattern = branch_node.entry.key_ptr.*,
-                            },
                             .value => {
                                 // TODO
                                 // new_bindings.deinit(allocator);
@@ -1305,9 +1275,6 @@ pub const Trie = struct {
                 };
             },
 
-            .var_pattern => {
-                // @panic("var_pattern matching not yet implemented");
-            },
             .list => |pattern| {
                 // debug("Matched list with len {}", .{pattern.root.len});
                 const open_entry = self.map.getEntry(",") orelse
@@ -1363,48 +1330,6 @@ pub const Trie = struct {
         // For each subsequent term, extend candidates that can continue matching
         var pattern_index: usize = 0;
         while (pattern_index < pattern.root.len) : (pattern_index += 1) {
-            const rest = Pattern{
-                .root = pattern.root[pattern_index..],
-                .height = pattern.height,
-            };
-            // TODO: stop early if there are more terms in trie and they match
-            if (current.findNextVarPattern(bound)) |var_candidate| {
-                const var_bound, const var_pattern_branch = var_candidate;
-                debug("Found var_pattern branch at index: {}", .{var_bound});
-
-                const branch_node = var_pattern_branch.var_pattern;
-                const var_pattern = branch_node.entry.key_ptr.*;
-
-                const get_or_put = try pattern_bindings.getOrPut(allocator, var_pattern);
-
-                // Variable already bound - only match if node equals bound value
-                if (get_or_put.found_existing) {
-                    if (get_or_put.value_ptr.eql(rest))
-                        // return IndexBranchTrie{
-                        //     .index = var_bound,
-                        //     .branch = var_pattern_branch,
-                        //     .trie = branch_node.entry.value_ptr,
-                        // }
-                        @panic("unimplemented\n")
-                    else {
-                        // TODO
-                        // new_bindings.deinit(allocator);
-                        @panic("unimplemented\n");
-                    }
-                } else {
-                    get_or_put.value_ptr.* = rest;
-
-                    // Bind the variable to this node
-                    try pattern_bindings.put(allocator, var_pattern, rest);
-                    // TODO: save for later, we still need to compare indices
-                    // with possible matches below to find the smallest
-                    current = branch_node.entry.value_ptr;
-                }
-                // Already bound the full pattern, so skip the loop below
-                pattern_index = pattern.root.len;
-                // debug("break with remaining len: {}", .{rest.root.len});
-                break;
-            }
             // debug("pattern root len: {}", .{pattern.root.len});
 
             // debug("pattern index: {}", .{pattern_index});
@@ -1437,24 +1362,33 @@ pub const Trie = struct {
                     );
                 },
                 .variable => |variable| {
+                    const var_name = variable.entry.key_ptr.*;
                     debug(
                         "Appending variable branch at index {} of {s}",
-                        .{ index, variable.entry.key_ptr.* },
+                        .{ index, var_name },
                     );
                     try node_list.append(
                         allocator,
-                        Node{ .variable = variable.entry.key_ptr.* },
+                        Node{ .variable = var_name },
                     );
-                },
-                .var_pattern => |var_pattern| {
-                    debug(
-                        "Appending var_pattern branch at index {} of {s}",
-                        .{ index, var_pattern.entry.key_ptr.* },
-                    );
-                    try node_list.append(
-                        allocator,
-                        Node{ .var_pattern = var_pattern.entry.key_ptr.* },
-                    );
+                    // If var_pattern (starts with '*'), bind to remaining pattern
+                    if (branch.isVarPattern()) {
+                        const rest = Pattern{
+                            .root = pattern.root[pattern_index..],
+                            .height = pattern.height,
+                        };
+                        const get_or_put = try pattern_bindings.getOrPut(allocator, var_name);
+                        if (get_or_put.found_existing) {
+                            if (!get_or_put.value_ptr.eql(rest)) {
+                                @panic("unimplemented: var_pattern already bound to different value");
+                            }
+                        } else {
+                            get_or_put.value_ptr.* = rest;
+                        }
+                        current = variable.entry.value_ptr;
+                        pattern_index = pattern.root.len;
+                        break;
+                    }
                 },
                 .value => |value| {
                     // current = index_branch.next();
@@ -1528,34 +1462,30 @@ pub const Trie = struct {
         for (pattern.root) |node| switch (node) {
             .key => |key| try result.append(allocator, Node.ofKey(key)),
             .variable => |variable| {
-                if (term_bindings.get(variable)) |_|
-                    debug("Var found: {s}", .{variable})
-                else
-                    debug("Var not found", .{});
-                try result.append(
-                    allocator,
-                    term_bindings.get(variable) orelse
-                        node,
-                );
-            },
-            .var_pattern => |var_pattern| {
-                if (pattern_bindings.get(var_pattern)) |_|
-                    debug("Var pattern get {s}: ", .{var_pattern})
-                    // var_node.writeSExp(streams.err, null) catch unreachable
-                else
-                    debug("Var pattern not found", .{});
-                if (pattern_bindings.get(var_pattern)) |sub_pattern| {
-                    // TODO: calculate correct height with sub_pattern's
-                    // height
-                    // for (sub_pattern.root) |sub_node|
-                    //     try result.append(allocator, sub_node);
-
-                    try result.appendSlice(
+                // Check if this is a var_pattern (starts with '*')
+                const is_var_pattern = variable.len > 0 and variable[0] == '*';
+                if (is_var_pattern) {
+                    if (pattern_bindings.get(variable)) |_|
+                        debug("Var pattern get {s}: ", .{variable})
+                    else
+                        debug("Var pattern not found", .{});
+                    if (pattern_bindings.get(variable)) |sub_pattern| {
+                        try result.appendSlice(
+                            allocator,
+                            sub_pattern.root,
+                        );
+                    } else try result.append(allocator, node);
+                } else {
+                    if (term_bindings.get(variable)) |_|
+                        debug("Var found: {s}", .{variable})
+                    else
+                        debug("Var not found", .{});
+                    try result.append(
                         allocator,
-                        sub_pattern.root,
-                        // (next.value orelse sub_pattern).root,
+                        term_bindings.get(variable) orelse
+                            node,
                     );
-                } else try result.append(allocator, node);
+                }
             },
             inline .pattern, .arrow, .match, .list, .infix => |nested, tag| {
                 const rewritten = try self.rewrite(allocator, bound, nested, term_bindings, pattern_bindings);
@@ -1841,7 +1771,8 @@ pub const Trie = struct {
     pub fn toString(self: Self, allocator: Allocator) ![]const u8 {
         var buff: std.ArrayList(u8) = .empty;
         errdefer buff.deinit(allocator);
-        var allocating_writer = Io.Writer.Allocating.fromArrayList(allocator, &buff);
+        var allocating_writer = Io.Writer.Allocating
+            .fromArrayList(allocator, &buff);
         try self.writeCanonical(&allocating_writer.writer);
         return allocating_writer.toOwnedSlice();
     }
@@ -2297,8 +2228,19 @@ test "Trie: toString" {
         Pattern{ .root = &key_root },
         Pattern{ .root = &val_root },
     );
-    const str = try trie.toString(testing.allocator);
-    defer testing.allocator.free(str);
-
-    try testing.expectEqualStrings("0 | A B --> Val\n", str);
+    {
+        const str = try trie.toString(testing.allocator);
+        defer testing.allocator.free(str);
+        try testing.expectEqualStrings("0 | A B --> Val\n", str);
+    }
+    _ = try trie.append(
+        testing.allocator,
+        Pattern{ .root = &key_root },
+        Pattern{ .root = &val_root },
+    );
+    {
+        const str = try trie.toString(testing.allocator);
+        defer testing.allocator.free(str);
+        try testing.expectEqualStrings("0 | A B --> Val\n1 | A B --> Val\n", str);
+    }
 }

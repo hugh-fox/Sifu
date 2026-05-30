@@ -152,6 +152,43 @@ pub fn build(b: *std.Build) void {
     const test_step = b.step("test", "Run unit tests");
     test_step.dependOn(&run_unit_tests.step);
 
+    // Integration tests for test/ folder
+    const integration_tests = b.addTest(.{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/integration_test.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
+    });
+
+    // Collect test files at build time
+    var parsable_list: std.ArrayListUnmanaged([]const u8) = .empty;
+    var parsable_dir = b.build_root.handle.openDir(b.graph.io, "test/Parsable", .{ .iterate = true }) catch @panic("Could not open test/Parsable");
+    defer parsable_dir.close(b.graph.io);
+    var parsable_iter = parsable_dir.iterate();
+    while (parsable_iter.next(b.graph.io) catch null) |entry| {
+        if (std.mem.endsWith(u8, entry.name, ".sifu")) {
+            parsable_list.append(b.allocator, b.dupe(entry.name[0 .. entry.name.len - 5])) catch @panic("OOM");
+        }
+    }
+    build_options.addOption([]const []const u8, "parsable_files", parsable_list.items);
+
+    var behavior_list: std.ArrayListUnmanaged([]const u8) = .empty;
+    var behavior_dir = b.build_root.handle.openDir(b.graph.io, "test/Behavior", .{ .iterate = true }) catch @panic("Could not open test/Behavior");
+    defer behavior_dir.close(b.graph.io);
+    var behavior_iter = behavior_dir.iterate();
+    while (behavior_iter.next(b.graph.io) catch null) |entry| {
+        if (entry.kind == .directory) {
+            behavior_list.append(b.allocator, b.dupe(entry.name)) catch @panic("OOM");
+        }
+    }
+    build_options.addOption([]const []const u8, "behavior_folders", behavior_list.items);
+
+    integration_tests.root_module.addOptions("build_options", build_options);
+    const run_integration_tests = b.addRunArtifact(integration_tests);
+    const integration_test_step = b.step("integration", "Run integration tests on test/ folder");
+    integration_test_step.dependOn(&run_integration_tests.step);
+
     unit_tests.root_module.addOptions("build_options", build_options);
     wasm_lib.root_module.addOptions("build_options", build_options);
     wasi_exe.root_module.addOptions("build_options", build_options);

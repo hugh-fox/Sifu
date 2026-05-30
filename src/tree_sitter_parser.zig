@@ -237,7 +237,7 @@ fn parseTermNode(
     return switch (kind) {
         .key, .number, .string, .symbol => Node{ .key = text },
         .variable => Node{ .variable = text },
-        .var_pattern => Node{ .var_pattern = text },
+        .var_pattern => Node{ .variable = text },
         .nested_pattern => Node{ .pattern = try astToPattern(allocator, source, node) },
         .nested_trie => Node{ .trie = try astToTrie(allocator, source, node.childByFieldName("inner")) },
         .quote => Node{ .pattern = try astToPattern(allocator, source, node) },

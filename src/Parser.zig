@@ -441,7 +441,7 @@ fn parseTerm(self: *Self, allocator: Allocator) Oom!Node {
     return switch (tok.tag) {
         .key, .number, .string => Node{ .key = tok.text(self.source) },
         .variable => Node{ .variable = tok.text(self.source) },
-        .var_pattern => Node{ .var_pattern = tok.text(self.source) },
+        .var_pattern => Node{ .variable = tok.text(self.source) },
         .left_paren => blk: {
             const inner = try self.parseInner(allocator, .right_paren);
             break :blk Node{ .pattern = inner };
@@ -619,8 +619,7 @@ fn expectNodes(pattern: Pattern, expected_tags: []const NodeTag) !void {
     for (pattern.root, expected_tags) |node, expected_tag| {
         const actual_tag: NodeTag = switch (node) {
             .key => .key,
-            .variable => .variable,
-            .var_pattern => .var_pattern,
+            .variable => |v| if (v.len > 0 and v[0] == '*') .var_pattern else .variable,
             .pattern => .pattern,
             .infix => .infix,
             .match => .match,
@@ -668,7 +667,7 @@ test "var_pattern" {
     defer arena.deinit();
     const p = try parse(arena.allocator(), "*x");
     try expectNodes(p, &.{.var_pattern});
-    try testing.expectEqualStrings("*x", p.root[0].var_pattern);
+    try testing.expectEqualStrings("*x", p.root[0].variable);
 }
 
 test "number" {
