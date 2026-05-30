@@ -326,12 +326,11 @@ pub const Pattern = struct {
     }
 
     pub fn toString(self: Pattern, allocator: Allocator) ![]const u8 {
-        // TODO: properly grow buff
-        var buff: std.ArrayList(u8) = try .initCapacity(allocator, 4096);
+        var buff: std.ArrayList(u8) = .empty;
         errdefer buff.deinit(allocator);
-        var writer = Io.Writer.fromArrayList(&buff);
-        try self.write(&writer);
-        return buff.toOwnedSlice(allocator);
+        var allocating_writer = Io.Writer.Allocating.fromArrayList(allocator, &buff);
+        try self.write(&allocating_writer.writer);
+        return allocating_writer.toOwnedSlice();
     }
 
     pub fn copy(self: Pattern, allocator: Allocator) !Pattern {
@@ -2273,4 +2272,15 @@ test "findNextByCache" {
     value_index, value_branch = value_trie.branches.items[branch_index];
     try testing.expect(value_index == 1);
     try testing.expect(value_branch.value.eql(value2));
+}
+
+test "Pattern: toString" {
+    var root = [_]Node{
+        .{ .key = "Bb" },
+        .{ .key = "Cc" },
+    };
+    const pattern = Pattern{ .root = &root };
+    const str = try pattern.toString(testing.allocator);
+    defer testing.allocator.free(str);
+    try testing.expectEqualStrings("Bb Cc", str);
 }

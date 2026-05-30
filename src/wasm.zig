@@ -23,6 +23,7 @@ pub const VarPatternBindings = trie_module.VarPatternBindings;
 const wasm_allocator = std.heap.wasm_allocator;
 extern "js" fn log(msg_ptr: [*]const u8, msg_len: usize) void;
 extern "js" fn err(msg_ptr: [*]const u8, msg_len: usize) void;
+extern "js" fn logInt(int: usize) void;
 
 const PackedSlice = packed struct(u64) {
     ptr: u32,
@@ -66,11 +67,14 @@ fn parseStrMatch(
 export fn matchStr(trie_ptr: u32, query_ptr: [*]const u8, query_len: u32) u64 {
     const trie: *Trie = @ptrFromInt(trie_ptr);
     const slice = query_ptr[0..query_len];
-    const result = parseStrMatch(trie.*, wasm_allocator, trie.size(), slice) catch
+    const result = parseStrMatch(trie.*, wasm_allocator, 0, slice) catch
         panic("Match error");
     const expr = result.value orelse
-        panic("No match");
-    // result.key;
+        result.key;
+
+    logInt(result.key.root.len);
+    logInt(expr.root.len);
+    logInt(result.len);
     const expr_string = expr.toString(wasm_allocator) catch
         panic("Writing match expr failed");
 
@@ -93,7 +97,7 @@ export fn free(ptr: [*]const u8, len: usize) void {
     std.heap.wasm_allocator.free(ptr[0..len]);
 }
 
-fn bufDebug(comptime fmt_str: []const u8, args: anytype) void {
+fn debug(comptime fmt_str: []const u8, args: anytype) void {
     var buff: [256]u8 = undefined;
     const str = fmt.bufPrint(&buff, fmt_str, args) catch
         unreachable;

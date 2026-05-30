@@ -140,13 +140,11 @@ fn parseOperatorNode(
     node_kind: []const u8,
 ) error{OutOfMemory}!Pattern {
     // debug("Parsing operator '{s}'", .{node_kind});
-
     var nodes = std.ArrayList(Node).empty;
     errdefer {
         for (nodes.items) |n| n.deinit(allocator);
         nodes.deinit(allocator);
     }
-
     // For built-in operators without operands, all three of these are null
     var lhs_node: ?AstNode = null;
     var rhs_node: ?AstNode = null;
@@ -177,19 +175,12 @@ fn parseOperatorNode(
     }
     // Distribute LHS into the array
     if (lhs_node) |lhs| {
-        const lhs_pattern = try astToPattern(allocator, source, lhs);
+        var lhs_pattern = try astToPattern(allocator, source, lhs);
         defer lhs_pattern.deinit(allocator);
         for (lhs_pattern.root) |lhs_child| {
             try nodes.append(allocator, try lhs_child.copy(allocator));
         }
     }
-
-    // Create LHS wrapper node
-    // const lhs_pattern = if (lhs_node) |lhs|
-    //     try astToPattern(allocator, source, lhs)
-    // else
-    //     Pattern{ .root = &[_]Node{}, .height = 0 };
-
     // Create RHS wrapper node
     const rhs_pattern = if (rhs_node) |rhs|
         try astToPattern(allocator, source, rhs)
@@ -200,7 +191,6 @@ fn parseOperatorNode(
     const wrapper_node = convertRHS(allocator, node_kind, op_symbol, rhs_pattern) catch |e| {
         panic("Error converting RHS for operator '{s}': {}", .{ node_kind, e });
     };
-
     // try nodes.append(allocator, Node{ .pattern = lhs_pattern });
     // debug("wrapper node type {s}", .{@tagName(wrapper_node)});
     try nodes.append(allocator, wrapper_node);
@@ -211,7 +201,6 @@ fn parseOperatorNode(
         const h = getNodeHeight(n);
         if (h > max_height) max_height = h;
     }
-
     // debug("Operator result: {} nodes, height {}", .{ node_slice.len, max_height });
     return .{ .root = node_slice, .height = max_height + 1 };
 }
