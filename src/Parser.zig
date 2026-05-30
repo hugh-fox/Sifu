@@ -109,6 +109,19 @@ fn advance(self: *Self) Token {
         '}' => return self.single(.right_brace),
         '`' => return self.single(.backtick),
         ';' => return self.single(.semicolon),
+        '\n' => {
+            // Skip trailing newlines (newline followed only by whitespace/newlines)
+            var check_pos = self.pos + 1;
+            while (check_pos < self.source.len) : (check_pos += 1) {
+                const ch = self.source[check_pos];
+                if (ch != ' ' and ch != '\t' and ch != '\r' and ch != '\n') break;
+            } else {
+                // Only whitespace/newlines until EOF - skip this newline
+                self.pos += 1;
+                return self.advance();
+            }
+            return self.single(.semicolon);
+        },
         ',' => return self.single(.comma),
         '"' => return self.lexString(),
         else => {},
@@ -137,10 +150,10 @@ fn single(self: *Self, tag: Tag) Token {
 fn skipExtras(self: *Self) void {
     while (self.pos < self.source.len) {
         const c = self.source[self.pos];
-        if (c == ' ' or c == '\t' or c == '\n' or c == '\r') {
+        if (c == ' ' or c == '\t' or c == '\r') {
             self.pos += 1;
         } else if (c == '#') {
-            // Comment: skip to end of line
+            // Comment: skip to end of line (but not the newline itself)
             while (self.pos < self.source.len and self.source[self.pos] != '\n')
                 self.pos += 1;
         } else break;
@@ -814,10 +827,11 @@ test "infix: 1 + 2" {
 test "comment skipped" {
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
+    // Newlines are semicolons, so "A # comment\nB" becomes "A; B"
     const p = try parse(arena.allocator(), "A # comment\nB");
-    try expectNodes(p, &.{ .key, .key });
+    try expectNodes(p, &.{ .key, .list });
     try testing.expectEqualStrings("A", p.root[0].key);
-    try testing.expectEqualStrings("B", p.root[1].key);
+    try testing.expectEqualStrings("B", p.root[1].list.root[0].key);
 }
 
 test "empty trie: {}" {

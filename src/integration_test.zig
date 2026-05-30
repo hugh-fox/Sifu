@@ -33,7 +33,7 @@ fn runBehaviorTest(allocator: Allocator, comptime folder: []const u8) !void {
     const test_dir_handle = try openDir(behavior, folder, false);
     defer test_dir_handle.close(testing.io);
 
-    const trie_content = try readFile(test_dir_handle, folder ++ ".sifu", allocator);
+    const trie_content = try readFile(test_dir_handle, "Trie.sifu", allocator);
     var trie = try Parser.parseTrie(allocator, trie_content);
     defer trie.deinit(allocator);
 
@@ -69,7 +69,7 @@ fn runBehaviorTest(allocator: Allocator, comptime folder: []const u8) !void {
         const actual_output = if (eval_result.value) |value| blk: {
             var val = value;
             defer val.deinit(allocator);
-            break :blk val.toString(allocator) catch "";
+            break :blk try val.toString(allocator);
         } else "";
 
         const expected_content = readFile(expected_dir, query_entry.basename, allocator) catch |err| {

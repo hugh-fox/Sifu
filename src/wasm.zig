@@ -15,9 +15,9 @@ const trie_module = @import("sifu/trie.zig");
 const Pattern = trie_module.Pattern;
 const Trie = trie_module.Trie;
 const Match = Trie.Match;
+const Eval = Trie.Eval;
 const Streams = @import("streams.zig").Streams;
 pub const VarBindings = trie_module.VarBindings;
-pub const VarPatternBindings = trie_module.VarPatternBindings;
 
 // const Node = Pattern.Node;
 const wasm_allocator = std.heap.wasm_allocator;
@@ -70,8 +70,7 @@ fn parseStrMatch(
     var query = try Parser.parse(allocator, query_str);
     defer query.deinit(allocator);
     var term_bindings = VarBindings{};
-    var pattern_bindings = VarPatternBindings{};
-    return trie.match(allocator, bound, &term_bindings, &pattern_bindings, query);
+    return trie.match(allocator, bound, &term_bindings, query);
 }
 
 /// Caller frees.
@@ -85,6 +84,37 @@ export fn matchStr(trie_ptr: u32, query_ptr: [*]const u8, query_len: u32) u64 {
 
     const expr_string = expr.toString(wasm_allocator) catch
         panic("Writing match expr failed");
+
+    return @bitCast(PackedSlice{
+        .ptr = @intCast(@intFromPtr(expr_string.ptr)),
+        .len = @intCast(expr_string.len),
+    });
+}
+
+/// Convenience function for directly passing a string to parse
+fn parseStrEval(
+    trie: Trie,
+    allocator: Allocator,
+    bound: usize,
+    query_str: []const u8,
+) !Eval {
+    var query = try Parser.parse(allocator, query_str);
+    defer query.deinit(allocator);
+    return trie.evaluateComplete(allocator, bound, query);
+}
+
+/// Caller frees.
+export fn evalStr(trie_ptr: u32, query_ptr: [*]const u8, query_len: u32) u64 {
+    const trie: *Trie = @ptrFromInt(trie_ptr);
+    const slice = query_ptr[0..query_len];
+    const result = parseStrEval(trie.*, wasm_allocator, 0, slice) catch
+        panic("Match error");
+
+    const expr_string = if (result.value) |value|
+        value.toString(wasm_allocator) catch
+            panic("Writing match expr failed")
+    else
+        slice;
 
     return @bitCast(PackedSlice{
         .ptr = @intCast(@intFromPtr(expr_string.ptr)),

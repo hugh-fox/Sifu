@@ -11,9 +11,7 @@ fn parseAndMatch(allocator: std.mem.Allocator, trie: Trie, query_str: []const u8
     defer query.deinit(allocator);
     var term_bindings = trie_mod.VarBindings{};
     defer term_bindings.deinit(allocator);
-    var pattern_bindings = trie_mod.VarPatternBindings{};
-    defer pattern_bindings.deinit(allocator);
-    var result = try trie.match(allocator, 0, &term_bindings, &pattern_bindings, query);
+    var result = try trie.match(allocator, 0, &term_bindings, query);
     defer result.deinit(allocator);
     if (result.value) |val| {
         return try val.copy(allocator);

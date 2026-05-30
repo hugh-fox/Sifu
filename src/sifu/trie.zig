@@ -470,7 +470,6 @@ const Bound = struct { lower: usize = 0, upper: usize };
 /// Keeps track of which vars and var_pattern are bound to what part of an
 /// expression given during matching.
 pub const VarBindings = std.StringHashMapUnmanaged(Node);
-pub const VarPatternBindings = std.StringHashMapUnmanaged(Pattern);
 
 /// Maps terms to the next trie, if there is one. These form the branches of the
 /// trie for a specific level of nesting. Each Key is in the map is unique, but
@@ -979,7 +978,7 @@ pub const Trie = struct {
     const MatchQueue = ArrayList(IndexBranchTrie);
 
     /// A partial or complete sequence of matches of a pattern against a trie.
-    const Eval = struct {
+    pub const Eval = struct {
         value: ?Pattern = null,
         index: usize = 0,
         len: usize = 0, // For partial matches
@@ -1133,7 +1132,6 @@ pub const Trie = struct {
         allocator: Allocator,
         bound: usize,
         term_bindings: *VarBindings,
-        pattern_bindings: *VarPatternBindings,
         node: Node,
     ) Allocator.Error!?IndexBranchTrie {
         // debug("Branching `", .{});
@@ -1247,7 +1245,7 @@ pub const Trie = struct {
 
                 // Recursively match the pattern contents
                 var pattern_match = try open_trie
-                    .match(allocator, index, term_bindings, pattern_bindings, pattern);
+                    .match(allocator, index, term_bindings, pattern);
                 defer pattern_match.deinit(allocator);
                 index = pattern_match.index;
                 if (pattern_match.len != pattern.root.len) {
@@ -1285,7 +1283,7 @@ pub const Trie = struct {
                     return null;
                 const index, const branch = self.branches.items[branch_index];
                 var pattern_match = try open_trie
-                    .match(allocator, index, term_bindings, pattern_bindings, pattern);
+                    .match(allocator, index, term_bindings, pattern);
                 defer pattern_match.deinit(allocator);
                 debug("Matched tail at {*}", .{pattern_match.node_ptr});
                 return .{
@@ -1315,7 +1313,6 @@ pub const Trie = struct {
         allocator: Allocator,
         bound: usize,
         term_bindings: *VarBindings,
-        pattern_bindings: *VarPatternBindings,
         pattern: Pattern,
     ) Allocator.Error!Match {
         debug(
@@ -1339,7 +1336,6 @@ pub const Trie = struct {
                 allocator,
                 bound,
                 term_bindings,
-                pattern_bindings,
                 pattern.root[pattern_index],
             ) orelse {
                 debug(
@@ -1371,23 +1367,35 @@ pub const Trie = struct {
                         allocator,
                         Node{ .variable = var_name },
                     );
+                    const get_or_put = try term_bindings.getOrPut(allocator, var_name);
                     // If var_pattern (starts with '*'), bind to remaining pattern
                     if (branch.isVarPattern()) {
                         const rest = Pattern{
                             .root = pattern.root[pattern_index..],
                             .height = pattern.height,
                         };
-                        const get_or_put = try pattern_bindings.getOrPut(allocator, var_name);
                         if (get_or_put.found_existing) {
-                            if (!get_or_put.value_ptr.eql(rest)) {
+                            // Var patterns are stored as Node{ .pattern = ... }
+                            if (get_or_put.value_ptr.* != .pattern or
+                                !get_or_put.value_ptr.pattern.eql(rest))
+                            {
                                 @panic("unimplemented: var_pattern already bound to different value");
                             }
                         } else {
-                            get_or_put.value_ptr.* = rest;
+                            debug("Assigning rest to var pattern at {*}", .{get_or_put.value_ptr});
+                            get_or_put.value_ptr.* = .{ .pattern = rest };
+                        }
+                        pattern_index = pattern.root.len;
+                        break; // No need to match rest of pattern
+                    } else {
+                        if (get_or_put.found_existing) {
+                            if (!get_or_put.value_ptr.eql(pattern.root[pattern_index])) {
+                                @panic("unimplemented: var already bound to different value");
+                            }
+                        } else {
+                            get_or_put.value_ptr.* = pattern.root[pattern_index];
                         }
                         current = variable.entry.value_ptr;
-                        pattern_index = pattern.root.len;
-                        break;
                     }
                 },
                 .value => |value| {
@@ -1419,7 +1427,7 @@ pub const Trie = struct {
         else {
             // debug("Full match found", .{});
 
-            if (current.findNextValue(bound)) |value_candidate| {
+            if (current.findNextValue(index)) |value_candidate| {
                 debug("Value found", .{});
                 _, const value_branch = value_candidate;
                 result = value_branch.value;
@@ -1453,7 +1461,6 @@ pub const Trie = struct {
         bound: usize,
         pattern: Pattern,
         term_bindings: *VarBindings,
-        pattern_bindings: *VarPatternBindings,
     ) Allocator.Error!Pattern {
         // debug("Rewrite pattern of len {}", .{pattern.root.len});
         var result = ArrayList(Node).empty;
@@ -1465,30 +1472,26 @@ pub const Trie = struct {
                 // Check if this is a var_pattern (starts with '*')
                 const is_var_pattern = variable.len > 0 and variable[0] == '*';
                 if (is_var_pattern) {
-                    if (pattern_bindings.get(variable)) |_|
-                        debug("Var pattern get {s}: ", .{variable})
-                    else
-                        debug("Var pattern not found", .{});
-                    if (pattern_bindings.get(variable)) |sub_pattern| {
-                        try result.appendSlice(
-                            allocator,
-                            sub_pattern.root,
-                        );
+                    if (term_bindings.get(variable)) |sub_pattern| {
+                        debug("Var pattern found: {s}", .{variable});
+                        // Deep copy each node to avoid use-after-free
+                        for (sub_pattern.pattern.root) |sub_node| {
+                            try result.append(allocator, try sub_node.copy(allocator));
+                        }
                     } else try result.append(allocator, node);
                 } else {
-                    if (term_bindings.get(variable)) |_|
-                        debug("Var found: {s}", .{variable})
-                    else
+                    if (term_bindings.get(variable)) |bound_node| {
+                        debug("Var found: {s}", .{variable});
+                        // Deep copy the bound node to avoid use-after-free
+                        try result.append(allocator, try bound_node.copy(allocator));
+                    } else {
                         debug("Var not found", .{});
-                    try result.append(
-                        allocator,
-                        term_bindings.get(variable) orelse
-                            node,
-                    );
+                        try result.append(allocator, node);
+                    }
                 }
             },
             inline .pattern, .arrow, .match, .list, .infix => |nested, tag| {
-                const rewritten = try self.rewrite(allocator, bound, nested, term_bindings, pattern_bindings);
+                const rewritten = try self.rewrite(allocator, bound, nested, term_bindings);
 
                 // debug("Rewrite recursing on {s} len {}", .{ @tagName(tag), nested.root.len });
                 try result.append(allocator, @unionInit(
@@ -1560,13 +1563,11 @@ pub const Trie = struct {
         var current: Pattern = try pattern.copy(allocator);
         var term_bindings = VarBindings{};
         defer term_bindings.deinit(allocator);
-        var pattern_bindings = VarPatternBindings{};
-        defer pattern_bindings.deinit(allocator);
         while (index < self.size()) {
             // while (current.height < pattern.height) : (len_matched += matched.len) {
             // } else
             matched.deinit(allocator);
-            matched = try self.match(allocator, index, &term_bindings, &pattern_bindings, current);
+            matched = try self.match(allocator, index, &term_bindings, current);
             if (matched.index < index)
                 panic("Match index bug: matched.index {} < index {}", .{ matched.index, index });
 
@@ -1577,22 +1578,20 @@ pub const Trie = struct {
                 // current.destroy(allocator);
                 break;
             };
-            // debug("Matched len: {}", .{matched.len});
-            // }
-            // debug("Matched all", .{});
 
             // Rewrite all current bindings into the matched value
-            current.deinit(allocator);
+            // Deinit old current after rewrite completes, since term_bindings
+            // may reference current.root
+            var old_current = current;
+            defer old_current.deinit(allocator);
             current = try self.rewrite(
                 allocator,
                 bound,
                 next,
                 &term_bindings,
-                &pattern_bindings,
             );
             // Reset bindings for each new match index
             term_bindings.clearRetainingCapacity();
-            pattern_bindings.clearRetainingCapacity();
 
             // debug("vars in map: {}", .{bindings.size});
             const slice = .{};
@@ -2026,8 +2025,6 @@ test "Behavior: equal variables" {
     // Matching from bound 0 should find index 0
     var term_bindings = VarBindings{};
     defer term_bindings.deinit(testing.allocator);
-    var pattern_bindings = VarPatternBindings{};
-    defer pattern_bindings.deinit(testing.allocator);
 
     var query_root = [_]Node{.{ .key = "anything" }};
     const query = Pattern{ .root = &query_root };
@@ -2036,7 +2033,6 @@ test "Behavior: equal variables" {
         testing.allocator,
         0,
         &term_bindings,
-        &pattern_bindings,
         query,
     );
     defer match1.deinit(testing.allocator);
@@ -2242,5 +2238,50 @@ test "Trie: toString" {
         const str = try trie.toString(testing.allocator);
         defer testing.allocator.free(str);
         try testing.expectEqualStrings("0 | A B --> Val\n1 | A B --> Val\n", str);
+    }
+}
+
+test "Roundtrip: A -> C -> B" {
+    var trie = Trie{};
+    defer trie.deinit(testing.allocator);
+
+    // A --> C (index 0)
+    var key1 = [_]Node{.{ .key = "A" }};
+    var val1 = [_]Node{.{ .key = "C" }};
+    _ = try trie.append(testing.allocator, Pattern{ .root = &key1 }, Pattern{ .root = &val1 });
+
+    // C --> B (index 1)
+    var key2 = [_]Node{.{ .key = "C" }};
+    var val2 = [_]Node{.{ .key = "B" }};
+    _ = try trie.append(testing.allocator, Pattern{ .root = &key2 }, Pattern{ .root = &val2 });
+
+    // B --> A (index 2)
+    var key3 = [_]Node{.{ .key = "B" }};
+    var val3 = [_]Node{.{ .key = "A" }};
+    _ = try trie.append(testing.allocator, Pattern{ .root = &key3 }, Pattern{ .root = &val3 });
+
+    // A --> B (index 3)
+    var key4 = [_]Node{.{ .key = "A" }};
+    var val4 = [_]Node{.{ .key = "B" }};
+    _ = try trie.append(testing.allocator, Pattern{ .root = &key4 }, Pattern{ .root = &val4 });
+
+    std.debug.print("\nTrie size: {}\n", .{trie.size()});
+
+    // Query A, should evaluate to B
+    var query = [_]Node{.{ .key = "A" }};
+    const eval_result = try trie.evaluateComplete(testing.allocator, 0, Pattern{ .root = &query });
+
+    std.debug.print("Eval result index: {}, len: {}\n", .{ eval_result.index, eval_result.len });
+
+    if (eval_result.value) |value| {
+        var val = value;
+        defer val.deinit(testing.allocator);
+        const str = try val.toString(testing.allocator);
+        defer testing.allocator.free(str);
+        std.debug.print("Result: '{s}'\n", .{str});
+        try testing.expectEqualStrings("B", str);
+    } else {
+        std.debug.print("No value!\n", .{});
+        try testing.expect(false);
     }
 }
