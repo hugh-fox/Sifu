@@ -1001,7 +1001,7 @@ pub const Trie = struct {
                     branch: IndexBranch,
                 ) Order {
                     const i, _ = branch;
-                    debug("Compare branches: {} < {}", .{ ctx, i });
+                    // debug("Compare branches: {} < {}", .{ ctx, i });
                     return math.order(ctx, i);
                 }
             }.lessThan,
@@ -1152,6 +1152,16 @@ pub const Trie = struct {
                 ),
             };
             const variable = branch_node.entry.key_ptr.*;
+
+            // Var patterns (variables starting with '*') capture the rest of the pattern,
+            // not just a single node. They are handled in match(), not here.
+            if (var_branch.isVarPattern()) {
+                return .{
+                    .index = var_bound,
+                    .branch = var_branch,
+                    .trie = branch_node.entry.value_ptr,
+                };
+            }
 
             const get_or_put = try term_bindings.getOrPut(allocator, variable);
 
@@ -1376,15 +1386,20 @@ pub const Trie = struct {
                         };
                         if (get_or_put.found_existing) {
                             // Var patterns are stored as Node{ .pattern = ... }
-                            if (get_or_put.value_ptr.* != .pattern or
-                                !get_or_put.value_ptr.pattern.eql(rest))
-                            {
-                                @panic("unimplemented: var_pattern already bound to different value");
+                            // But could have been bound earlier as a different type
+                            switch (get_or_put.value_ptr.*) {
+                                .pattern => |existing_pattern| {
+                                    if (!existing_pattern.eql(rest)) {
+                                        @panic("unimplemented: var_pattern already bound to different pattern");
+                                    }
+                                },
+                                else => @panic("unimplemented: var_pattern bound to non-pattern value"),
                             }
                         } else {
                             debug("Assigning rest to var pattern at {*}", .{get_or_put.value_ptr});
                             get_or_put.value_ptr.* = .{ .pattern = rest };
                         }
+                        current = variable.entry.value_ptr;
                         pattern_index = pattern.root.len;
                         break; // No need to match rest of pattern
                     } else {
