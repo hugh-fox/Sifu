@@ -1839,9 +1839,11 @@ pub const Trie = struct {
     }
 
     pub fn toString(self: Self, allocator: Allocator) ![]const u8 {
-        var buff = ArrayList(u8).init(allocator);
-        self.pretty(buff.writer());
-        return buff.toOwnedSlice();
+        var buff: std.ArrayList(u8) = .empty;
+        errdefer buff.deinit(allocator);
+        var allocating_writer = Io.Writer.Allocating.fromArrayList(allocator, &buff);
+        try self.writeCanonical(&allocating_writer.writer);
+        return allocating_writer.toOwnedSlice();
     }
 
     /// Print a trie without newlines
@@ -2283,4 +2285,20 @@ test "Pattern: toString" {
     const str = try pattern.toString(testing.allocator);
     defer testing.allocator.free(str);
     try testing.expectEqualStrings("Bb Cc", str);
+}
+
+test "Trie: toString" {
+    var trie = Trie{};
+    defer trie.deinit(testing.allocator);
+    var key_root = [_]Node{ .{ .key = "A" }, .{ .key = "B" } };
+    var val_root = [_]Node{.{ .key = "Val" }};
+    _ = try trie.append(
+        testing.allocator,
+        Pattern{ .root = &key_root },
+        Pattern{ .root = &val_root },
+    );
+    const str = try trie.toString(testing.allocator);
+    defer testing.allocator.free(str);
+
+    try testing.expectEqualStrings("0 | A B --> Val\n", str);
 }

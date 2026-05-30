@@ -183,6 +183,6 @@ fn replStep(
         }
     }
 
-    try trie.writeIndent(streams.out, 0);
-    // try trie.writeCanonical(streams.out);
+    // try trie.writeIndent(streams.out, 0);
+    try trie.writeCanonical(streams.out);
 }

@@ -41,12 +41,23 @@ export fn parseSliceAsTrie(ptr: [*]const u8, len: u32) u32 {
     const trie_ptr = wasm_allocator.create(Trie) catch
         panic("Allocation of trie failed");
     errdefer wasm_allocator.free(trie_ptr);
-    log(ptr, len);
 
     trie_ptr.* = Parser.parseTrie(wasm_allocator, ptr[0..len]) catch
         panic("Error parsing trie");
 
     return @intFromPtr(trie_ptr);
+}
+
+export fn parse(ptr: [*]const u8, len: u32) u32 {
+    const pattern_ptr = wasm_allocator.create(Pattern) catch
+        panic("Allocation of trie failed");
+    errdefer wasm_allocator.free(pattern_ptr);
+    log(ptr, len);
+
+    pattern_ptr.* = Parser.parse(wasm_allocator, ptr[0..len]) catch
+        panic("Error parsing pattern");
+
+    return @intFromPtr(pattern_ptr);
 }
 
 /// Convenience function for directly passing a string to parse
@@ -72,9 +83,6 @@ export fn matchStr(trie_ptr: u32, query_ptr: [*]const u8, query_len: u32) u64 {
     const expr = result.value orelse
         result.key;
 
-    logInt(result.key.root.len);
-    logInt(expr.root.len);
-    logInt(result.len);
     const expr_string = expr.toString(wasm_allocator) catch
         panic("Writing match expr failed");
 
@@ -95,6 +103,17 @@ export fn alloc(len: usize) [*]const u8 {
 export fn free(ptr: [*]const u8, len: usize) void {
     // const ptr: [*]usize = @ptrFromInt(ptr_num);
     std.heap.wasm_allocator.free(ptr[0..len]);
+}
+
+export fn toString(trie_ptr: u32) u64 {
+    const trie: *Trie = @ptrFromInt(trie_ptr);
+    const string = trie.toString(wasm_allocator) catch
+        panic("Allocation failed");
+
+    return @bitCast(PackedSlice{
+        .ptr = @intCast(@intFromPtr(string.ptr)),
+        .len = @intCast(string.len),
+    });
 }
 
 fn debug(comptime fmt_str: []const u8, args: anytype) void {
