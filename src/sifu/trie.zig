@@ -186,6 +186,10 @@ pub const Node = union(enum) {
         };
     }
 
+    pub fn isCommaKey(self: Node) bool {
+        return self == .key and mem.eql(u8, self.key, ",");
+    }
+
     pub fn height(self: Node) usize {
         return switch (self) {
             .pattern, .infix, .match, .arrow, .list => |p| p.height,
@@ -308,14 +312,13 @@ pub const Pattern = struct {
         if (slice.len == 1) {
             return;
         } else for (slice[1 .. slice.len - 1]) |*node| {
-            // debug("tag: {s}", .{@tagName(pattern)});
-            // Don't add space before list nodes (comma already has spacing)
-            if (node.* != .list)
+            // Don't add space before list nodes or comma keys
+            if (node.* != .list and !node.isCommaKey())
                 try writer.writeByte(' ');
             try node.writeSExp(writer, optional_indent);
         }
-        // Don't add space before list nodes
-        if (slice[slice.len - 1] != .list)
+        // Don't add space before list nodes or comma keys
+        if (slice[slice.len - 1] != .list and !slice[slice.len - 1].isCommaKey())
             try writer.writeByte(' ');
         // debug("tag: {s}", .{@tagName(pattern[pattern.len - 1])});
         try slice[slice.len - 1]
@@ -471,7 +474,7 @@ pub const BranchList = ArrayList(IndexBranch);
 
 /// For directing evaluations to completion. Initially, lower bound begins
 /// at 0, for the upper bound, the length of the pattern (inclusive/exclusive
-/// respectively)
+/// respectively).
 const Bound = struct { lower: usize = 0, upper: usize };
 
 /// Keeps track of which vars and var_pattern are bound to what part of an
@@ -524,18 +527,44 @@ pub const Trie = struct {
         return null;
     }
 
-    /// Rebuilds the key for a given index using an allocator for the
-    /// arrays necessary to support the pattern structure, but pointers to the
-    /// underlying keys.
+    /// Rebuilds the key for a given index as a flat pattern of keys/variables.
+    /// Special delimiters like `(`, `)`, `,`, etc. appear as regular key nodes.
     pub fn rebuildKey(
         self: Self,
         allocator: Allocator,
         index: usize,
-    ) !Pattern {
-        _ = index; // autofix
-        _ = allocator; // autofix
-        _ = self; // autofix
-        @panic("unimplemented");
+    ) Allocator.Error!Pattern {
+        var nodes = ArrayList(Node).empty;
+        errdefer nodes.deinit(allocator);
+
+        try self.rebuildKeyInner(allocator, index, &nodes);
+
+        const root = try nodes.toOwnedSlice(allocator);
+        return Pattern{ .root = root, .height = 1 };
+    }
+
+    fn rebuildKeyInner(
+        self: Self,
+        allocator: Allocator,
+        index: usize,
+        nodes: *ArrayList(Node),
+    ) Allocator.Error!void {
+        // Check keys first
+        if (findNextInBranches(self.key_branches.items, index)) |kb| {
+            const found_index, const branch = kb;
+            if (found_index == index) {
+                try nodes.append(allocator, .{ .key = branch.key.entry.key_ptr.* });
+                return branch.key.entry.value_ptr.rebuildKeyInner(allocator, index, nodes);
+            }
+        }
+        // Then check vars
+        if (findNextInBranches(self.var_branches.items, index)) |vb| {
+            const found_index, const branch = vb;
+            if (found_index == index) {
+                try nodes.append(allocator, .{ .variable = branch.variable.entry.key_ptr.* });
+                return branch.variable.entry.value_ptr.rebuildKeyInner(allocator, index, nodes);
+            }
+        }
     }
 
     /// Deep copy a trie by value, as well as Keys and Variables.
@@ -828,27 +857,34 @@ pub const Trie = struct {
                 debug("Close paren address: {*}", .{next});
                 break :blk next;
             },
-            .trie => |sub_trie| {
-                _ = sub_trie;
-                // var next = try trie.getOrPutKey(allocator, index, "{");
-                // next = try next.ensurePath(allocator, index, sub_trie);
-                // next = try next.getOrPutKey(allocator, index, "}");
-                // break :blk next;
-                @panic("unimplemented\n");
+            .trie => |sub_trie| blk: {
+                var next = try trie.getOrPutKey(allocator, index, "{");
+
+                const indices = try sub_trie.valueIndices(allocator);
+                defer allocator.free(indices);
+
+                for (indices, 0..) |entry_idx, i| {
+                    if (i > 0) {
+                        next = try next.getOrPutKey(allocator, index, ",");
+                    }
+
+                    const key = try sub_trie.rebuildKey(allocator, entry_idx);
+                    defer allocator.free(key.root);
+
+                    const value = sub_trie.getIndexOrNull(entry_idx) orelse continue;
+
+                    next = try next.ensurePath(allocator, index, key);
+                    next = try next.getOrPutKey(allocator, index, "->");
+                    next = try next.ensurePath(allocator, index, value);
+                }
+
+                next = try next.getOrPutKey(allocator, index, "}");
+                break :blk next;
             },
             .list => |comma| blk: {
                 var next = trie;
                 next = try next.getOrPutKey(allocator, index, ",");
                 next = try next.ensurePath(allocator, index, comma);
-                // debug("Comma literal address: {*}", .{next});
-                // debug("Comma len {} at {*}", .{ comma.root.len, next });
-                // for (0..comma.root.len - 1) |i| {
-                //     next = try next.ensurePathTerm(allocator, index, comma.root[i]);
-                //     debug("Comma Prefix address: {*}", .{next});
-                // }
-                // debug("last: {s}", .{comma.root[comma.root.len - 1].key});
-                // next = try next.ensurePath(allocator, index, comma.root[comma.root.len - 1].pattern);
-                // debug("Comma rhs address: {*}", .{next});
 
                 break :blk next;
             },
@@ -1288,8 +1324,21 @@ pub const Trie = struct {
                     .trie = pattern_match.node_ptr,
                 };
             },
-            .trie => {
-                @panic("trie matching not yet implemented");
+            .trie => |query_trie| {
+                var trie_pattern = try query_trie.toPattern(allocator);
+                defer trie_pattern.deinit(allocator);
+
+                var trie_match = try self.match(allocator, bound, term_bindings, trie_pattern);
+                defer trie_match.deinit(allocator);
+
+                const final_branch = trie_match.node_ptr.findNext(trie_match.index) orelse
+                    return null;
+                _, const branch = final_branch;
+                return .{
+                    .index = trie_match.index,
+                    .branch = branch,
+                    .trie = trie_match.node_ptr,
+                };
             },
             inline .arrow, .match, .infix => |_, tag| {
                 std.debug.panic(
@@ -1675,16 +1724,13 @@ pub const Trie = struct {
                     i,
                     sub_pattern.root.len,
                 });
-                // Sub-expressions start over from 0 (structural recursion) if
-                // the sub_pattern length is less than the original
+                // Structural recursion: sub-expressions with smaller height reset
+                // lower bound to 0. This is bounded by height decreasing.
+                const is_structural = sub_pattern.height < pattern.height;
+                const nested_bound = if (is_structural) 0 else matched.index;
                 const nested_eval = try self.evaluateComplete(
                     allocator,
-                    matched.index,
-                    // TODO
-                    // if (sub_pattern.height < pattern.height)
-                    //     0
-                    // else
-                    //     matched.index + 1,
+                    nested_bound,
                     sub_pattern,
                 );
                 const new_value = nested_eval.value orelse try sub_pattern.copy(allocator);
@@ -1868,24 +1914,16 @@ pub const Trie = struct {
     /// Print a trie in order based on indices.
     pub fn writeCanonical(self: Self, writer: anytype) !void {
         const allocator = std.heap.page_allocator;
-        // Collect all indices that have values
-        var indices: std.ArrayList(usize) = .empty;
-        defer indices.deinit(allocator);
-        try self.collectValueIndices(allocator, &indices);
+        const indices = try self.valueIndices(allocator);
+        defer allocator.free(indices);
 
-        // Sort and deduplicate
-        std.mem.sort(usize, indices.items, {}, std.sort.asc(usize));
-        var last: ?usize = null;
-        for (indices.items) |idx| {
-            if (last == null or last.? != idx) {
-                try self.writeEntryAtIndex(writer, idx);
-                try writer.writeByte('\n');
-                last = idx;
-            }
+        for (indices) |idx| {
+            try self.writeEntryAtIndex(writer, idx);
+            try writer.writeByte('\n');
         }
     }
 
-    fn collectValueIndices(self: *const Self, allocator: Allocator, indices: *std.ArrayList(usize)) !void {
+    fn collectValueIndices(self: *const Self, allocator: Allocator, indices: *std.ArrayList(usize)) Allocator.Error!void {
         for (self.value_branches.items) |index_branch| {
             const idx, _ = index_branch;
             try indices.append(allocator, idx);
@@ -1894,6 +1932,66 @@ pub const Trie = struct {
         while (iter.next()) |entry| {
             try entry.value_ptr.collectValueIndices(allocator, indices);
         }
+    }
+
+    /// Converts a trie to its flattened pattern representation.
+    /// The trie is encoded as: { key1 -> val1, key2 -> val2, ... }
+    /// Caller owns the returned pattern and should free it with `Pattern.deinit`.
+    pub fn toPattern(self: *const Self, allocator: Allocator) Allocator.Error!Pattern {
+        var nodes = ArrayList(Node).empty;
+        errdefer nodes.deinit(allocator);
+
+        try nodes.append(allocator, .{ .key = "{" });
+
+        const indices = try self.valueIndices(allocator);
+        defer allocator.free(indices);
+
+        for (indices, 0..) |entry_idx, i| {
+            if (i > 0) {
+                try nodes.append(allocator, .{ .key = "," });
+            }
+
+            const key = try self.rebuildKey(allocator, entry_idx);
+            defer allocator.free(key.root);
+
+            for (key.root) |node| {
+                try nodes.append(allocator, node);
+            }
+
+            try nodes.append(allocator, .{ .key = "->" });
+
+            const value = self.getIndexOrNull(entry_idx) orelse continue;
+            for (value.root) |node| {
+                try nodes.append(allocator, try node.copy(allocator));
+            }
+        }
+
+        try nodes.append(allocator, .{ .key = "}" });
+
+        const root = try nodes.toOwnedSlice(allocator);
+        return Pattern{ .root = root, .height = 1 };
+    }
+
+    /// Returns sorted, deduplicated value indices. Caller owns the returned slice.
+    fn valueIndices(self: *const Self, allocator: Allocator) Allocator.Error![]usize {
+        var indices = std.ArrayList(usize).empty;
+        errdefer indices.deinit(allocator);
+        try self.collectValueIndices(allocator, &indices);
+        std.mem.sort(usize, indices.items, {}, std.sort.asc(usize));
+
+        // Deduplicate in place
+        var write_pos: usize = 0;
+        var last: ?usize = null;
+        for (indices.items) |idx| {
+            if (last == null or last.? != idx) {
+                indices.items[write_pos] = idx;
+                write_pos += 1;
+                last = idx;
+            }
+        }
+        indices.items.len = write_pos;
+
+        return indices.toOwnedSlice(allocator);
     }
 
     pub const indent_increment = 2;
@@ -2477,4 +2575,106 @@ test "VarPattern in nested pattern" {
     } else {
         try testing.expect(false);
     }
+}
+
+test "rebuildKey: multiple entries" {
+    var trie = Trie{};
+    defer trie.deinit(testing.allocator);
+
+    var key0 = [_]Node{ .{ .key = "A" }, .{ .key = "B" }, .{ .variable = "x" } };
+    var key1 = [_]Node{ .{ .key = "A" }, .{ .key = "C" } };
+    var key2 = [_]Node{ .{ .key = "A" }, .{ .key = "B" }, .{ .variable = "y" } };
+    var val = [_]Node{.{ .key = "V" }};
+    _ = try trie.append(testing.allocator, .{ .root = &key0 }, .{ .root = &val });
+    _ = try trie.append(testing.allocator, .{ .root = &key1 }, .{ .root = &val });
+    _ = try trie.append(testing.allocator, .{ .root = &key2 }, .{ .root = &val });
+
+    var r0 = try trie.rebuildKey(testing.allocator, 0);
+    defer testing.allocator.free(r0.root);
+    var r1 = try trie.rebuildKey(testing.allocator, 1);
+    defer testing.allocator.free(r1.root);
+    var r2 = try trie.rebuildKey(testing.allocator, 2);
+    defer testing.allocator.free(r2.root);
+
+    const s0 = try r0.toString(testing.allocator);
+    defer testing.allocator.free(s0);
+    const s1 = try r1.toString(testing.allocator);
+    defer testing.allocator.free(s1);
+    const s2 = try r2.toString(testing.allocator);
+    defer testing.allocator.free(s2);
+
+    try testing.expectEqualStrings("A B x", s0);
+    try testing.expectEqualStrings("A C", s1);
+    try testing.expectEqualStrings("A B y", s2);
+}
+
+test "rebuildKey: nested with list" {
+    var trie = Trie{};
+    defer trie.deinit(testing.allocator);
+
+    var list_inner = [_]Node{.{ .variable = "y" }};
+    var inner = [_]Node{ .{ .variable = "x" }, .{ .list = .{ .root = &list_inner } } };
+    var key = [_]Node{.{ .pattern = .{ .root = &inner } }};
+    var val = [_]Node{.{ .key = "V" }};
+    _ = try trie.append(testing.allocator, .{ .root = &key }, .{ .root = &val });
+
+    var rebuilt = try trie.rebuildKey(testing.allocator, 0);
+    defer testing.allocator.free(rebuilt.root);
+    const str = try rebuilt.toString(testing.allocator);
+    defer testing.allocator.free(str);
+    try testing.expectEqualStrings("( x, y )", str);
+}
+
+test "rebuildKey: embedded trie with multiple entries" {
+    var trie = Trie{};
+    defer trie.deinit(testing.allocator);
+
+    var inner_trie = Trie{};
+    defer inner_trie.deinit(testing.allocator);
+    var inner_key0 = [_]Node{.{ .key = "A" }};
+    var inner_val0 = [_]Node{.{ .key = "B" }};
+    var inner_key1 = [_]Node{ .{ .key = "C" }, .{ .key = "D" } };
+    var inner_val1 = [_]Node{.{ .key = "E" }};
+    _ = try inner_trie.append(testing.allocator, .{ .root = &inner_key0 }, .{ .root = &inner_val0 });
+    _ = try inner_trie.append(testing.allocator, .{ .root = &inner_key1 }, .{ .root = &inner_val1 });
+
+    var key = [_]Node{ .{ .key = "X" }, .{ .trie = inner_trie }, .{ .key = "Y" } };
+    var val = [_]Node{.{ .key = "V" }};
+    _ = try trie.append(testing.allocator, .{ .root = &key }, .{ .root = &val });
+
+    var rebuilt = try trie.rebuildKey(testing.allocator, 0);
+    defer testing.allocator.free(rebuilt.root);
+    const str = try rebuilt.toString(testing.allocator);
+    defer testing.allocator.free(str);
+    try testing.expectEqualStrings("X { A -> B, C D -> E } Y", str);
+}
+
+test "rebuildKey: multiple nested tries" {
+    var trie = Trie{};
+    defer trie.deinit(testing.allocator);
+
+    var inner1 = Trie{};
+    defer inner1.deinit(testing.allocator);
+    var i1_key = [_]Node{.{ .key = "A" }};
+    var i1_val = [_]Node{.{ .key = "B" }};
+    _ = try inner1.append(testing.allocator, .{ .root = &i1_key }, .{ .root = &i1_val });
+
+    var inner2 = Trie{};
+    defer inner2.deinit(testing.allocator);
+    var i2_key0 = [_]Node{.{ .key = "C" }};
+    var i2_val0 = [_]Node{.{ .key = "D" }};
+    var i2_key1 = [_]Node{.{ .key = "E" }};
+    var i2_val1 = [_]Node{.{ .key = "F" }};
+    _ = try inner2.append(testing.allocator, .{ .root = &i2_key0 }, .{ .root = &i2_val0 });
+    _ = try inner2.append(testing.allocator, .{ .root = &i2_key1 }, .{ .root = &i2_val1 });
+
+    var key = [_]Node{ .{ .trie = inner1 }, .{ .key = "X" }, .{ .trie = inner2 } };
+    var val = [_]Node{.{ .key = "V" }};
+    _ = try trie.append(testing.allocator, .{ .root = &key }, .{ .root = &val });
+
+    var rebuilt = try trie.rebuildKey(testing.allocator, 0);
+    defer testing.allocator.free(rebuilt.root);
+    const str = try rebuilt.toString(testing.allocator);
+    defer testing.allocator.free(str);
+    try testing.expectEqualStrings("{ A -> B } X { C -> D, E -> F }", str);
 }

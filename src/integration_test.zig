@@ -186,11 +186,12 @@ comptime {
             test "Parsable" {
                 var arena = std.heap.ArenaAllocator.init(testing.allocator);
                 defer arena.deinit();
+                std.debug.print("{s}: ", .{name});
                 runParsableTest(arena.allocator(), name) catch |err| {
-                    std.debug.print(name ++ " FAILED: {}\n", .{err});
+                    std.debug.print("FAILED: {}\n", .{err});
                     return err;
                 };
-                std.debug.print(name ++ " PASSED\n", .{});
+                std.debug.print("PASSED\n", .{});
             }
         };
     }

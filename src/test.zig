@@ -296,3 +296,100 @@ test "Parser structure: A, B" {
     try testing.expect(zig_pattern.root[1] == .list);
     try testing.expectEqual(@as(usize, 1), zig_pattern.root[1].list.root.len);
 }
+
+// rebuildKey tests
+
+const Node = trie_mod.Node;
+
+fn expectRebuildRoundtrip(trie: Trie, index: usize) !void {
+    var rebuilt = try trie.rebuildKey(testing.allocator, index);
+    defer testing.allocator.free(rebuilt.root);
+    const str = try rebuilt.toString(testing.allocator);
+    defer testing.allocator.free(str);
+
+    var parsed = try Parser.parse(testing.allocator, str);
+    defer parsed.deinit(testing.allocator);
+
+    // Verify parsed pattern matches the trie at this index
+    var bindings = trie_mod.VarBindings{};
+    defer bindings.deinit(testing.allocator);
+    var match_result = try trie.match(testing.allocator, index, &bindings, parsed);
+    defer match_result.deinit(testing.allocator);
+    try testing.expect(match_result.value != null);
+}
+
+test "rebuildKey: multiple entries roundtrip" {
+    var trie = Trie{};
+    defer trie.deinit(testing.allocator);
+
+    var key0 = [_]Node{ .{ .key = "A" }, .{ .key = "B" }, .{ .variable = "x" } };
+    var key1 = [_]Node{ .{ .key = "A" }, .{ .key = "C" } };
+    var key2 = [_]Node{ .{ .key = "A" }, .{ .key = "B" }, .{ .variable = "y" } };
+    var val = [_]Node{.{ .key = "V" }};
+    _ = try trie.append(testing.allocator, .{ .root = &key0 }, .{ .root = &val });
+    _ = try trie.append(testing.allocator, .{ .root = &key1 }, .{ .root = &val });
+    _ = try trie.append(testing.allocator, .{ .root = &key2 }, .{ .root = &val });
+
+    try expectRebuildRoundtrip(trie, 0);
+    try expectRebuildRoundtrip(trie, 1);
+    try expectRebuildRoundtrip(trie, 2);
+}
+
+test "rebuildKey: nested with list roundtrip" {
+    var trie = Trie{};
+    defer trie.deinit(testing.allocator);
+
+    var list_inner = [_]Node{.{ .variable = "y" }};
+    var inner = [_]Node{ .{ .variable = "x" }, .{ .list = .{ .root = &list_inner } } };
+    var key = [_]Node{.{ .pattern = .{ .root = &inner } }};
+    var val = [_]Node{.{ .key = "V" }};
+    _ = try trie.append(testing.allocator, .{ .root = &key }, .{ .root = &val });
+
+    try expectRebuildRoundtrip(trie, 0);
+}
+
+test "rebuildKey: embedded trie roundtrip" {
+    var trie = Trie{};
+    defer trie.deinit(testing.allocator);
+
+    var inner_trie = Trie{};
+    defer inner_trie.deinit(testing.allocator);
+    var inner_key0 = [_]Node{.{ .key = "A" }};
+    var inner_val0 = [_]Node{.{ .key = "B" }};
+    var inner_key1 = [_]Node{ .{ .key = "C" }, .{ .key = "D" } };
+    var inner_val1 = [_]Node{.{ .key = "E" }};
+    _ = try inner_trie.append(testing.allocator, .{ .root = &inner_key0 }, .{ .root = &inner_val0 });
+    _ = try inner_trie.append(testing.allocator, .{ .root = &inner_key1 }, .{ .root = &inner_val1 });
+
+    var key = [_]Node{ .{ .key = "X" }, .{ .trie = inner_trie }, .{ .key = "Y" } };
+    var val = [_]Node{.{ .key = "V" }};
+    _ = try trie.append(testing.allocator, .{ .root = &key }, .{ .root = &val });
+
+    try expectRebuildRoundtrip(trie, 0);
+}
+
+test "rebuildKey: multiple nested tries roundtrip" {
+    var trie = Trie{};
+    defer trie.deinit(testing.allocator);
+
+    var inner1 = Trie{};
+    defer inner1.deinit(testing.allocator);
+    var i1_key = [_]Node{.{ .key = "A" }};
+    var i1_val = [_]Node{.{ .key = "B" }};
+    _ = try inner1.append(testing.allocator, .{ .root = &i1_key }, .{ .root = &i1_val });
+
+    var inner2 = Trie{};
+    defer inner2.deinit(testing.allocator);
+    var i2_key0 = [_]Node{.{ .key = "C" }};
+    var i2_val0 = [_]Node{.{ .key = "D" }};
+    var i2_key1 = [_]Node{.{ .key = "E" }};
+    var i2_val1 = [_]Node{.{ .key = "F" }};
+    _ = try inner2.append(testing.allocator, .{ .root = &i2_key0 }, .{ .root = &i2_val0 });
+    _ = try inner2.append(testing.allocator, .{ .root = &i2_key1 }, .{ .root = &i2_val1 });
+
+    var key = [_]Node{ .{ .trie = inner1 }, .{ .key = "X" }, .{ .trie = inner2 } };
+    var val = [_]Node{.{ .key = "V" }};
+    _ = try trie.append(testing.allocator, .{ .root = &key }, .{ .root = &val });
+
+    try expectRebuildRoundtrip(trie, 0);
+}

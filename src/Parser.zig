@@ -468,7 +468,8 @@ fn parseTerm(self: *Self, allocator: Allocator) Oom!Node {
             break :blk Node{ .pattern = inner };
         },
         .left_brace => blk: {
-            const inner = try self.parseInner(allocator, .right_brace);
+            var inner = try self.parseInner(allocator, .right_brace);
+            defer inner.deinit(allocator);
             const trie = try patternToTrie(allocator, inner);
             break :blk Node{ .trie = trie };
         },
