@@ -295,7 +295,7 @@ fn parsePrec1(self: *Self, allocator: Allocator) Oom!Pattern {
         const rhs = try self.parseOptionalPrec1(allocator);
         var nodes = try allocator.alloc(Node, 1);
         nodes[0] = Node{ .list = rhs };
-        return makePattern(nodes);
+        return patternOf(nodes, rhs.height);
     }
 
     const lhs = try self.parsePrec2(allocator);
@@ -309,7 +309,8 @@ fn parsePrec1(self: *Self, allocator: Allocator) Oom!Pattern {
     try nodes.appendSlice(allocator, lhs.root);
     allocator.free(lhs.root);
     try nodes.append(allocator, Node{ .list = rhs });
-    return makePattern(try nodes.toOwnedSlice(allocator));
+    const max_child = @max(lhs.height -| 1, rhs.height);
+    return patternOf(try nodes.toOwnedSlice(allocator), max_child);
 }
 
 fn parseOptionalPrec1(self: *Self, allocator: Allocator) Oom!Pattern {
@@ -330,7 +331,7 @@ fn parsePrec2(self: *Self, allocator: Allocator) Oom!Pattern {
         const op = self.eat();
         const rhs = try self.parseOptionalPrec2(allocator);
         try nodes.append(allocator, wrapOp(op.tag, rhs));
-        return makePattern(try nodes.toOwnedSlice(allocator));
+        return patternOf(try nodes.toOwnedSlice(allocator), rhs.height);
     }
 
     const lhs = try self.parsePrec3(allocator);
@@ -343,7 +344,8 @@ fn parsePrec2(self: *Self, allocator: Allocator) Oom!Pattern {
     const op = self.eat();
     const rhs = try self.parseOptionalPrec2(allocator);
     try nodes.append(allocator, wrapOp(op.tag, rhs));
-    return makePattern(try nodes.toOwnedSlice(allocator));
+    const max_child = @max(lhs.height -| 1, rhs.height);
+    return patternOf(try nodes.toOwnedSlice(allocator), max_child);
 }
 
 /// Prec 3: comma (right-associative to match Tree-sitter grammar)
@@ -354,7 +356,7 @@ fn parsePrec3(self: *Self, allocator: Allocator) Oom!Pattern {
         const rhs = try self.parseOptionalPrec3(allocator);
         var nodes = try allocator.alloc(Node, 1);
         nodes[0] = Node{ .list = rhs };
-        return makePattern(nodes);
+        return patternOf(nodes, rhs.height);
     }
 
     const lhs = try self.parsePrec4(allocator);
@@ -368,7 +370,8 @@ fn parsePrec3(self: *Self, allocator: Allocator) Oom!Pattern {
     try nodes.appendSlice(allocator, lhs.root);
     allocator.free(lhs.root);
     try nodes.append(allocator, Node{ .list = rhs });
-    return makePattern(try nodes.toOwnedSlice(allocator));
+    const max_child = @max(lhs.height -| 1, rhs.height);
+    return patternOf(try nodes.toOwnedSlice(allocator), max_child);
 }
 
 fn parseOptionalPrec3(self: *Self, allocator: Allocator) Oom!Pattern {
@@ -391,6 +394,7 @@ fn parsePrec4(self: *Self, allocator: Allocator) Oom!Pattern {
     var nodes = std.ArrayList(Node).empty;
     try nodes.appendSlice(allocator, lhs.root);
     allocator.free(lhs.root);
+    var max_child = lhs.height -| 1;
 
     while (self.peek() == .symbol) {
         const sym_tok = self.eat();
@@ -398,15 +402,18 @@ fn parsePrec4(self: *Self, allocator: Allocator) Oom!Pattern {
         const rhs = try self.parseOptionalPrec5(allocator);
 
         // Build infix pattern: [op_key, rhs_nodes...]
+        // Key has height 0, so infix max_child = rhs.height - 1
         var infix_nodes = std.ArrayList(Node).empty;
         try infix_nodes.append(allocator, Node{ .key = sym_text });
         try infix_nodes.appendSlice(allocator, rhs.root);
         if (rhs.root.len > 0) allocator.free(rhs.root);
+        const infix_height = rhs.height -| 1;
         try nodes.append(allocator, Node{
-            .infix = makePattern(try infix_nodes.toOwnedSlice(allocator)),
+            .infix = patternOf(try infix_nodes.toOwnedSlice(allocator), infix_height),
         });
+        max_child = @max(max_child, infix_height + 1);
     }
-    return makePattern(try nodes.toOwnedSlice(allocator));
+    return patternOf(try nodes.toOwnedSlice(allocator), max_child);
 }
 
 fn parseOptionalPrec5(self: *Self, allocator: Allocator) Oom!Pattern {
@@ -421,7 +428,7 @@ fn parsePrec5(self: *Self, allocator: Allocator) Oom!Pattern {
         const op = self.eat();
         const rhs = try self.parseOptionalPrec5(allocator);
         try nodes.append(allocator, wrapOp(op.tag, rhs));
-        return makePattern(try nodes.toOwnedSlice(allocator));
+        return patternOf(try nodes.toOwnedSlice(allocator), rhs.height);
     }
 
     const lhs = try self.parseTerms(allocator);
@@ -434,17 +441,20 @@ fn parsePrec5(self: *Self, allocator: Allocator) Oom!Pattern {
     const op = self.eat();
     const rhs = try self.parseOptionalPrec5(allocator);
     try nodes.append(allocator, wrapOp(op.tag, rhs));
-    return makePattern(try nodes.toOwnedSlice(allocator));
+    const max_child = @max(lhs.height -| 1, rhs.height);
+    return patternOf(try nodes.toOwnedSlice(allocator), max_child);
 }
 
 /// Prec 6: terms (juxtaposition) – one or more terms
 fn parseTerms(self: *Self, allocator: Allocator) Oom!Pattern {
     var nodes = std.ArrayList(Node).empty;
+    var max_child: usize = 0;
     while (self.canStartTerm()) {
         const node = try self.parseTerm(allocator);
+        max_child = @max(max_child, node.height());
         try nodes.append(allocator, node);
     }
-    return makePattern(try nodes.toOwnedSlice(allocator));
+    return patternOf(try nodes.toOwnedSlice(allocator), max_child);
 }
 
 fn parseTerm(self: *Self, allocator: Allocator) Oom!Node {
@@ -595,7 +605,7 @@ fn appendEntry(result: *Trie, allocator: Allocator, entry_pattern: Pattern) Oom!
 
     if (arrow_index) |ai| {
         // Split at arrow: nodes before arrow are key, arrow's pattern is value
-        const key = Pattern{ .root = entry_pattern.root[0..ai] };
+        const key = patternFromSlice(entry_pattern.root[0..ai]);
         const value = entry_pattern.root[ai].arrow;
         _ = try result.append(allocator, key, value);
     } else {
@@ -604,21 +614,16 @@ fn appendEntry(result: *Trie, allocator: Allocator, entry_pattern: Pattern) Oom!
     }
 }
 
-fn makePattern(nodes: []Node) Pattern {
-    var max_height: usize = 0;
-    for (nodes) |n| {
-        const h = nodeHeight(n);
-        if (h > max_height) max_height = h;
-    }
-    return .{ .root = nodes, .height = if (nodes.len > 0) max_height + 1 else 0 };
+fn patternOf(nodes: []Node, max_child_height: usize) Pattern {
+    return .{ .root = nodes, .height = if (nodes.len > 0) max_child_height + 1 else 0 };
 }
 
-fn nodeHeight(node: Node) usize {
-    return switch (node) {
-        .pattern, .infix, .match, .arrow, .list => |p| p.height,
-        .trie => 1,
-        else => 1,
-    };
+fn patternFromSlice(nodes: []Node) Pattern {
+    var max_child: usize = 0;
+    for (nodes) |n| {
+        max_child = @max(max_child, n.height());
+    }
+    return .{ .root = nodes, .height = if (nodes.len > 0) max_child + 1 else 0 };
 }
 
 // ---------------------------------------------------------------------------

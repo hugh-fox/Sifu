@@ -288,7 +288,7 @@ pub const Node = union(enum) {
 
 pub const Pattern = struct {
     root: []Node = &.{},
-    height: usize = 1, // patterns have a height because they are a branch
+    height: usize = 0,
 
     pub fn isEmpty(self: Pattern) bool {
         return self.root.len == 0;
@@ -925,7 +925,7 @@ pub const Trie = struct {
         for (root, key) |*node, token|
             node.* = Node.ofKey(token);
 
-        return self.append(allocator, Pattern{ .root = root }, value);
+        return self.append(allocator, Pattern{ .root = root, .height = if (root.len > 0) 1 else 0 }, value);
     }
 
     // TODO: change return type to void
@@ -1479,8 +1479,9 @@ pub const Trie = struct {
             }
         }
 
+        const key_nodes = try node_list.toOwnedSlice(allocator);
         return Match{
-            .key = Pattern{ .root = try node_list.toOwnedSlice(allocator) },
+            .key = Pattern{ .root = key_nodes, .height = if (key_nodes.len > 0) 1 else 0 },
             .value = if (full_match) result else null,
             //  blk: {
             //     _, const branch = current.findNextValue(index) orelse
@@ -1510,6 +1511,7 @@ pub const Trie = struct {
         // debug("Rewrite pattern of len {}", .{pattern.root.len});
         var result = ArrayList(Node).empty;
         errdefer result.deinit(allocator);
+        var max_child: usize = 0;
 
         for (pattern.root) |node| switch (node) {
             .key => |key| try result.append(allocator, Node.ofKey(key)),
@@ -1519,6 +1521,7 @@ pub const Trie = struct {
                 if (is_var_pattern) {
                     if (term_bindings.get(variable)) |sub_pattern| {
                         debug("Var pattern found: {s}", .{variable});
+                        max_child = @max(max_child, sub_pattern.pattern.height -| 1);
                         // Deep copy each node to avoid use-after-free
                         for (sub_pattern.pattern.root) |sub_node| {
                             try result.append(allocator, try sub_node.copy(allocator));
@@ -1528,7 +1531,9 @@ pub const Trie = struct {
                     if (term_bindings.get(variable)) |bound_node| {
                         debug("Var found: {s}", .{variable});
                         // Deep copy the bound node to avoid use-after-free
-                        try result.append(allocator, try bound_node.copy(allocator));
+                        const copied = try bound_node.copy(allocator);
+                        max_child = @max(max_child, copied.height());
+                        try result.append(allocator, copied);
                     } else {
                         debug("Var not found", .{});
                         try result.append(allocator, node);
@@ -1539,6 +1544,7 @@ pub const Trie = struct {
                 const rewritten = try self.rewrite(allocator, bound, nested, term_bindings);
 
                 // debug("Rewrite recursing on {s} len {}", .{ @tagName(tag), nested.root.len });
+                max_child = @max(max_child, rewritten.height);
                 try result.append(allocator, @unionInit(
                     Node,
                     @tagName(tag),
@@ -1553,7 +1559,8 @@ pub const Trie = struct {
         //     .{ pattern.root.len, result.items.len },
         // );
 
-        return Pattern{ .root = try result.toOwnedSlice(allocator), .height = pattern.height };
+        const nodes = try result.toOwnedSlice(allocator);
+        return Pattern{ .root = nodes, .height = if (nodes.len > 0) max_child + 1 else 0 };
     }
 
     /// Follow `pattern` in `self` until no matches. Performs a partial,

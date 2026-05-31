@@ -103,6 +103,7 @@ pub fn astToPattern(
         for (nodes.items) |n| n.deinit(allocator);
         nodes.deinit(allocator);
     }
+    var max_child: usize = 0;
 
     var cursor = node.walk();
     if (cursor.gotoFirstChild()) {
@@ -110,11 +111,13 @@ pub fn astToPattern(
             const child = cursor.node();
             // Parse the child
             if (try parseTermNode(allocator, source, child)) |parsed_node| {
+                max_child = @max(max_child, parsed_node.height());
                 try nodes.append(allocator, parsed_node);
             } else if (child.isNamed()) {
                 // Operator node - recurse and append result nodes directly
                 const sub_pattern = try astToPattern(allocator, source, child);
                 defer allocator.free(sub_pattern.root);
+                max_child = @max(max_child, sub_pattern.height -| 1);
                 try nodes.appendSlice(allocator, sub_pattern.root);
             }
 
@@ -123,13 +126,7 @@ pub fn astToPattern(
     }
 
     const node_slice = try nodes.toOwnedSlice(allocator);
-    var max_height: usize = 0;
-    for (node_slice) |n| {
-        const h = getNodeHeight(n);
-        if (h > max_height) max_height = h;
-    }
-
-    return .{ .root = node_slice, .height = max_height + 1 };
+    return .{ .root = node_slice, .height = if (node_slice.len > 0) max_child + 1 else 0 };
 }
 
 fn parseOperatorNode(
@@ -173,9 +170,11 @@ fn parseOperatorNode(
         }
     }
     // Distribute LHS into the array
+    var max_child: usize = 0;
     if (lhs_node) |lhs| {
         var lhs_pattern = try astToPattern(allocator, source, lhs);
         defer lhs_pattern.deinit(allocator);
+        max_child = lhs_pattern.height -| 1;
         for (lhs_pattern.root) |lhs_child| {
             try nodes.append(allocator, try lhs_child.copy(allocator));
         }
@@ -192,16 +191,12 @@ fn parseOperatorNode(
     };
     // try nodes.append(allocator, Node{ .pattern = lhs_pattern });
     // debug("wrapper node type {s}", .{@tagName(wrapper_node)});
+    max_child = @max(max_child, wrapper_node.height());
     try nodes.append(allocator, wrapper_node);
 
     const node_slice = try nodes.toOwnedSlice(allocator);
-    var max_height: usize = 0;
-    for (node_slice) |n| {
-        const h = getNodeHeight(n);
-        if (h > max_height) max_height = h;
-    }
-    // debug("Operator result: {} nodes, height {}", .{ node_slice.len, max_height });
-    return .{ .root = node_slice, .height = max_height + 1 };
+    // debug("Operator result: {} nodes, height {}", .{ node_slice.len, max_child });
+    return .{ .root = node_slice, .height = max_child + 1 };
 }
 
 fn parseTermNode(
@@ -243,14 +238,6 @@ fn parseTermNode(
     };
 }
 
-fn getNodeHeight(node: Node) usize {
-    return switch (node) {
-        .pattern, .infix, .match, .arrow, .list => |p| p.height,
-        .trie => 1, // TODO store height in Tries and retrieve it here
-        else => 1,
-    };
-}
-
 fn convertRHS(
     allocator: Allocator,
     node_kind: []const u8,
@@ -276,6 +263,8 @@ fn convertRHS(
         return Node{ .arrow = rhs_pattern.* };
     } else if (mem.eql(u8, node_kind, "infix")) {
         // For infix, we copy children and free the original pattern
+        // Key has height 0, so max_child = rhs.height - 1
+        const max_child = rhs_pattern.height -| 1;
         defer rhs_pattern.deinit(allocator);
         var infix_nodes = std.ArrayList(Node).empty;
         errdefer {
@@ -289,12 +278,7 @@ fn convertRHS(
             try infix_nodes.append(allocator, try rhs_child.copy(allocator));
         }
         const infix_slice = try infix_nodes.toOwnedSlice(allocator);
-        var max_h: usize = 0;
-        for (infix_slice) |n| {
-            const h = getNodeHeight(n);
-            if (h > max_h) max_h = h;
-        }
-        return Node{ .infix = .{ .root = infix_slice, .height = max_h + 1 } };
+        return Node{ .infix = .{ .root = infix_slice, .height = if (infix_slice.len > 0) max_child + 1 else 0 } };
     } else {
         defer rhs_pattern.* = .{};
         return Node{ .pattern = .{ .root = &[_]Node{}, .height = 0 } };
