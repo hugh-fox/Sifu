@@ -408,19 +408,9 @@ const BranchNode = struct {
     // efficient lookups by index. There is always a next branch for keys/vars
     // and never for values.
     next_index: usize,
-    // Whether this is a key or variable branch, needed for next() lookup
-    is_key: bool,
 
     pub fn this(branch_node: BranchNode) *Trie {
         return branch_node.entry.value_ptr;
-    }
-
-    pub fn next(branch_node: BranchNode, index: usize) ?IndexBranch {
-        const trie = branch_node.entry.value_ptr.*;
-        return if (branch_node.is_key)
-            Trie.findNextInBranches(trie.key_branches.items, index)
-        else
-            Trie.findNextInBranches(trie.var_branches.items, index);
     }
 };
 
@@ -461,10 +451,14 @@ const Branch = union(enum) {
         }
     }
 
-    pub fn next(self: Branch) ?Branch {
-        const branch_node = self.node() orelse
-            return null;
-        return branch_node; //.next();
+    pub fn next(self: Branch, index: usize) ?IndexBranch {
+        const branch_node = self.node() orelse return null;
+        const trie = branch_node.entry.value_ptr.*;
+        return switch (self) {
+            .key => Trie.findNextInBranches(trie.key_branches.items, index),
+            .variable => Trie.findNextInBranches(trie.var_branches.items, index),
+            .value => null,
+        };
     }
 };
 
@@ -692,7 +686,6 @@ pub const Trie = struct {
                     .branch = @unionInit(Branch, @tagName(tag), .{
                         .entry = entry,
                         .next_index = 0, // Not used with new structure
-                        .is_key = tag == .key,
                     }),
                     .trie = child_trie,
                 };
@@ -781,7 +774,6 @@ pub const Trie = struct {
                 .key = .{
                     .entry = entry,
                     .next_index = next.key_branches.items.len,
-                    .is_key = true,
                 },
             } },
         );
@@ -803,7 +795,6 @@ pub const Trie = struct {
                 .variable = .{
                     .entry = entry,
                     .next_index = next.var_branches.items.len,
-                    .is_key = false,
                 },
             } },
         );
