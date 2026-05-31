@@ -3,22 +3,14 @@ const Allocator = std.mem.Allocator;
 const ArrayList = std.ArrayList;
 const mem = std.mem;
 const math = std.math;
-const compare = math.compare;
-const util = @import("util.zig");
 const assert = std.debug.assert;
 const panic = std.debug.panic;
 const Order = math.Order;
-const Wyhash = std.hash.Wyhash;
-const array_hash_map = std.array_hash_map;
-const AutoContext = std.array_hash_map.AutoContext;
-const StringContext = std.array_hash_map.StringContext;
 const ArenaAllocator = std.heap.ArenaAllocator;
 const debug = std.log.debug;
-const verbose_errors = @import("build_options").verbose_errors;
 const debug_mode = @import("builtin").mode == .Debug;
 const sort = std.sort;
 const Io = std.Io;
-const Reader = Io.Reader;
 const Writer = Io.Writer;
 
 pub const HashMap = std.StringHashMapUnmanaged(Trie);
@@ -60,11 +52,7 @@ pub const Node = union(enum) {
     /// is elided.
     match: Pattern,
     /// A postfix encoded arrow expression denoting a rewrite, i.e. `A B
-    /// C -> 123`. This includes "long" versions of ops, which have same
-    /// semantics, but only play a in part parsing/printing. Parsing
-    /// shouldn't concern this abstract data structure, and there is
-    /// enough information preserved such that during printing, the
-    /// correct precedence operator can be recreated.
+    /// C -> 123`.
     arrow: Pattern,
     /// A single element in comma separated list, with the comma elided.
     /// Lists are operators that are recognized as separators for
@@ -108,30 +96,6 @@ pub const Node = union(enum) {
             .key, .variable => {},
             .trie => |*trie| @constCast(trie).deinit(allocator),
             inline else => |*pattern| @constCast(pattern).deinit(allocator),
-        }
-    }
-
-    pub const hash = util.hashFromHasherUpdate(Node);
-
-    pub fn hasherUpdate(self: Node, hasher: anytype) void {
-        hasher.update(&mem.toBytes(@intFromEnum(self)));
-        switch (self) {
-            // Variables are always the same hash in patterns (in
-            // varmaps they need unique hashes)
-            // TODO: differentiate between repeated and unique vars
-            .key, .variable => |slice| hasher.update(
-                &mem.toBytes(slice),
-            ),
-            .pattern => |pattern| pattern.hasherUpdate(hasher),
-            inline else => |pattern, tag| {
-                switch (tag) {
-                    .arrow, .long_arrow => hasher.update("->"),
-                    .match, .long_match => hasher.update(":"),
-                    .list => hasher.update(","),
-                    else => {},
-                }
-                pattern.hasherUpdate(hasher);
-            },
         }
     }
 
@@ -197,24 +161,6 @@ pub const Node = union(enum) {
         };
     }
 
-    /// Compares by value, not by len, pos, or pointers.
-    pub fn order(self: Node, other: Node) order {
-        const ord = math.order(@intFromEnum(self), @intFromEnum(other));
-        return if (ord == .eq)
-            switch (self) {
-                .pattern => |pattern| util.sliceOrder(
-                    pattern,
-                    other.pattern,
-                    Node.order,
-                ),
-                .variable => |v| mem.order(u8, v, other.variable),
-                .key => |key| key.order(other.key),
-                .pattern => |pattern| pattern.order(other.pattern),
-            }
-        else
-            ord;
-    }
-
     pub fn formatSExp(
         self: Node,
         allocator: Allocator,
@@ -222,9 +168,7 @@ pub const Node = union(enum) {
         var buff: std.ArrayList(u8) = try .initCapacity(allocator, 1024);
         defer buff.deinit(allocator);
         var writer = Io.Writer.fromArrayList(&buff);
-        // TODO: figure out why this is empty string
         try self.writeSExp(&writer, null);
-        // std.log.debug("Formatted s-exp: {}", .{buff.items.len});
         return buff.toOwnedSlice(allocator);
     }
 
@@ -233,12 +177,6 @@ pub const Node = union(enum) {
         writer: *Writer,
         optional_indent: ?usize,
     ) !void {
-        // std.log.debug("WriteSExp {s}", .{
-        //     switch (self) {
-        //         .key, .variable, .var_pattern => |ident| ident,
-        //         else => |tag| @tagName(tag),
-        //     },
-        // });
         for (0..optional_indent orelse 0) |_|
             try writer.writeByte(' ');
         switch (self.*) {
@@ -249,35 +187,19 @@ pub const Node = union(enum) {
                 optional_indent,
             ),
             .pattern => |pattern| {
-                // std.log.debug("writing pattern len {}: (", .{pattern.root.len});
                 try writer.writeByte('(');
-                // Ignore top level parens
                 try pattern.writeIndent(writer, optional_indent);
-                // std.log.debug(")", .{});
                 try writer.writeByte(')');
             },
+            // Don't write an s-exp as its redundant for ops
             inline else => |pattern, tag| {
-                // if (pattern.root.len > 0)
-                //     for (pattern.root[0 .. pattern.root.len - 1]) |node| {
-                //         try node.writeSExp(writer, optional_indent);
-                //     };
                 switch (tag) {
                     .arrow => try writer.writeAll("-> "),
                     .match => try writer.writeAll(": "),
-                    // TODO: these should be determined by reverse engineering
-                    // the required precedence based on parse tree. In other
-                    // words, this function should to the exact opposite of
-                    // parsing, and reconstruct precedence.
-                    // .long_arrow => try writer.writeAll("--> "),
-                    // .long_match => try writer.writeAll(":: "),
                     .list => try writer.writeAll(", "),
                     else => {},
                 }
                 try pattern.writeIndent(writer, optional_indent);
-                // Don't write an s-exp as its redundant for ops
-                // if (pattern.root.len > 0)
-                //     try pattern.root[pattern.root.len - 1]
-                //         .writeSExp(writer, optional_indent);
             },
         }
     }
@@ -306,8 +228,6 @@ pub const Pattern = struct {
         const slice = self.root;
         if (slice.len == 0)
             return;
-        // debug("tag: {s}", .{@tagName(pattern[0])});
-        // std.log.debug("Write sexp on pattern len {}", .{self.root.len});
         try slice[0].writeSExp(writer, optional_indent);
         if (slice.len == 1) {
             return;
@@ -320,7 +240,6 @@ pub const Pattern = struct {
         // Don't add space before list nodes or comma keys
         if (slice[slice.len - 1] != .list and !slice[slice.len - 1].isCommaKey())
             try writer.writeByte(' ');
-        // debug("tag: {s}", .{@tagName(pattern[pattern.len - 1])});
         try slice[slice.len - 1]
             .writeSExp(writer, optional_indent);
     }
@@ -358,9 +277,8 @@ pub const Pattern = struct {
         return pattern_copy_ptr;
     }
 
-    // Clears all memory and resets this Pattern's root to an empty pattern.
+    /// Clears all memory and resets this Pattern's root to an empty pattern.
     pub fn deinit(pattern: *Pattern, allocator: Allocator) void {
-        // debug("Deinit {*}", .{pattern});
         for (pattern.root) |*node| {
             @constCast(node).deinit(allocator);
         }
@@ -443,14 +361,8 @@ const Branch = union(enum) {
 
     pub fn this(self: Branch) ?*Trie {
         switch (self) {
-            .value => |value| {
-                debug("Branch was a value, no next trie found", .{});
-                _ = value;
-                return null;
-            },
-            inline else => |branch_node| {
-                return branch_node.this();
-            },
+            .value => return null,
+            inline else => |branch_node| return branch_node.this(),
         }
     }
 
@@ -582,8 +494,6 @@ pub const Trie = struct {
                 try entry.value_ptr.*.copy(allocator),
             );
 
-        // result = try self.copy(allocator);
-        // @panic("todo: copy all fields");
         return result;
     }
 
@@ -623,35 +533,6 @@ pub const Trie = struct {
         self.var_branches.deinit(allocator);
         self.value_branches.deinit(allocator);
         self.* = .{};
-    }
-
-    pub fn hash(self: Self) u32 {
-        var hasher = Wyhash.init(0);
-        self.hasherUpdate(&hasher);
-        return @truncate(hasher.final());
-    }
-
-    pub fn hasherUpdate(self: Self, hasher: anytype) void {
-        var map_iter = self.map.iterator();
-        while (map_iter.next()) |entry| {
-            entry.key_ptr.*.hasherUpdate(hasher);
-            entry.value_ptr.*.hasherUpdate(hasher);
-        }
-        // No need to hash indices, only vars and values
-        var vars_iter = self.vars.iterator();
-        while (vars_iter.next()) |*entry| {
-            hasher.update(entry.value_ptr.*);
-        }
-        var values_iter = self.values.iterator();
-        // TODO: recurse
-        while (values_iter.next()) |*entry| {
-            entry.value_ptr.hasherUpdate(hasher);
-        }
-    }
-
-    fn branchEql(comptime E: type, b1: E, b2: E) bool {
-        return b1.key_ptr.eql(b2.key_ptr.*) and
-            b1.value_ptr.eql(b2.value_ptr.*);
     }
 
     /// Tries are equal if they have the same literals, sub-arrays and
@@ -925,10 +806,6 @@ pub const Trie = struct {
         pattern: Pattern,
     ) !*Self {
         var current = trie;
-        // debug(
-        //     "Ensure Path for {*} at index {} for pattern len {}",
-        //     .{ trie, index, pattern.root.len },
-        // );
         for (pattern.root) |node| {
             current = try current.ensurePathTerm(allocator, index, node);
         }
@@ -1140,14 +1017,9 @@ pub const Trie = struct {
         term_bindings: *VarBindings,
         node: Node,
     ) Allocator.Error!?IndexBranchTrie {
-        // debug("Branching `", .{});
-        // node.debug("{s}");
-        // debug("` from bound {}", .{bound});
-
         // Check for variable branches that match anything
         if (self.findNextVar(bound)) |var_candidate| {
             const var_bound, const var_branch = var_candidate;
-            // debug("Found var branch at index: {}", .{var_bound});
 
             const branch_node = switch (var_branch) {
                 .variable => |variable| variable,
@@ -1397,11 +1269,6 @@ pub const Trie = struct {
         }
 
         while (pattern_index < pattern.root.len) : (pattern_index += 1) {
-            // debug("pattern root len: {}", .{pattern.root.len});
-
-            // debug("pattern index: {}", .{pattern_index});
-            // debug("pattern.root[0] = {s}", .{@tagName(pattern.root[0])});
-            // Start with initial candidates for the first term
             const index_branch_trie = try current.matchTerm(
                 allocator,
                 index,
@@ -1484,7 +1351,6 @@ pub const Trie = struct {
                     current = variable.entry.value_ptr;
                 },
                 .value => |value| {
-                    // current = index_branch.next();
                     result = value;
                     debug(
                         "Found value branch at index {} address {*}",
@@ -1494,13 +1360,7 @@ pub const Trie = struct {
                     break;
                 },
             }
-            // debug("Next trie term at {*}", .{index_branch_trie.trie});
             current = index_branch_trie.trie;
-            // orelse {
-            //     debug("No next trie found at index {}", .{index});
-            //     pattern_index += 1;
-            //     break;
-            // };
         }
         const full_match = pattern_index == pattern.root.len;
         debug(
@@ -1510,8 +1370,6 @@ pub const Trie = struct {
         if (!full_match)
             debug("No full match found", .{})
         else {
-            // debug("Full match found", .{});
-
             if (current.findNextValue(index)) |value_candidate| {
                 debug("Value found", .{});
                 _, const value_branch = value_candidate;
@@ -1523,11 +1381,6 @@ pub const Trie = struct {
         return Match{
             .key = Pattern{ .root = key_nodes, .height = if (key_nodes.len > 0) 1 else 0 },
             .value = if (full_match) result else null,
-            //  blk: {
-            //     _, const branch = current.findNextValue(index) orelse
-            //         break :blk null;
-            //     break :blk branch.value;
-            // },
             .node_ptr = current,
             .index = index,
             .len = pattern_index,
@@ -1747,81 +1600,6 @@ pub const Trie = struct {
         debug("Evaluated {} nodes at index {}\n", .{ eval.len, eval.index });
         return eval;
     }
-
-    /// Given a trie and a query to match against it, this function
-    /// continously matches until no matches are found, or a match repeats.
-    /// Match result cases:
-    /// - a trie of lower ordinal: continue
-    /// - the same trie: continue unless tries are equivalent
-    /// - a trie of higher ordinal: break
-    // TODO: fix ops as keys not being matched
-    // TODO: refactor with evaluateStep
-    // pub fn evaluate(
-    //     self: *Self,
-    //     allocator: Allocator,
-    //     pattern: Pattern,
-    // ) Allocator.Error!Pattern {
-    //     var index: usize = 0;
-    //     var buffer = ArrayList(Node).init(allocator);
-    //     while (index < pattern.root.len) {
-    //         const eval = try self.evaluateSlice(allocator, pattern, &result);
-    //         if (result.items.len == 0) {
-    //             debug("No match, skipping index {}.", .{index});
-    //             try result.append(
-    //                 // Evaluate nested pattern that failed to match
-    //                 // TODO: replace recursion with a continue
-    //                 // TODO needs another nested result list
-    //                 switch (result.items[index]) {
-    //                     inline .pattern, .match, .arrow, .list => |slice, tag|
-    //                     // Recursively eval nested list but preserve node type
-    //                     @unionInit(
-    //                         Node,
-    //                         @tagName(tag),
-    //                         try self.evaluate(allocator, slice),
-    //                     ),
-    //                     else => try pattern[index].copy(allocator),
-    //                 },
-    //             );
-    //             index += 1;
-    //             continue;
-    //         }
-    //         debug("vars in map: {}", .{eval.bindings.entries.len});
-    //         const slice = .{};
-    //         if (eval.value) |next| {
-    //             // Prevent infinite recursion at this index. Recursion
-    //             // through other indices will be terminated by match index
-    //             // shrinking.
-    //             if (slice.len == next.pattern.len)
-    //                 for (slice, next.pattern) |trie, next_trie| {
-    //                     // check if the same trie's shape could be matched
-    //                     // TODO: use a trie match function here instead of eql
-    //                     if (!trie.asEmpty().eql(next_trie))
-    //                         break;
-    //                 } else break; // Don't evaluate the same trie
-    //             debug("Eval matched {s}: ", .{@tagName(next.*)});
-    //             next.write(streams.err) catch unreachable;
-    //             streams.err.writeByte('') catch unreachable;
-    //             const rewritten =
-    //                 try rewrite(next.pattern, eval.bindings, buffer);
-    //             defer Node.ofPattern(rewritten).deinit(allocator);
-    //             const sub_eval = try self.evaluate(allocator, rewritten);
-    //             defer allocator.free(sub_eval);
-    //             try result.appendSlice(allocator, sub_eval);
-    //         } else {
-    //             try result.appendSlice(allocator, slice);
-    //             debug("Match, but no value", .{});
-    //         }
-    //         index += eval.len;
-    //     }
-    //     debug("Eval: ", .{});
-    //     for (result.items) |trie| {
-    //         debug("{s} ", .{@tagName(trie)});
-    //         trie.writeSExp(streams.err, 0) catch unreachable;
-    //         streams.err.writeByte(' ') catch unreachable;
-    //     }
-    //     streams.err.writeByte('') catch unreachable;
-    //     return result.toOwnedSlice();
-    // }
 
     pub fn size(self: Self) usize {
         return self.key_branches.items.len +
