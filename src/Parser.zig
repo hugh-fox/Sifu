@@ -287,36 +287,34 @@ pub fn parsePattern(self: *Self, allocator: Allocator) Oom!Pattern {
     return self.parsePrec1(allocator);
 }
 
-/// Prec 1: semicolon (left-associative)
-///   lhs higher_prec (";" higher_prec)*
+/// Prec 1: semicolon (right-associative to match Tree-sitter grammar)
 fn parsePrec1(self: *Self, allocator: Allocator) Oom!Pattern {
     // Handle leading semicolon (empty LHS)
     if (self.peek() == .semicolon) {
-        var nodes = std.ArrayList(Node).empty;
         _ = self.eat();
-        const rhs = try self.parseOptionalPrec2(allocator);
-        try nodes.append(allocator, Node{ .list = rhs });
-        while (self.peek() == .semicolon) {
-            _ = self.eat();
-            const next_rhs = try self.parseOptionalPrec2(allocator);
-            try nodes.append(allocator, Node{ .list = next_rhs });
-        }
-        return makePattern(try nodes.toOwnedSlice(allocator));
+        const rhs = try self.parseOptionalPrec1(allocator);
+        var nodes = try allocator.alloc(Node, 1);
+        nodes[0] = Node{ .list = rhs };
+        return makePattern(nodes);
     }
 
     const lhs = try self.parsePrec2(allocator);
     if (self.peek() != .semicolon) return lhs;
 
+    // Consume semicolon and recursively parse rhs (right-associative)
+    _ = self.eat();
+    const rhs = try self.parseOptionalPrec1(allocator);
+
     var nodes = std.ArrayList(Node).empty;
     try nodes.appendSlice(allocator, lhs.root);
     allocator.free(lhs.root);
-
-    while (self.peek() == .semicolon) {
-        _ = self.eat();
-        const rhs = try self.parseOptionalPrec2(allocator);
-        try nodes.append(allocator, Node{ .list = rhs });
-    }
+    try nodes.append(allocator, Node{ .list = rhs });
     return makePattern(try nodes.toOwnedSlice(allocator));
+}
+
+fn parseOptionalPrec1(self: *Self, allocator: Allocator) Oom!Pattern {
+    if (!self.canStartExpr()) return .{};
+    return self.parsePrec1(allocator);
 }
 
 fn parseOptionalPrec2(self: *Self, allocator: Allocator) Oom!Pattern {
@@ -348,34 +346,34 @@ fn parsePrec2(self: *Self, allocator: Allocator) Oom!Pattern {
     return makePattern(try nodes.toOwnedSlice(allocator));
 }
 
-/// Prec 3: comma (left-associative)
+/// Prec 3: comma (right-associative to match Tree-sitter grammar)
 fn parsePrec3(self: *Self, allocator: Allocator) Oom!Pattern {
     if (self.peek() == .comma) {
-        var nodes = std.ArrayList(Node).empty;
+        // Leading comma: empty lhs
         _ = self.eat();
-        const rhs = try self.parseOptionalPrec4(allocator);
-        try nodes.append(allocator, Node{ .list = rhs });
-        while (self.peek() == .comma) {
-            _ = self.eat();
-            const next_rhs = try self.parseOptionalPrec4(allocator);
-            try nodes.append(allocator, Node{ .list = next_rhs });
-        }
-        return makePattern(try nodes.toOwnedSlice(allocator));
+        const rhs = try self.parseOptionalPrec3(allocator);
+        var nodes = try allocator.alloc(Node, 1);
+        nodes[0] = Node{ .list = rhs };
+        return makePattern(nodes);
     }
 
     const lhs = try self.parsePrec4(allocator);
     if (self.peek() != .comma) return lhs;
 
+    // Consume comma and recursively parse rhs (right-associative)
+    _ = self.eat();
+    const rhs = try self.parseOptionalPrec3(allocator);
+
     var nodes = std.ArrayList(Node).empty;
     try nodes.appendSlice(allocator, lhs.root);
     allocator.free(lhs.root);
-
-    while (self.peek() == .comma) {
-        _ = self.eat();
-        const rhs = try self.parseOptionalPrec4(allocator);
-        try nodes.append(allocator, Node{ .list = rhs });
-    }
+    try nodes.append(allocator, Node{ .list = rhs });
     return makePattern(try nodes.toOwnedSlice(allocator));
+}
+
+fn parseOptionalPrec3(self: *Self, allocator: Allocator) Oom!Pattern {
+    if (!self.canStartExpr()) return .{};
+    return self.parsePrec3(allocator);
 }
 
 fn parseOptionalPrec4(self: *Self, allocator: Allocator) Oom!Pattern {
@@ -531,41 +529,54 @@ fn patternToTrie(allocator: Allocator, pattern: Pattern) Oom!Trie {
 
     if (pattern.root.len == 0) return result;
 
-    // Process the pattern which may contain semicolon-separated entries (as .list nodes)
-    // Check if this is a multi-entry pattern (has .list nodes indicating semicolons)
-    var has_lists = false;
-    for (pattern.root) |node| {
-        if (node == .list) {
-            has_lists = true;
-            break;
-        }
-    }
+    // With right-associative parsing, multiple entries are nested:
+    // "A -> 1; B -> 2" = [A, arrow([1]), list([B, arrow([2])])]
+    // We need to recursively process the .list nodes that represent semicolons.
+    //
+    // Semicolons vs commas:
+    // - Semicolons separate trie entries (have arrows in their contents)
+    // - Commas are part of pattern structure (no arrows, or arrows nested deeper)
+    //
+    // Heuristic: A .list at the end of a pattern is a semicolon if it contains
+    // an arrow at its top level.
 
-    if (!has_lists) {
-        // Single entry - the whole pattern is one key-value pair
-        try appendEntry(&result, allocator, pattern);
-    } else {
-        // Multiple entries - first collect all nodes before the first .list as the first entry
-        var first_entry_end: usize = 0;
-        for (pattern.root, 0..) |node, i| {
-            if (node == .list) {
-                first_entry_end = i;
+    try appendEntryRecursive(&result, allocator, pattern);
+    return result;
+}
+
+/// Recursively extract entries from a right-associative pattern.
+/// If the pattern ends with a .list containing an arrow, that's a semicolon
+/// separator - process the prefix as one entry and recurse on the list contents.
+fn appendEntryRecursive(result: *Trie, allocator: Allocator, pattern: Pattern) Oom!void {
+    if (pattern.root.len == 0) return;
+
+    // Check if the last element is a .list that might be a semicolon
+    const last_idx = pattern.root.len - 1;
+    const last_node = pattern.root[last_idx];
+
+    if (last_node == .list) {
+        // Check if this list contains an arrow at its top level (semicolon separator)
+        var is_semicolon = false;
+        for (last_node.list.root) |inner| {
+            if (inner == .arrow) {
+                is_semicolon = true;
                 break;
             }
         }
-        // Append first entry
-        if (first_entry_end > 0) {
-            try appendEntry(&result, allocator, .{ .root = pattern.root[0..first_entry_end] });
-        }
-        // Append remaining entries from .list nodes
-        for (pattern.root[first_entry_end..]) |node| {
-            if (node == .list) {
-                try appendEntry(&result, allocator, node.list);
+
+        if (is_semicolon) {
+            // This is a semicolon: prefix is one entry, .list contents are more entries
+            if (last_idx > 0) {
+                try appendEntry(result, allocator, .{ .root = pattern.root[0..last_idx] });
             }
+            // Recursively process the list contents
+            try appendEntryRecursive(result, allocator, last_node.list);
+            return;
         }
     }
 
-    return result;
+    // No semicolon found - treat entire pattern as a single entry
+    try appendEntry(result, allocator, pattern);
 }
 
 /// Appends a single entry to the trie. The entry_pattern may contain an arrow
@@ -606,7 +617,7 @@ fn nodeHeight(node: Node) usize {
     return switch (node) {
         .pattern, .infix, .match, .arrow, .list => |p| p.height,
         .trie => 1,
-        else => 0,
+        else => 1,
     };
 }
 
@@ -758,22 +769,24 @@ test "comma: A , B , C" {
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
     const p = try parse(arena.allocator(), "A , B , C");
-    // Left-assoc: [A, list([B]), list([C])]
-    try expectNodes(p, &.{ .key, .list, .list });
+    // Right-assoc: [A, list([B, list([C])])]
+    try expectNodes(p, &.{ .key, .list });
     try testing.expectEqualStrings("A", p.root[0].key);
     try testing.expectEqualStrings("B", p.root[1].list.root[0].key);
-    try testing.expectEqualStrings("C", p.root[2].list.root[0].key);
+    try expectNodes(p.root[1].list, &.{ .key, .list });
+    try testing.expectEqualStrings("C", p.root[1].list.root[1].list.root[0].key);
 }
 
 test "semicolon: A ; B ; C" {
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
     const p = try parse(arena.allocator(), "A ; B ; C");
-    // Left-assoc: [A, list([B]), list([C])]
-    try expectNodes(p, &.{ .key, .list, .list });
+    // Right-assoc: [A, list([B, list([C])])]
+    try expectNodes(p, &.{ .key, .list });
     try testing.expectEqualStrings("A", p.root[0].key);
     try testing.expectEqualStrings("B", p.root[1].list.root[0].key);
-    try testing.expectEqualStrings("C", p.root[2].list.root[0].key);
+    try expectNodes(p.root[1].list, &.{ .key, .list });
+    try testing.expectEqualStrings("C", p.root[1].list.root[1].list.root[0].key);
 }
 
 test "nested pattern: (A B)" {
@@ -918,4 +931,18 @@ test "trie with 3 entries: { A -> 1; B -> 2; C -> 3 }" {
     try testing.expect(t.map.contains("A"));
     try testing.expect(t.map.contains("B"));
     try testing.expect(t.map.contains("C"));
+}
+
+test "parseTrie: comma with varpattern - A, *x --> *x" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    var trie = try parseTrie(arena.allocator(), "A, *x --> *x");
+    // Trie structure: A -> , -> *x (var) -> value(*x)
+    try testing.expectEqual(@as(usize, 1), trie.size());
+    try testing.expect(trie.map.contains("A"));
+    const a_trie = trie.map.get("A").?;
+    try testing.expect(a_trie.map.contains(","));
+    const comma_trie = a_trie.map.get(",").?;
+    // After comma, there should be a variable *x
+    try testing.expect(comma_trie.var_branches.items.len > 0);
 }

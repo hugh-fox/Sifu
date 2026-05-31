@@ -19,16 +19,15 @@ const assert = std.debug.assert;
 const panic = std.debug.panic;
 const verbose_errors = @import("build_options").verbose_errors;
 const debug_mode = @import("builtin").mode == .Debug;
-const testing = @import("testing");
-const Ast = parser.Tree;
-const AstNode = parser.Node;
-const AstCursor = parser.TreeCursor;
 const Trie = @import("sifu/trie.zig").Trie;
 const Pattern = @import("sifu/trie.zig").Pattern;
 const Node = @import("sifu/trie.zig").Node;
 const debug = std.log.debug;
 
 pub const parser = @import("tree_sitter_sifu");
+const Ast = parser.Tree;
+const AstNode = parser.Node;
+const AstCursor = parser.TreeCursor;
 
 pub fn astNodeToTrie(
     allocator: Allocator,
@@ -182,13 +181,13 @@ fn parseOperatorNode(
         }
     }
     // Create RHS wrapper node
-    const rhs_pattern = if (rhs_node) |rhs|
+    var rhs_pattern = if (rhs_node) |rhs|
         try astToPattern(allocator, source, rhs)
     else
         Pattern{ .root = &[_]Node{}, .height = 0 };
 
     // Determine the wrapper type based on operator
-    const wrapper_node = convertRHS(allocator, node_kind, op_symbol, rhs_pattern) catch |e| {
+    const wrapper_node = convertRHS(allocator, node_kind, op_symbol, &rhs_pattern) catch |e| {
         panic("Error converting RHS for operator '{s}': {}", .{ node_kind, e });
     };
     // try nodes.append(allocator, Node{ .pattern = lhs_pattern });
@@ -248,7 +247,7 @@ fn getNodeHeight(node: Node) usize {
     return switch (node) {
         .pattern, .infix, .match, .arrow, .list => |p| p.height,
         .trie => 1, // TODO store height in Tries and retrieve it here
-        else => 0,
+        else => 1,
     };
 }
 
@@ -256,20 +255,28 @@ fn convertRHS(
     allocator: Allocator,
     node_kind: []const u8,
     op_symbol: ?[]const u8,
-    rhs_pattern: Pattern,
+    rhs_pattern: *Pattern,
 ) !Node {
-    return if (mem.eql(u8, node_kind, "terms"))
-        Node{ .pattern = rhs_pattern }
-    else if (mem.eql(u8, node_kind, "semicolon"))
-        Node{ .list = rhs_pattern } // TODO: add node type of semicolon list
-    else if (mem.eql(u8, node_kind, "comma"))
-        Node{ .list = rhs_pattern }
-    else if (mem.eql(u8, node_kind, "long_match") or mem.eql(u8, node_kind, "match"))
-        Node{ .match = rhs_pattern }
-    else if (mem.eql(u8, node_kind, "long_arrow") or mem.eql(u8, node_kind, "arrow"))
-        Node{ .arrow = rhs_pattern }
-    else if (mem.eql(u8, node_kind, "infix")) blk: {
-        // For infix, include the operator symbol in the pattern
+    // For most operators, we consume the pattern by moving it into the Node.
+    // For infix, we copy the contents and must free the original.
+    if (mem.eql(u8, node_kind, "terms")) {
+        defer rhs_pattern.* = .{};
+        return Node{ .pattern = rhs_pattern.* };
+    } else if (mem.eql(u8, node_kind, "semicolon")) {
+        defer rhs_pattern.* = .{};
+        return Node{ .list = rhs_pattern.* }; // TODO: add node type of semicolon list
+    } else if (mem.eql(u8, node_kind, "comma")) {
+        defer rhs_pattern.* = .{};
+        return Node{ .list = rhs_pattern.* };
+    } else if (mem.eql(u8, node_kind, "long_match") or mem.eql(u8, node_kind, "match")) {
+        defer rhs_pattern.* = .{};
+        return Node{ .match = rhs_pattern.* };
+    } else if (mem.eql(u8, node_kind, "long_arrow") or mem.eql(u8, node_kind, "arrow")) {
+        defer rhs_pattern.* = .{};
+        return Node{ .arrow = rhs_pattern.* };
+    } else if (mem.eql(u8, node_kind, "infix")) {
+        // For infix, we copy children and free the original pattern
+        defer rhs_pattern.deinit(allocator);
         var infix_nodes = std.ArrayList(Node).empty;
         errdefer {
             for (infix_nodes.items) |n| n.deinit(allocator);
@@ -287,8 +294,11 @@ fn convertRHS(
             const h = getNodeHeight(n);
             if (h > max_h) max_h = h;
         }
-        break :blk Node{ .infix = .{ .root = infix_slice, .height = max_h + 1 } };
-    } else Node{ .pattern = .{ .root = &[_]Node{}, .height = 0 } };
+        return Node{ .infix = .{ .root = infix_slice, .height = max_h + 1 } };
+    } else {
+        defer rhs_pattern.* = .{};
+        return Node{ .pattern = .{ .root = &[_]Node{}, .height = 0 } };
+    }
 }
 
 fn astToTrie(

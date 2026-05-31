@@ -160,6 +160,7 @@ pub fn build(b: *std.Build) void {
             .optimize = optimize,
         }),
     });
+    integration_tests.root_module.addImport("tree_sitter_sifu", tree_sitter_sifu.module("tree_sitter_sifu"));
 
     // Collect test files at build time
     var parsable_list: std.ArrayListUnmanaged([]const u8) = .empty;
@@ -178,11 +179,11 @@ pub fn build(b: *std.Build) void {
     defer behavior_dir.close(b.graph.io);
     var behavior_iter = behavior_dir.iterate();
     while (behavior_iter.next(b.graph.io) catch null) |entry| {
-        if (entry.kind == .directory) {
-            behavior_list.append(b.allocator, b.dupe(entry.name)) catch @panic("OOM");
+        if (std.mem.endsWith(u8, entry.name, ".sifu")) {
+            behavior_list.append(b.allocator, b.dupe(entry.name[0 .. entry.name.len - 5])) catch @panic("OOM");
         }
     }
-    build_options.addOption([]const []const u8, "behavior_folders", behavior_list.items);
+    build_options.addOption([]const []const u8, "behavior_files", behavior_list.items);
 
     integration_tests.root_module.addOptions("build_options", build_options);
     const run_integration_tests = b.addRunArtifact(integration_tests);

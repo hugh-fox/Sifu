@@ -1,0 +1,27 @@
+TwoVars (x, y) -> (y, x)
+VarPat (*xs) -> *xs *xs
+VarAndVarPat (x, *xs) -> (*xs, x)
+
+#===
+
+TwoVars (1, 2)
+
+#---
+
+(2, 1)
+
+#===
+
+VarAndVarPat (1, 2 3)
+
+#---
+
+(2 3, 1)
+
+#===
+
+VarPat (1 2 3)
+
+#---
+
+1 2 3 1 2 3

@@ -102,7 +102,17 @@ fn expectEval(allocator: std.mem.Allocator, trie: Trie, query_str: []const u8, e
         defer @constCast(val).deinit(allocator);
         var expected = try Parser.parse(allocator, expected_str);
         defer expected.deinit(allocator);
-        try testing.expect(val.eql(expected));
+        testing.expect(val.eql(expected)) catch |e| {
+            // Print readable output if not equal
+            const result_str = try val.toString(testing.allocator);
+            defer testing.allocator.free(result_str);
+            try testing.expectEqualStrings(expected_str, result_str);
+            std.debug.print(
+                "Pattern.eql returned false on equal strings: {s}, heights: {} vs {}\n",
+                .{ result_str, val.height, expected.height },
+            );
+            return e;
+        };
     } else {
         return error.NoEvalResult;
     }
@@ -142,4 +152,147 @@ test "evaluateComplete: roundtrip" {
     var trie = try Parser.parseTrie(testing.allocator, "A -> B; B -> A");
     defer trie.deinit(testing.allocator);
     try expectEval(testing.allocator, trie, "A", "A");
+}
+
+test "evaluateComplete: VarPattern in nested list" {
+    var trie = try Parser.parseTrie(testing.allocator, "A, *x --> *x");
+    defer trie.deinit(testing.allocator);
+
+    try expectEval(testing.allocator, trie, "A,", "");
+    try expectEval(testing.allocator, trie, "A, B", "B");
+    try expectEval(testing.allocator, trie, "A, B, C", "B, C");
+    try expectEval(testing.allocator, trie, "A, B, C,", "B, C,");
+}
+
+test "evaluateComplete: nested pattern" {
+    var trie = try Parser.parseTrie(testing.allocator, "x, y --> y, x");
+    defer trie.deinit(testing.allocator);
+
+    // Verify trie structure: x -> , -> y -> value
+    try testing.expect(trie.var_branches.items.len == 1);
+    const x_trie = trie.map.get("x") orelse return error.MissingX;
+    try testing.expect(x_trie.map.contains(","));
+    const comma_trie = x_trie.map.get(",") orelse return error.MissingComma;
+    try testing.expect(comma_trie.var_branches.items.len == 1);
+
+    // Test the match directly
+    var query = try Parser.parse(testing.allocator, "A, B");
+    defer query.deinit(testing.allocator);
+    try testing.expectEqual(@as(usize, 2), query.root.len);
+    try testing.expect(query.root[0] == .key);
+    try testing.expect(query.root[1] == .list);
+
+    var term_bindings = trie_mod.VarBindings{};
+    defer term_bindings.deinit(testing.allocator);
+    var match_result = try trie.match(testing.allocator, 0, &term_bindings, query);
+    defer match_result.deinit(testing.allocator);
+
+    // Match should succeed with value
+    try testing.expect(match_result.value != null);
+
+    // Check bindings
+    try testing.expect(term_bindings.get("x") != null);
+    try testing.expect(term_bindings.get("y") != null);
+
+    try expectEval(testing.allocator, trie, "A, B", "B, A");
+}
+
+test "evaluateComplete: VarPattern in nested pattern" {
+    var trie = try Parser.parseTrie(testing.allocator, "(x, *x) --> x + *x");
+    defer trie.deinit(testing.allocator);
+    try expectEval(testing.allocator, trie, "(A, B C)", "A + B C");
+}
+
+test "rewrite: simple variable substitution" {
+    var trie = try Parser.parseTrie(testing.allocator, "x --> x");
+    defer trie.deinit(testing.allocator);
+
+    // Value pattern is [variable(x)]
+    const value_pattern = trie.getIndex(0);
+
+    // Set up bindings: x = A
+    var bindings = trie_mod.VarBindings{};
+    defer bindings.deinit(testing.allocator);
+    try bindings.put(testing.allocator, "x", trie_mod.Node{ .key = "A" });
+
+    // Rewrite should replace x with A
+    var result = try trie.rewrite(testing.allocator, 0, value_pattern, &bindings);
+    defer result.deinit(testing.allocator);
+
+    try testing.expectEqual(@as(usize, 1), result.root.len);
+    try testing.expect(result.root[0] == .key);
+    try testing.expectEqualStrings("A", result.root[0].key);
+}
+
+test "rewrite: nested list with variables" {
+    var trie = try Parser.parseTrie(testing.allocator, "x, y --> y, x");
+    defer trie.deinit(testing.allocator);
+
+    // Value pattern is [variable(y), list([variable(x)])]
+    const value_pattern = trie.getIndex(0);
+    try testing.expectEqual(@as(usize, 2), value_pattern.root.len);
+    try testing.expect(value_pattern.root[0] == .variable);
+    try testing.expect(value_pattern.root[1] == .list);
+
+    // Set up bindings: x = A, y = B
+    var bindings = trie_mod.VarBindings{};
+    defer bindings.deinit(testing.allocator);
+    try bindings.put(testing.allocator, "x", trie_mod.Node{ .key = "A" });
+    try bindings.put(testing.allocator, "y", trie_mod.Node{ .key = "B" });
+
+    // Rewrite should produce [B, list([A])]
+    var result = try trie.rewrite(testing.allocator, 0, value_pattern, &bindings);
+    defer result.deinit(testing.allocator);
+
+    try testing.expectEqual(@as(usize, 2), result.root.len);
+    try testing.expect(result.root[0] == .key);
+    try testing.expectEqualStrings("B", result.root[0].key);
+    try testing.expect(result.root[1] == .list);
+    try testing.expectEqual(@as(usize, 1), result.root[1].list.root.len);
+    try testing.expect(result.root[1].list.root[0] == .key);
+    try testing.expectEqualStrings("A", result.root[1].list.root[0].key);
+}
+
+test "evaluateComplete: step by step x, y --> y, x" {
+    var trie = try Parser.parseTrie(testing.allocator, "x, y --> y, x");
+    defer trie.deinit(testing.allocator);
+
+    var query = try Parser.parse(testing.allocator, "A, B");
+    defer query.deinit(testing.allocator);
+
+    const eval = try trie.evaluateComplete(testing.allocator, 0, query);
+    var result = eval.value orelse return error.NoEvalResult;
+    defer result.deinit(testing.allocator);
+
+    // Result should be [B, list([A])]
+    try testing.expectEqual(@as(usize, 2), result.root.len);
+    try testing.expect(result.root[0] == .key);
+    try testing.expectEqualStrings("B", result.root[0].key);
+    try testing.expect(result.root[1] == .list);
+    try testing.expectEqual(@as(usize, 1), result.root[1].list.root.len);
+    try testing.expect(result.root[1].list.root[0] == .key);
+    try testing.expectEqualStrings("A", result.root[1].list.root[0].key);
+}
+
+test "Parser structure: x, y --> y, x" {
+    var zig_pattern = try Parser.parse(testing.allocator, "x, y --> y, x");
+    defer zig_pattern.deinit(testing.allocator);
+
+    // Due to precedence (comma=3 > long_arrow=2), this parses as: (x, y) --> (y, x)
+    // Which gives: [variable(x), list([variable(y)]), arrow([variable(y), list([variable(x)])])]
+    try testing.expectEqual(@as(usize, 3), zig_pattern.root.len);
+    try testing.expect(zig_pattern.root[0] == .variable);
+    try testing.expect(zig_pattern.root[1] == .list);
+    try testing.expect(zig_pattern.root[2] == .arrow);
+}
+
+test "Parser structure: A, B" {
+    var zig_pattern = try Parser.parse(testing.allocator, "A, B");
+    defer zig_pattern.deinit(testing.allocator);
+
+    // Zig parser should produce: [key(A), list([key(B)])]
+    try testing.expectEqual(@as(usize, 2), zig_pattern.root.len);
+    try testing.expect(zig_pattern.root[0] == .key);
+    try testing.expect(zig_pattern.root[1] == .list);
+    try testing.expectEqual(@as(usize, 1), zig_pattern.root[1].list.root.len);
 }
