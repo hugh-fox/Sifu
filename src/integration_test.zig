@@ -56,11 +56,15 @@ const TestCase = struct {
     expected: []const u8,
 };
 
-fn parseTestFile(content: []const u8) !struct { trie: []const u8, tests: []const TestCase } {
+const ParsedTestFile = struct {
+    trie: []const u8,
+    tests: []const TestCase,
+};
+
+fn parseTestFile(content: []const u8, tests_buf: *[64]TestCase) !ParsedTestFile {
     const section_delimiter = "\n\n#===\n\n";
     const case_delimiter = "\n\n#---\n\n";
 
-    var tests_buf: [64]TestCase = undefined;
     var test_count: usize = 0;
 
     var sections = mem.splitSequence(u8, content, section_delimiter);
@@ -88,7 +92,8 @@ fn runBehaviorTest(allocator: Allocator, comptime name: []const u8) !void {
     defer behavior.close(testing.io);
 
     const file_content = try readFile(behavior, name ++ ".sifu", allocator);
-    const parsed = try parseTestFile(file_content);
+    var tests_buf: [64]TestCase = undefined;
+    const parsed = try parseTestFile(file_content, &tests_buf);
 
     var zig_trie = try Parser.parseTrie(allocator, parsed.trie);
     defer zig_trie.deinit(allocator);
@@ -159,6 +164,7 @@ fn runBehaviorTest(allocator: Allocator, comptime name: []const u8) !void {
         const actual_trimmed = mem.trim(u8, actual_output, &std.ascii.whitespace);
 
         testing.expectEqualStrings(test_case.expected, actual_trimmed) catch {
+            std.debug.print("  FAIL test {d}: expected '{s}', got '{s}'\n", .{ i + 1, test_case.expected, actual_trimmed });
             failed += 1;
             continue;
         };
