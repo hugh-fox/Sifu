@@ -62,8 +62,8 @@ const ParsedTestFile = struct {
 };
 
 fn parseTestFile(content: []const u8, tests_buf: *[64]TestCase) !ParsedTestFile {
-    const section_delimiter = "\n\n#===\n\n";
-    const case_delimiter = "\n\n#---\n\n";
+    const section_delimiter = "\n\n# ===\n\n";
+    const case_delimiter = "\n\n# ---\n\n";
 
     var test_count: usize = 0;
 
@@ -75,7 +75,7 @@ fn parseTestFile(content: []const u8, tests_buf: *[64]TestCase) !ParsedTestFile 
         if (trimmed.len == 0) continue;
 
         const delim_pos = mem.indexOf(u8, test_section, case_delimiter) orelse {
-            std.debug.print("ERROR: test section has no #--- delimiter: '{s}'\n", .{trimmed});
+            std.debug.print("ERROR: test section has no # --- delimiter: '{s}'\n", .{trimmed});
             return error.MissingDelimiter;
         };
         const query = mem.trim(u8, test_section[0..delim_pos], &std.ascii.whitespace);

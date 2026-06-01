@@ -366,12 +366,12 @@ const Branch = union(enum) {
         }
     }
 
-    pub fn next(self: Branch, index: usize) ?IndexBranch {
+    pub fn next(self: Branch, bound: Bound) ?IndexBranch {
         const branch_node = self.node() orelse return null;
         const trie = branch_node.entry.value_ptr.*;
         return switch (self) {
-            .key => Trie.findNextInBranches(trie.key_branches.items, index),
-            .variable => Trie.findNextInBranches(trie.var_branches.items, index),
+            .key => Trie.findNextInBranches(trie.key_branches.items, bound),
+            .variable => Trie.findNextInBranches(trie.var_branches.items, bound),
             .value => null,
         };
     }
@@ -431,7 +431,8 @@ pub const Trie = struct {
     pub fn getIndexOrNull(self: Self, index: usize) ?Pattern {
         var current = &self;
         var branch: Branch = undefined;
-        while (current.findNext(index)) |next| {
+        const bound = Bound{ .lower = index, .upper = index + 1 };
+        while (current.findNext(bound)) |next| {
             _, branch = next;
             current = branch.this() orelse
                 return branch.value;
@@ -452,7 +453,9 @@ pub const Trie = struct {
         try self.rebuildKeyInner(allocator, index, &nodes);
 
         const root = try nodes.toOwnedSlice(allocator);
-        return Pattern{ .root = root, .height = 1 };
+        var max_child: usize = 0;
+        for (root) |n| max_child = @max(max_child, n.height());
+        return Pattern{ .root = root, .height = max_child };
     }
 
     fn rebuildKeyInner(
@@ -461,8 +464,9 @@ pub const Trie = struct {
         index: usize,
         nodes: *ArrayList(Node),
     ) Allocator.Error!void {
+        const bound = Bound{ .lower = index, .upper = index + 1 };
         // Check keys first
-        if (findNextInBranches(self.key_branches.items, index)) |kb| {
+        if (findNextInBranches(self.key_branches.items, bound)) |kb| {
             const found_index, const branch = kb;
             if (found_index == index) {
                 try nodes.append(allocator, .{ .key = branch.key.entry.key_ptr.* });
@@ -470,7 +474,7 @@ pub const Trie = struct {
             }
         }
         // Then check vars
-        if (findNextInBranches(self.var_branches.items, index)) |vb| {
+        if (findNextInBranches(self.var_branches.items, bound)) |vb| {
             const found_index, const branch = vb;
             if (found_index == index) {
                 try nodes.append(allocator, .{ .variable = branch.variable.entry.key_ptr.* });
@@ -566,7 +570,7 @@ pub const Trie = struct {
 
     fn getBranch(
         self: Trie,
-        bound: usize,
+        bound: Bound,
         key: []const u8,
         comptime tag: enum { key, variable },
     ) ?IndexBranchTrie {
@@ -585,7 +589,7 @@ pub const Trie = struct {
                     "Found branch in {*} for key {s} at index: {} within bound {}",
                     .{ child_trie, key, index, bound },
                 );
-                if (index < bound) panic(
+                if (index < bound.lower) panic(
                     "Index {} is less than bound {}\n",
                     .{ index, bound },
                 );
@@ -829,7 +833,7 @@ pub const Trie = struct {
         for (root, key) |*node, token|
             node.* = Node.ofKey(token);
 
-        return self.append(allocator, Pattern{ .root = root, .height = if (root.len > 0) 1 else 0 }, value);
+        return self.append(allocator, Pattern{ .root = root, .height = 0 }, value);
     }
 
     // TODO: change return type to void
@@ -863,7 +867,7 @@ pub const Trie = struct {
         key: Pattern = .{}, // The pattern that was attempted to match
         value: ?Pattern = null,
         node_ptr: *const Trie,
-        index: usize = 0,
+        match_index: usize = 0,
         len: usize = 0, // For partial matches
 
         /// Node entries are just references, so they aren't freed by this
@@ -897,11 +901,11 @@ pub const Trie = struct {
     };
 
     /// Find the first branch at or after bound in the given branch list.
-    fn findNextInBranches(branches: []const IndexBranch, bound: usize) ?IndexBranch {
+    fn findNextInBranches(branches: []const IndexBranch, bound: Bound) ?IndexBranch {
         const branch_index = sort.lowerBound(
             IndexBranch,
             branches,
-            bound,
+            bound.lower,
             struct {
                 fn lessThan(
                     ctx: usize,
@@ -912,29 +916,33 @@ pub const Trie = struct {
                 }
             }.lessThan,
         );
-        return if (branch_index < branches.len)
-            branches[branch_index]
-        else
-            null;
+        return if (branch_index < branches.len) {
+            const result = branches[branch_index];
+            const result_index, _ = result;
+            return if (result_index < bound.upper)
+                result
+            else
+                null;
+        } else null;
     }
 
     /// Finds the next minimum key at this node by index.
-    fn findNextKey(self: Self, bound: usize) ?IndexBranch {
+    fn findNextKey(self: Self, bound: Bound) ?IndexBranch {
         return findNextInBranches(self.key_branches.items, bound);
     }
 
     /// Finds the next minimum variable at this node by index.
-    fn findNextVar(self: Self, bound: usize) ?IndexBranch {
+    fn findNextVar(self: Self, bound: Bound) ?IndexBranch {
         return findNextInBranches(self.var_branches.items, bound);
     }
 
     /// Finds the next minimum value at this node by index.
-    fn findNextValue(self: Self, bound: usize) ?IndexBranch {
+    fn findNextValue(self: Self, bound: Bound) ?IndexBranch {
         return findNextInBranches(self.value_branches.items, bound);
     }
 
     /// Finds the next minimum key, variable or value across all branch types.
-    fn findNext(self: Self, bound: usize) ?IndexBranch {
+    fn findNext(self: Self, bound: Bound) ?IndexBranch {
         const key_branch = self.findNextKey(bound);
         const var_branch = self.findNextVar(bound);
         const value_branch = self.findNextValue(bound);
@@ -1013,7 +1021,7 @@ pub const Trie = struct {
     fn matchTerm(
         self: *const Self,
         allocator: Allocator,
-        bound: usize,
+        bound: Bound,
         term_bindings: *VarBindings,
         node: Node,
     ) Allocator.Error!?IndexBranchTrie {
@@ -1114,10 +1122,15 @@ pub const Trie = struct {
 
                         try term_bindings.put(allocator, variable, bound_value);
 
+                        const next_trie = switch (next_branch) {
+                            .key => |b| b.entry.value_ptr,
+                            .variable => |b| b.entry.value_ptr,
+                            .value => @panic("value branch in variable matching"),
+                        };
                         return .{
                             .index = next_index,
                             .branch = next_branch,
-                            .trie = next_branch.variable.entry.value_ptr,
+                            .trie = next_trie,
                         };
                     }
                 }
@@ -1133,9 +1146,9 @@ pub const Trie = struct {
 
                 // Recursively match the pattern contents
                 var pattern_match = try open_trie
-                    .match(allocator, index, term_bindings, pattern);
+                    .match(allocator, .{ .lower = index, .upper = bound.upper }, term_bindings, pattern);
                 defer pattern_match.deinit(allocator);
-                index = pattern_match.index;
+                index = pattern_match.match_index;
                 if (pattern_match.len != pattern.root.len) {
                     debug("Sub-pattern match failed: only matched {} of {} terms", .{
                         pattern_match.len,
@@ -1149,7 +1162,7 @@ pub const Trie = struct {
                     return null;
                 const close_trie = close_entry.value_ptr;
                 debug("Closing paren matched {*}", .{close_trie});
-                index, const branch = close_trie.findNext(index) orelse
+                index, const branch = close_trie.findNext(.{ .lower = index, .upper = bound.upper }) orelse
                     return null;
                 debug("Sub-pattern matched, returning trie: {*}", .{close_trie});
                 // As with key matching, don't return the next trie, but rather
@@ -1172,9 +1185,9 @@ pub const Trie = struct {
 
                 // Recursively match the list contents
                 var pattern_match = try open_trie
-                    .match(allocator, index, term_bindings, pattern);
+                    .match(allocator, .{ .lower = index, .upper = bound.upper }, term_bindings, pattern);
                 defer pattern_match.deinit(allocator);
-                index = pattern_match.index;
+                index = pattern_match.match_index;
 
                 // Check that the full pattern matched
                 if (pattern_match.len != pattern.root.len) {
@@ -1187,7 +1200,7 @@ pub const Trie = struct {
 
                 debug("Matched list tail at {*}", .{pattern_match.node_ptr});
                 // Get the branch from the final matched position
-                const final_branch = pattern_match.node_ptr.findNext(index) orelse
+                const final_branch = pattern_match.node_ptr.findNext(.{ .lower = index, .upper = bound.upper }) orelse
                     return null;
                 _, const branch = final_branch;
                 return .{
@@ -1203,11 +1216,11 @@ pub const Trie = struct {
                 var trie_match = try self.match(allocator, bound, term_bindings, trie_pattern);
                 defer trie_match.deinit(allocator);
 
-                const final_branch = trie_match.node_ptr.findNext(trie_match.index) orelse
+                const final_branch = trie_match.node_ptr.findNext(.{ .lower = trie_match.match_index, .upper = bound.upper }) orelse
                     return null;
                 _, const branch = final_branch;
                 return .{
-                    .index = trie_match.index,
+                    .index = trie_match.match_index,
                     .branch = branch,
                     .trie = trie_match.node_ptr,
                 };
@@ -1228,7 +1241,7 @@ pub const Trie = struct {
     pub fn match(
         self: *const Self,
         allocator: Allocator,
-        bound: usize,
+        bound: Bound,
         term_bindings: *VarBindings,
         pattern: Pattern,
     ) Allocator.Error!Match {
@@ -1239,7 +1252,7 @@ pub const Trie = struct {
         var node_list = ArrayList(Node).empty;
         errdefer for (node_list.items) |term| term.deinit(allocator);
         var current = self;
-        var index = bound;
+        var index = bound.lower;
         var result: ?Pattern = null;
         // For each subsequent term, extend candidates that can continue matching
         var pattern_index: usize = 0;
@@ -1260,7 +1273,7 @@ pub const Trie = struct {
                     current = var_trie;
                     index = var_index;
                     // Check for value in var_trie
-                    if (var_trie.findNextValue(var_index)) |value_candidate| {
+                    if (var_trie.findNextValue(.{ .lower = var_index, .upper = bound.upper })) |value_candidate| {
                         _, const value_branch = value_candidate;
                         result = value_branch.value;
                     }
@@ -1271,7 +1284,7 @@ pub const Trie = struct {
         while (pattern_index < pattern.root.len) : (pattern_index += 1) {
             const index_branch_trie = try current.matchTerm(
                 allocator,
-                index,
+                .{ .lower = index, .upper = bound.upper },
                 term_bindings,
                 pattern.root[pattern_index],
             ) orelse {
@@ -1316,9 +1329,15 @@ pub const Trie = struct {
                         // Var patterns (starting with '*') capture the rest of the
                         // pattern, so handle them specially
                         if (branch.isVarPattern()) {
+                            // Compute height of the captured portion
+                            const rest_root = pattern.root[pattern_index..];
+                            var rest_height: usize = 0;
+                            for (rest_root) |rest_node| {
+                                rest_height = @max(rest_height, rest_node.height());
+                            }
                             const rest = Pattern{
-                                .root = pattern.root[pattern_index..],
-                                .height = pattern.height,
+                                .root = rest_root,
+                                .height = rest_height,
                             };
                             const get_or_put = try term_bindings.getOrPut(allocator, var_name);
                             if (get_or_put.found_existing) {
@@ -1370,7 +1389,7 @@ pub const Trie = struct {
         if (!full_match)
             debug("No full match found", .{})
         else {
-            if (current.findNextValue(index)) |value_candidate| {
+            if (current.findNextValue(.{ .lower = index, .upper = bound.upper })) |value_candidate| {
                 debug("Value found", .{});
                 _, const value_branch = value_candidate;
                 result = value_branch.value;
@@ -1378,11 +1397,13 @@ pub const Trie = struct {
         }
 
         const key_nodes = try node_list.toOwnedSlice(allocator);
+        var max_child: usize = 0;
+        for (key_nodes) |n| max_child = @max(max_child, n.height());
         return Match{
-            .key = Pattern{ .root = key_nodes, .height = if (key_nodes.len > 0) 1 else 0 },
+            .key = Pattern{ .root = key_nodes, .height = max_child },
             .value = if (full_match) result else null,
             .node_ptr = current,
-            .index = index,
+            .match_index = index,
             .len = pattern_index,
         };
     }
@@ -1397,7 +1418,6 @@ pub const Trie = struct {
     pub fn rewrite(
         self: Self,
         allocator: Allocator,
-        bound: usize,
         pattern: Pattern,
         term_bindings: *VarBindings,
     ) Allocator.Error!Pattern {
@@ -1414,10 +1434,11 @@ pub const Trie = struct {
                 if (is_var_pattern) {
                     if (term_bindings.get(variable)) |sub_pattern| {
                         debug("Var pattern found: {s}", .{variable});
-                        max_child = @max(max_child, sub_pattern.pattern.height -| 1);
                         // Deep copy each node to avoid use-after-free
                         for (sub_pattern.pattern.root) |sub_node| {
-                            try result.append(allocator, try sub_node.copy(allocator));
+                            const copied = try sub_node.copy(allocator);
+                            max_child = @max(max_child, copied.height());
+                            try result.append(allocator, copied);
                         }
                     } else try result.append(allocator, node);
                 } else {
@@ -1434,15 +1455,15 @@ pub const Trie = struct {
                 }
             },
             inline .pattern, .arrow, .match, .list, .infix => |nested, tag| {
-                const rewritten = try self.rewrite(allocator, bound, nested, term_bindings);
+                const rewritten = try self.rewrite(allocator, nested, term_bindings);
+                const wrapped = Pattern{ .root = rewritten.root, .height = rewritten.height + 1 };
 
                 // debug("Rewrite recursing on {s} len {}", .{ @tagName(tag), nested.root.len });
-                max_child = @max(max_child, rewritten.height);
+                max_child = @max(max_child, wrapped.height);
                 try result.append(allocator, @unionInit(
                     Node,
                     @tagName(tag),
-                    // nested_eval.value orelse nested,
-                    rewritten,
+                    wrapped,
                 ));
             },
             else => panic("unimplemented", .{}),
@@ -1453,7 +1474,7 @@ pub const Trie = struct {
         // );
 
         const nodes = try result.toOwnedSlice(allocator);
-        return Pattern{ .root = nodes, .height = if (nodes.len > 0) max_child + 1 else 0 };
+        return Pattern{ .root = nodes, .height = max_child };
     }
 
     /// Follow `pattern` in `self` until no matches. Performs a partial,
@@ -1473,13 +1494,15 @@ pub const Trie = struct {
         var bound: Bound = .{ .upper = self.size() };
         var total_matched: usize = 0;
         var matched: Match = .{ .index = 0 };
-        while (matched.index < bound.upper) : (bound.upper = matched.index) {
+        var term_bindings = VarBindings{};
+        defer term_bindings.deinit(allocator);
+        while (matched.match_index < bound.upper) : (bound.upper = matched.match_index) {
             debug("Matching from bounds [{},{})", .{ bound.lower, bound.upper });
-            matched = try self.match(allocator, bound.lower, pattern);
+            matched = try self.match(allocator, bound, &term_bindings, pattern);
             defer matched.deinit(allocator);
             debug(
                 "Match result: {} of {} pattern nodes at index {}, ",
-                .{ matched.len, pattern.root.len, matched.index },
+                .{ matched.len, pattern.root.len, matched.match_index },
             );
             if (matched.value) |value| {
                 debug("matched value: {}", .{value});
@@ -1500,23 +1523,33 @@ pub const Trie = struct {
     pub fn evaluateComplete(
         self: Self,
         allocator: Allocator,
-        bound: usize,
+        lower_bound: usize,
+        pattern: Pattern,
+    ) Allocator.Error!Eval {
+        return self.evaluateBounded(allocator, .{ .lower = lower_bound, .upper = self.size() }, pattern);
+    }
+
+    fn evaluateBounded(
+        self: Self,
+        allocator: Allocator,
+        bound: Bound,
         pattern: Pattern,
     ) Allocator.Error!Eval {
         var matched: Match = .{ .node_ptr = &self };
-        var index: usize = bound;
+        var index: usize = bound.lower;
+        const upper = bound.upper;
         var current: Pattern = try pattern.copy(allocator);
         var term_bindings = VarBindings{};
         defer term_bindings.deinit(allocator);
-        while (index < self.size()) {
+        while (index < upper) {
             // while (current.height < pattern.height) : (len_matched += matched.len) {
             // } else
             matched.deinit(allocator);
-            matched = try self.match(allocator, index, &term_bindings, current);
-            if (matched.index < index)
-                panic("Match index bug: matched.index {} < index {}", .{ matched.index, index });
+            matched = try self.match(allocator, .{ .lower = index, .upper = upper }, &term_bindings, current);
+            if (matched.match_index < index)
+                panic("Match index bug: matched.match_index {} < index {}", .{ matched.match_index, index });
 
-            index = matched.index + 1;
+            index = matched.match_index + 1;
 
             const next = matched.value orelse {
                 debug("Eval match at {*}, but no value", .{matched.node_ptr});
@@ -1529,61 +1562,64 @@ pub const Trie = struct {
             // may reference current.root
             var old_current = current;
             defer old_current.deinit(allocator);
-            current = try self.rewrite(
+            const rewritten = try self.rewrite(
                 allocator,
-                bound,
                 next,
                 &term_bindings,
             );
             // Reset bindings for each new match index
             term_bindings.clearRetainingCapacity();
 
-            // debug("vars in map: {}", .{bindings.size});
-            const slice = .{};
-
-            // Prevent infinite recursion at this index. Recursion
-            // through other indices will be terminated by match index
-            // shrinking.
-            if (slice.len == next.root.len) {
-                panic("unimplemented\n", .{});
-                // for (slice, next.root) |trie, next_trie| {
-                //     // check if the same trie's shape could be matched
-                //     // TODO: use a trie match function here instead of eql
-                //     if (!trie.asEmpty().eql(next_trie))
-                //         break;
-                // } else break; // Don't evaluate the same trie
+            // Only recurse if height decreased (structural recursion), which
+            // guarantees termination. Non-structural rewrites continue in the
+            // main loop with increasing index. Limit upper bound to matched.match_index
+            // to prevent re-matching the same rule in recursive calls.
+            const is_structural = current.height > rewritten.height;
+            debug(
+                "is_structural: current {} > rewritten {}",
+                .{ current.height, rewritten.height },
+            );
+            if (is_structural) {
+                // Structural recursion: height decreased, so we can safely
+                // re-use all rules (termination guaranteed by decreasing height)
+                const rewritten_eval = try self.evaluateBounded(
+                    allocator,
+                    .{ .lower = bound.lower, .upper = matched.match_index + 1 },
+                    rewritten,
+                );
+                if (rewritten_eval.value) |val| {
+                    var rewritten_mut = rewritten;
+                    rewritten_mut.deinit(allocator);
+                    current = val;
+                    // Structural recursion fully evaluates the result, return directly
+                    matched.deinit(allocator);
+                    return Eval{ .value = current, .index = matched.match_index, .len = matched.len };
+                } else {
+                    current = rewritten;
+                }
+            } else {
+                current = rewritten;
             }
-            // debug("Eval matched len {}", .{next.root.len});
-            // next.debug("{s}");
-            // next.write(streams.err) catch unreachable;
-            // streams.err.writeByte('\n') catch unreachable;
-
-            // debug(
-            //     "Comparing heights: current {} < query {}",
-            //     .{ current.height, pattern.height },
-            // );
 
             debug("Next eval index: {}\n", .{index});
         }
 
-        // if (matched.len != pattern.root.len) {
-        // debug("No complete match, skipping index {}.", .{matched.index});
-        // Evaluate nested patterns that failed to match
-        // TODO: replace recursion with a continue
-        // Recurse into nested expressions
+        // Recurse into nested expressions when the main loop couldn't fully
+        // evaluate. For structural recursion (inner height < original input),
+        // allow re-using the same rule since termination is guaranteed by
+        // decreasing height. Non-structural must exclude the matched rule.
         for (current.root, 0..) |*nested, i| switch (nested.*) {
             inline else => |sub_pattern, tag| if (@TypeOf(sub_pattern) == Pattern) {
                 debug("Recursing into pattern at index {} of len {}", .{
                     i,
                     sub_pattern.root.len,
                 });
-                // Structural recursion: sub-expressions with smaller height reset
-                // lower bound to 0. This is bounded by height decreasing.
                 const is_structural = sub_pattern.height < pattern.height;
-                const nested_bound = if (is_structural) 0 else matched.index;
-                const nested_eval = try self.evaluateComplete(
+                const nested_lower: usize = 0;
+                const nested_upper = if (is_structural) matched.match_index + 1 else matched.match_index;
+                const nested_eval = try self.evaluateBounded(
                     allocator,
-                    nested_bound,
+                    .{ .lower = nested_lower, .upper = nested_upper },
                     sub_pattern,
                 );
                 const new_value = nested_eval.value orelse try sub_pattern.copy(allocator);
@@ -1593,7 +1629,7 @@ pub const Trie = struct {
         };
         const eval = Eval{
             .value = current,
-            .index = matched.index,
+            .index = matched.match_index,
             .len = matched.len,
         };
         matched.deinit(allocator);
@@ -1653,9 +1689,10 @@ pub const Trie = struct {
             try writer.print("{} | ", .{index});
 
         var current = self;
+        const index_bound = Bound{ .lower = index, .upper = index + 1 };
         while (true) {
             // Check keys first
-            if (findNextInBranches(current.key_branches.items, index)) |kb| {
+            if (findNextInBranches(current.key_branches.items, index_bound)) |kb| {
                 const found_index, const branch = kb;
                 if (found_index == index) {
                     const key = branch.key.entry.key_ptr.*;
@@ -1666,7 +1703,7 @@ pub const Trie = struct {
                 }
             }
             // Then check vars
-            if (findNextInBranches(current.var_branches.items, index)) |vb| {
+            if (findNextInBranches(current.var_branches.items, index_bound)) |vb| {
                 const found_index, const branch = vb;
                 if (found_index == index) {
                     const variable = branch.variable.entry.key_ptr.*;
@@ -1677,7 +1714,7 @@ pub const Trie = struct {
                 }
             }
             // Finally check values
-            if (findNextInBranches(current.value_branches.items, index)) |valb| {
+            if (findNextInBranches(current.value_branches.items, index_bound)) |valb| {
                 const found_index, const branch = valb;
                 if (found_index == index) {
                     try writer.writeAll("--> ");
@@ -1747,7 +1784,7 @@ pub const Trie = struct {
         try nodes.append(allocator, .{ .key = "}" });
 
         const root = try nodes.toOwnedSlice(allocator);
-        return Pattern{ .root = root, .height = 1 };
+        return Pattern{ .root = root, .height = 0 };
     }
 
     /// Returns sorted, deduplicated value indices. Caller owns the returned slice.
@@ -1995,7 +2032,7 @@ test "Behavior: equal variables" {
 
     var match1 = try trie.match(
         testing.allocator,
-        0,
+        .{ .upper = trie.size() },
         &term_bindings,
         query,
     );
@@ -2156,12 +2193,12 @@ test "findNextValue" {
     _ = try trie.append(testing.allocator, key, value2);
 
     const value_trie = trie.get(key) orelse unreachable;
-    var index_branch = value_trie.findNextValue(0) orelse unreachable;
+    var index_branch = value_trie.findNextValue(.{ .upper = value_trie.size() }) orelse unreachable;
     var value_index, var value_branch = index_branch;
     try testing.expect(value_index == 0);
     try testing.expect(value_branch.value.eql(value1));
 
-    index_branch = value_trie.findNextValue(1) orelse unreachable;
+    index_branch = value_trie.findNextValue(.{ .lower = 1, .upper = value_trie.size() }) orelse unreachable;
     value_index, value_branch = index_branch;
     try testing.expect(value_index == 1);
     try testing.expect(value_branch.value.eql(value2));

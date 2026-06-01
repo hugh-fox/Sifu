@@ -1,0 +1,10 @@
+# This comment should be ignored while matching
+A -> B
+
+# ===
+
+A
+
+# ---
+
+B

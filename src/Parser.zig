@@ -294,8 +294,8 @@ fn parsePrec1(self: *Self, allocator: Allocator) Oom!Pattern {
         _ = self.eat();
         const rhs = try self.parseOptionalPrec1(allocator);
         var nodes = try allocator.alloc(Node, 1);
-        nodes[0] = Node{ .list = rhs };
-        return patternOf(nodes, rhs.height);
+        nodes[0] = Node{ .list = incrementHeight(rhs) };
+        return patternOf(nodes, rhs.height + 1);
     }
 
     const lhs = try self.parsePrec2(allocator);
@@ -308,8 +308,8 @@ fn parsePrec1(self: *Self, allocator: Allocator) Oom!Pattern {
     var nodes = std.ArrayList(Node).empty;
     try nodes.appendSlice(allocator, lhs.root);
     allocator.free(lhs.root);
-    try nodes.append(allocator, Node{ .list = rhs });
-    const max_child = @max(lhs.height -| 1, rhs.height);
+    try nodes.append(allocator, Node{ .list = incrementHeight(rhs) });
+    const max_child = @max(lhs.height, rhs.height + 1);
     return patternOf(try nodes.toOwnedSlice(allocator), max_child);
 }
 
@@ -331,7 +331,7 @@ fn parsePrec2(self: *Self, allocator: Allocator) Oom!Pattern {
         const op = self.eat();
         const rhs = try self.parseOptionalPrec2(allocator);
         try nodes.append(allocator, wrapOp(op.tag, rhs));
-        return patternOf(try nodes.toOwnedSlice(allocator), rhs.height);
+        return patternOf(try nodes.toOwnedSlice(allocator), rhs.height + 1);
     }
 
     const lhs = try self.parsePrec3(allocator);
@@ -344,7 +344,7 @@ fn parsePrec2(self: *Self, allocator: Allocator) Oom!Pattern {
     const op = self.eat();
     const rhs = try self.parseOptionalPrec2(allocator);
     try nodes.append(allocator, wrapOp(op.tag, rhs));
-    const max_child = @max(lhs.height -| 1, rhs.height);
+    const max_child = @max(lhs.height, rhs.height + 1);
     return patternOf(try nodes.toOwnedSlice(allocator), max_child);
 }
 
@@ -355,8 +355,8 @@ fn parsePrec3(self: *Self, allocator: Allocator) Oom!Pattern {
         _ = self.eat();
         const rhs = try self.parseOptionalPrec3(allocator);
         var nodes = try allocator.alloc(Node, 1);
-        nodes[0] = Node{ .list = rhs };
-        return patternOf(nodes, rhs.height);
+        nodes[0] = Node{ .list = incrementHeight(rhs) };
+        return patternOf(nodes, rhs.height + 1);
     }
 
     const lhs = try self.parsePrec4(allocator);
@@ -369,8 +369,8 @@ fn parsePrec3(self: *Self, allocator: Allocator) Oom!Pattern {
     var nodes = std.ArrayList(Node).empty;
     try nodes.appendSlice(allocator, lhs.root);
     allocator.free(lhs.root);
-    try nodes.append(allocator, Node{ .list = rhs });
-    const max_child = @max(lhs.height -| 1, rhs.height);
+    try nodes.append(allocator, Node{ .list = incrementHeight(rhs) });
+    const max_child = @max(lhs.height, rhs.height + 1);
     return patternOf(try nodes.toOwnedSlice(allocator), max_child);
 }
 
@@ -394,7 +394,7 @@ fn parsePrec4(self: *Self, allocator: Allocator) Oom!Pattern {
     var nodes = std.ArrayList(Node).empty;
     try nodes.appendSlice(allocator, lhs.root);
     allocator.free(lhs.root);
-    var max_child = lhs.height -| 1;
+    var max_child = lhs.height;
 
     while (self.peek() == .symbol) {
         const sym_tok = self.eat();
@@ -402,16 +402,13 @@ fn parsePrec4(self: *Self, allocator: Allocator) Oom!Pattern {
         const rhs = try self.parseOptionalPrec5(allocator);
 
         // Build infix pattern: [op_key, rhs_nodes...]
-        // Key has height 0, so infix max_child = rhs.height - 1
         var infix_nodes = std.ArrayList(Node).empty;
         try infix_nodes.append(allocator, Node{ .key = sym_text });
         try infix_nodes.appendSlice(allocator, rhs.root);
         if (rhs.root.len > 0) allocator.free(rhs.root);
-        const infix_height = rhs.height -| 1;
-        try nodes.append(allocator, Node{
-            .infix = patternOf(try infix_nodes.toOwnedSlice(allocator), infix_height),
-        });
-        max_child = @max(max_child, infix_height + 1);
+        const infix_pattern = incrementHeight(patternOf(try infix_nodes.toOwnedSlice(allocator), rhs.height));
+        try nodes.append(allocator, Node{ .infix = infix_pattern });
+        max_child = @max(max_child, infix_pattern.height);
     }
     return patternOf(try nodes.toOwnedSlice(allocator), max_child);
 }
@@ -428,7 +425,7 @@ fn parsePrec5(self: *Self, allocator: Allocator) Oom!Pattern {
         const op = self.eat();
         const rhs = try self.parseOptionalPrec5(allocator);
         try nodes.append(allocator, wrapOp(op.tag, rhs));
-        return patternOf(try nodes.toOwnedSlice(allocator), rhs.height);
+        return patternOf(try nodes.toOwnedSlice(allocator), rhs.height + 1);
     }
 
     const lhs = try self.parseTerms(allocator);
@@ -441,7 +438,7 @@ fn parsePrec5(self: *Self, allocator: Allocator) Oom!Pattern {
     const op = self.eat();
     const rhs = try self.parseOptionalPrec5(allocator);
     try nodes.append(allocator, wrapOp(op.tag, rhs));
-    const max_child = @max(lhs.height -| 1, rhs.height);
+    const max_child = @max(lhs.height, rhs.height + 1);
     return patternOf(try nodes.toOwnedSlice(allocator), max_child);
 }
 
@@ -465,7 +462,7 @@ fn parseTerm(self: *Self, allocator: Allocator) Oom!Node {
         .var_pattern => Node{ .variable = tok.text(self.source) },
         .left_paren => blk: {
             const inner = try self.parseInner(allocator, .right_paren);
-            break :blk Node{ .pattern = inner };
+            break :blk Node{ .pattern = incrementHeight(inner) };
         },
         .left_brace => blk: {
             var inner = try self.parseInner(allocator, .right_brace);
@@ -475,7 +472,7 @@ fn parseTerm(self: *Self, allocator: Allocator) Oom!Node {
         },
         .backtick => blk: {
             const inner = try self.parseInner(allocator, .backtick);
-            break :blk Node{ .pattern = inner };
+            break :blk Node{ .pattern = incrementHeight(inner) };
         },
         else => Node{ .key = tok.text(self.source) },
     };
@@ -515,12 +512,16 @@ fn canStartExpr(self: Self) bool {
         self.current.tag == .symbol;
 }
 
+fn incrementHeight(p: Pattern) Pattern {
+    return .{ .root = p.root, .height = p.height + 1 };
+}
+
 fn wrapOp(tag: Tag, rhs: Pattern) Node {
     return switch (tag) {
-        .semicolon, .comma => Node{ .list = rhs },
-        .long_match, .match => Node{ .match = rhs },
-        .long_arrow, .arrow => Node{ .arrow = rhs },
-        else => Node{ .pattern = rhs },
+        .semicolon, .comma => Node{ .list = incrementHeight(rhs) },
+        .long_match, .match => Node{ .match = incrementHeight(rhs) },
+        .long_arrow, .arrow => Node{ .arrow = incrementHeight(rhs) },
+        else => Node{ .pattern = incrementHeight(rhs) },
     };
 }
 
@@ -540,13 +541,13 @@ fn patternToTrie(allocator: Allocator, pattern: Pattern) Oom!Trie {
 
     if (pattern.root.len == 0) return result;
 
-    // With right-associative parsing, multiple entries are nested:
+    // With right-associative parsing, multiple entries are incrementHeight:
     // "A -> 1; B -> 2" = [A, arrow([1]), list([B, arrow([2])])]
     // We need to recursively process the .list nodes that represent semicolons.
     //
     // Semicolons vs commas:
     // - Semicolons separate trie entries (have arrows in their contents)
-    // - Commas are part of pattern structure (no arrows, or arrows nested deeper)
+    // - Commas are part of pattern structure (no arrows, or arrows incrementHeight deeper)
     //
     // Heuristic: A .list at the end of a pattern is a semicolon if it contains
     // an arrow at its top level.
@@ -578,7 +579,7 @@ fn appendEntryRecursive(result: *Trie, allocator: Allocator, pattern: Pattern) O
         if (is_semicolon) {
             // This is a semicolon: prefix is one entry, .list contents are more entries
             if (last_idx > 0) {
-                try appendEntry(result, allocator, .{ .root = pattern.root[0..last_idx] });
+                try appendEntry(result, allocator, patternFromSlice(pattern.root[0..last_idx]));
             }
             // Recursively process the list contents
             try appendEntryRecursive(result, allocator, last_node.list);
@@ -606,8 +607,10 @@ fn appendEntry(result: *Trie, allocator: Allocator, entry_pattern: Pattern) Oom!
 
     if (arrow_index) |ai| {
         // Split at arrow: nodes before arrow are key, arrow's pattern is value
+        // Decrement height since arrow wrapper added 1
         const key = patternFromSlice(entry_pattern.root[0..ai]);
-        const value = entry_pattern.root[ai].arrow;
+        const arrow_pattern = entry_pattern.root[ai].arrow;
+        const value = Pattern{ .root = arrow_pattern.root, .height = arrow_pattern.height -| 1 };
         _ = try result.append(allocator, key, value);
     } else {
         // No arrow - pattern is both key and value
@@ -616,7 +619,7 @@ fn appendEntry(result: *Trie, allocator: Allocator, entry_pattern: Pattern) Oom!
 }
 
 fn patternOf(nodes: []Node, max_child_height: usize) Pattern {
-    return .{ .root = nodes, .height = if (nodes.len > 0) max_child_height + 1 else 0 };
+    return .{ .root = nodes, .height = max_child_height };
 }
 
 fn patternFromSlice(nodes: []Node) Pattern {
@@ -624,7 +627,7 @@ fn patternFromSlice(nodes: []Node) Pattern {
     for (nodes) |n| {
         max_child = @max(max_child, n.height());
     }
-    return .{ .root = nodes, .height = if (nodes.len > 0) max_child + 1 else 0 };
+    return .{ .root = nodes, .height = max_child };
 }
 
 // ---------------------------------------------------------------------------
@@ -795,7 +798,7 @@ test "semicolon: A ; B ; C" {
     try testing.expectEqualStrings("C", p.root[1].list.root[1].list.root[0].key);
 }
 
-test "nested pattern: (A B)" {
+test "incrementHeight pattern: (A B)" {
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
     const p = try parse(arena.allocator(), "(A B)");
@@ -806,7 +809,7 @@ test "nested pattern: (A B)" {
     try testing.expectEqualStrings("B", inner.root[1].key);
 }
 
-test "nested empty: ()" {
+test "incrementHeight empty: ()" {
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
     const p = try parse(arena.allocator(), "()");
@@ -879,7 +882,7 @@ test "multi-key entry trie: { A B -> C }" {
     try expectNodes(p, &.{.trie});
     const t = p.root[0].trie;
     try testing.expectEqual(@as(usize, 1), t.size());
-    // Trie should have nested entry: A -> B -> value(C)
+    // Trie should have incrementHeight entry: A -> B -> value(C)
     try testing.expect(t.map.contains("A"));
     const a_trie = t.map.get("A").?;
     try testing.expect(a_trie.map.contains("B"));
