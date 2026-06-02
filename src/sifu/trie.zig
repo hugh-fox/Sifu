@@ -8,7 +8,6 @@ const panic = std.debug.panic;
 const Order = math.Order;
 const ArenaAllocator = std.heap.ArenaAllocator;
 const debug = std.log.debug;
-const debug_mode = @import("builtin").mode == .Debug;
 const sort = std.sort;
 const Io = std.Io;
 const Writer = Io.Writer;
@@ -1537,17 +1536,8 @@ pub const Trie = struct {
     ) Allocator.Error!Eval {
         eval_depth += 1;
         defer eval_depth -= 1;
-        if (eval_depth > 20) {
-            std.debug.print("DEPTH LIMIT at bound [{}, {})\n", .{ bound.lower, bound.upper });
+        if (eval_depth > 20)
             @panic("Recursion depth limit exceeded");
-        }
-        if (debug_mode) {
-            const pat_str = pattern.toString(allocator) catch "?";
-            defer allocator.free(pat_str);
-            std.debug.print("evaluateBounded depth={} bound=[{},{}) h={}: {s}\n", .{
-                eval_depth, bound.lower, bound.upper, pattern.height, pat_str,
-            });
-        }
         var matched: Match = .{ .node_ptr = &self };
         var index: usize = bound.lower;
         const upper = bound.upper;
@@ -1620,6 +1610,47 @@ pub const Trie = struct {
             debug("Next eval index: {}\n", .{index});
         }
 
+        // Evaluate the head of an apposition. When the result is an apposition
+        // (a non-list prefix followed by a top-level comma `,` list node), the
+        // complete-match loop above cannot reduce the prefix on its own because
+        // the trailing comma prevents the whole pattern from matching any rule,
+        // and the nested-recursion loop below only descends into wrapper nodes.
+        // Reduce the prefix here as its own sub-pattern, e.g. the head `F 1` of
+        // `F 1, (2, 3)` reduces to `G 1`.
+        {
+            var list_pos: usize = current.root.len;
+            for (current.root, 0..) |node, i| {
+                if (node == .list) {
+                    list_pos = i;
+                    break;
+                }
+            }
+            if (list_pos > 0 and list_pos < current.root.len) {
+                var head_height: usize = 0;
+                for (current.root[0..list_pos]) |node|
+                    head_height = @max(head_height, node.height());
+                var head_eval = try self.evaluateBounded(
+                    allocator,
+                    .{ .lower = 0, .upper = bound.upper },
+                    .{ .root = current.root[0..list_pos], .height = head_height },
+                );
+                if (head_eval.value) |*head_val| {
+                    defer head_val.deinit(allocator);
+                    const tail = current.root[list_pos..];
+                    const new_root = try allocator.alloc(Node, head_val.root.len + tail.len);
+                    for (head_val.root, new_root[0..head_val.root.len]) |node, *dst|
+                        dst.* = try node.copy(allocator);
+                    @memcpy(new_root[head_val.root.len ..], tail);
+                    for (current.root[0..list_pos]) |*node|
+                        @constCast(node).deinit(allocator);
+                    allocator.free(current.root);
+                    var new_height: usize = 0;
+                    for (new_root) |node| new_height = @max(new_height, node.height());
+                    current = .{ .root = new_root, .height = new_height };
+                }
+            }
+        }
+
         // Recurse into nested expressions. Two cases must be distinguished:
         //
         //  - Structural recursion (form 2), e.g. `(x, *xs) -> x, (*xs)`: the
@@ -1645,9 +1676,7 @@ pub const Trie = struct {
                 // A wrapper node (paren, list, ...) stores a height that includes
                 // its own nesting level, while its `root` holds only the inner
                 // content. Measure the content height directly so it can be
-                // compared consistently against the matched pattern's height, and
-                // recurse on the content with that corrected height so the nested
-                // call doesn't see an inflated (off-by-one) height.
+                // compared consistently against the matched pattern's height.
                 var content_height: usize = 0;
                 for (sub_pattern.root) |node|
                     content_height = @max(content_height, node.height());
@@ -1662,7 +1691,12 @@ pub const Trie = struct {
                     .{ .lower = 0, .upper = recurse_upper },
                     inner,
                 );
-                const new_value = nested_eval.value orelse try inner.copy(allocator);
+                // The evaluated content carries only its own (content) height,
+                // because `inner` stripped the wrapper's nesting level before
+                // recursing. Re-inflate by one so the reconstructed wrapper node
+                // keeps the height that includes its own nesting level.
+                var new_value = nested_eval.value orelse try inner.copy(allocator);
+                new_value.height += 1;
                 @constCast(&sub_pattern).deinit(allocator);
                 nested.* = @unionInit(Node, @tagName(tag), new_value);
             },
@@ -1725,9 +1759,6 @@ pub const Trie = struct {
         writer: anytype,
         index: usize,
     ) !void {
-        if (comptime debug_mode)
-            try writer.print("{} | ", .{index});
-
         var current = self;
         const index_bound = Bound{ .lower = index, .upper = index + 1 };
         while (true) {
@@ -1855,13 +1886,9 @@ pub const Trie = struct {
         writer: anytype,
         optional_indent: ?usize,
     ) Writer.Error!void {
-        if (debug_mode)
-            try writer.print("{*} ", .{self});
         try writer.writeAll("❬");
-        for (self.value_branches.items, 0..) |index_branch, i| {
-            const index, const branch = index_branch;
-            if (debug_mode)
-                try writer.print("{} ({}): ", .{ index, i });
+        for (self.value_branches.items) |index_branch| {
+            _, const branch = index_branch;
             try branch.value.writeIndent(writer, null);
             try writer.writeAll(", ");
         }
@@ -2268,7 +2295,7 @@ test "Trie: toString" {
     {
         const str = try trie.toString(testing.allocator);
         defer testing.allocator.free(str);
-        try testing.expectEqualStrings("0 | A B --> Val\n", str);
+        try testing.expectEqualStrings("A B --> Val\n", str);
     }
     _ = try trie.append(
         testing.allocator,
@@ -2278,7 +2305,7 @@ test "Trie: toString" {
     {
         const str = try trie.toString(testing.allocator);
         defer testing.allocator.free(str);
-        try testing.expectEqualStrings("0 | A B --> Val\n1 | A B --> Val\n", str);
+        try testing.expectEqualStrings("A B --> Val\nA B --> Val\n", str);
     }
 }
 
@@ -2349,7 +2376,6 @@ test "List with variables: x, y --> y, x" {
     try testing.expect(trie.var_branches.items.len > 0);
     // Get the trie under x (variables are stored in map)
     const x_trie = trie.map.get("x") orelse {
-        std.debug.print("No 'x' in map\n", .{});
         return error.TestUnexpectedResult;
     };
     // Check for comma
@@ -2547,30 +2573,20 @@ test "Structural recursion with var_pattern: (x, *xs) --> x, (*xs)" {
 
     // First verify (1, 2) works
     const query2 = try Parser.parse(allocator, "(1, 2)");
-    std.debug.print("\nQuery (1, 2) height: {}\n", .{query2.height});
     const eval_result2 = try trie.evaluateComplete(allocator, 0, query2);
-    if (eval_result2.value) |value| {
-        const str = try value.toString(allocator);
-        std.debug.print("(1, 2) -> {s}\n", .{str});
-    }
+    _ = eval_result2;
 
     // Then (2, 3)
     const query3 = try Parser.parse(allocator, "(2, 3)");
-    std.debug.print("Query (2, 3) height: {}\n", .{query3.height});
     const eval_result3 = try trie.evaluateComplete(allocator, 0, query3);
-    if (eval_result3.value) |value| {
-        const str = try value.toString(allocator);
-        std.debug.print("(2, 3) -> {s}\n", .{str});
-    }
+    _ = eval_result3;
 
     // (1, 2, 3) should evaluate to 1, 2, 3
     const query = try Parser.parse(allocator, "(1, 2, 3)");
-    std.debug.print("Query (1, 2, 3) height: {}\n", .{query.height});
     const eval_result = try trie.evaluateComplete(allocator, 0, query);
 
     if (eval_result.value) |value| {
         const str = try value.toString(allocator);
-        std.debug.print("(1, 2, 3) -> {s}\n", .{str});
         try testing.expectEqualStrings("1, 2, 3", str);
     } else {
         return error.TestUnexpectedResult;
@@ -2583,27 +2599,55 @@ test "Height calculation for patterns" {
     defer arena.deinit();
     const allocator = arena.allocator();
 
-    // (1, 2, 3) - pattern with list inside
     const p1 = try Parser.parse(allocator, "(1, 2, 3)");
-    std.debug.print("(1, 2, 3) height: {}\n", .{p1.height});
-
-    // 1, (2, 3) - list with nested pattern
     const p2 = try Parser.parse(allocator, "1, (2, 3)");
-    std.debug.print("1, (2, 3) height: {}\n", .{p2.height});
-
-    // (2, 3) - smaller pattern
     const p3 = try Parser.parse(allocator, "(2, 3)");
-    std.debug.print("(2, 3) height: {}\n", .{p3.height});
-
-    // (1, 2) - two element pattern
     const p4 = try Parser.parse(allocator, "(1, 2)");
-    std.debug.print("(1, 2) height: {}\n", .{p4.height});
-
-    // 1, (2) - rewritten form
     const p5 = try Parser.parse(allocator, "1, (2)");
-    std.debug.print("1, (2) height: {}\n", .{p5.height});
-
-    // (2) - single element in parens
     const p6 = try Parser.parse(allocator, "(2)");
-    std.debug.print("(2) height: {}\n", .{p6.height});
+    _ = .{ p1, p2, p3, p4, p5, p6 };
+}
+
+test "Debug trie structure" {
+    const Parser = @import("../Parser.zig");
+
+    var trie = try Parser.parseTrie(testing.allocator, "A, *x --> *x");
+    defer trie.deinit(testing.allocator);
+
+    var trie2 = try Parser.parseTrie(testing.allocator, "x, y --> y, x");
+    defer trie2.deinit(testing.allocator);
+    try testing.expect(trie2.var_branches.items.len >= 1);
+}
+
+test "Parse structure: comma lists" {
+    const Parser = @import("../Parser.zig");
+    var arena = ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    // A, B, C should be: [A, list([B, list([C])])]
+    const abc = try Parser.parse(allocator, "A, B, C");
+    try testing.expectEqual(@as(usize, 2), abc.root.len);
+    try testing.expect(abc.root[0] == .key);
+    try testing.expectEqualStrings("A", abc.root[0].key);
+    try testing.expect(abc.root[1] == .list);
+    const bc_list = abc.root[1].list;
+    try testing.expectEqual(@as(usize, 2), bc_list.root.len);
+    try testing.expect(bc_list.root[0] == .key);
+    try testing.expectEqualStrings("B", bc_list.root[0].key);
+    try testing.expect(bc_list.root[1] == .list);
+    const c_list = bc_list.root[1].list;
+    try testing.expectEqual(@as(usize, 1), c_list.root.len);
+    try testing.expect(c_list.root[0] == .key);
+    try testing.expectEqualStrings("C", c_list.root[0].key);
+
+    // B, C should be: [B, list([C])]
+    const bc = try Parser.parse(allocator, "B, C");
+    try testing.expectEqual(@as(usize, 2), bc.root.len);
+    try testing.expect(bc.root[0] == .key);
+    try testing.expectEqualStrings("B", bc.root[0].key);
+    try testing.expect(bc.root[1] == .list);
+    const c_inner = bc.root[1].list;
+    try testing.expectEqual(@as(usize, 1), bc.height);
+    try testing.expectEqual(@as(usize, 1), c_inner.height);
 }

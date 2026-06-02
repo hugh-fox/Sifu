@@ -102,17 +102,11 @@ fn expectEval(allocator: std.mem.Allocator, trie: Trie, query_str: []const u8, e
         defer @constCast(val).deinit(allocator);
         var expected = try Parser.parse(allocator, expected_str);
         defer expected.deinit(allocator);
-        testing.expect(val.eql(expected)) catch |e| {
-            // Print readable output if not equal
-            const result_str = try val.toString(testing.allocator);
-            defer testing.allocator.free(result_str);
+        if (!val.eql(expected)) {
+            const result_str = try val.toString(allocator);
+            defer allocator.free(result_str);
             try testing.expectEqualStrings(expected_str, result_str);
-            std.debug.print(
-                "Pattern.eql returned false on equal strings: {s}, heights: {} vs {}\n",
-                .{ result_str, val.height, expected.height },
-            );
-            return e;
-        };
+        }
     } else {
         return error.NoEvalResult;
     }

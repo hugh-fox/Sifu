@@ -43,7 +43,13 @@ In Sifu, all forms of evaluation are essentially a repeated match and rewrite of
     ```
     A -> (A)
     ```
-
+    Nesting recursion is most useful if it occurs for both the head and tail of a list, for example:
+    ```
+    F x --> G x
+    (x, *xs) --> F x, (*xs)
+    ```
+    Evaluating `(1, 2, 3,)` against this trie should give `G 1, G 2, G 3, ()` by matching each head of the rewritten list with the lower rule 0.
+    
 ---
 
 # Specific Evaluators
