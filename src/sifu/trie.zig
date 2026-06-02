@@ -1318,53 +1318,51 @@ pub const Trie = struct {
                         Node{ .variable = var_name },
                     );
                     const node = pattern.root[pattern_index];
-                    // For compound nodes (list, pattern, etc.), variable bindings
-                    // already happened in the recursive matchTerm call, so skip
-                    // rebinding here (including var_patterns)
+                    // For compound nodes (list, pattern, etc.), regular variable bindings
+                    // already happened in the recursive matchTerm call. But var_patterns
+                    // need special handling because they capture the rest of the pattern.
                     const is_compound = switch (node) {
                         .list, .pattern, .match, .arrow, .infix => true,
                         else => false,
                     };
-                    if (!is_compound) {
-                        // Var patterns (starting with '*') capture the rest of the
-                        // pattern, so handle them specially
-                        if (branch.isVarPattern()) {
-                            // Compute height of the captured portion
-                            const rest_root = pattern.root[pattern_index..];
-                            var rest_height: usize = 0;
-                            for (rest_root) |rest_node| {
-                                rest_height = @max(rest_height, rest_node.height());
+                    // Var patterns (starting with '*') capture the rest of the pattern
+                    if (branch.isVarPattern()) {
+                        // Compute height of the captured portion
+                        const rest_root = pattern.root[pattern_index..];
+                        var rest_height: usize = 0;
+                        for (rest_root) |rest_node| {
+                            rest_height = @max(rest_height, rest_node.height());
+                        }
+                        const rest = Pattern{
+                            .root = rest_root,
+                            .height = rest_height,
+                        };
+                        const get_or_put = try term_bindings.getOrPut(allocator, var_name);
+                        if (get_or_put.found_existing) {
+                            switch (get_or_put.value_ptr.*) {
+                                .pattern => |existing_pattern| {
+                                    if (!existing_pattern.eql(rest)) {
+                                        @panic("unimplemented: var_pattern already bound to different pattern");
+                                    }
+                                },
+                                else => @panic("unimplemented: var_pattern bound to non-pattern value"),
                             }
-                            const rest = Pattern{
-                                .root = rest_root,
-                                .height = rest_height,
-                            };
-                            const get_or_put = try term_bindings.getOrPut(allocator, var_name);
-                            if (get_or_put.found_existing) {
-                                switch (get_or_put.value_ptr.*) {
-                                    .pattern => |existing_pattern| {
-                                        if (!existing_pattern.eql(rest)) {
-                                            @panic("unimplemented: var_pattern already bound to different pattern");
-                                        }
-                                    },
-                                    else => @panic("unimplemented: var_pattern bound to non-pattern value"),
-                                }
-                            } else {
-                                debug("Assigning rest to var pattern at {*}", .{get_or_put.value_ptr});
-                                get_or_put.value_ptr.* = .{ .pattern = rest };
-                            }
-                            current = variable.entry.value_ptr;
-                            pattern_index = pattern.root.len;
-                            break; // No need to match rest of pattern
                         } else {
-                            const get_or_put = try term_bindings.getOrPut(allocator, var_name);
-                            if (get_or_put.found_existing) {
-                                if (!get_or_put.value_ptr.eql(node)) {
-                                    @panic("unimplemented: var already bound to different value");
-                                }
-                            } else {
-                                get_or_put.value_ptr.* = node;
+                            debug("Assigning rest to var pattern at {*}", .{get_or_put.value_ptr});
+                            get_or_put.value_ptr.* = .{ .pattern = rest };
+                        }
+                        current = variable.entry.value_ptr;
+                        pattern_index = pattern.root.len;
+                        break; // No need to match rest of pattern
+                    } else if (!is_compound) {
+                        // Regular variables for non-compound nodes
+                        const get_or_put = try term_bindings.getOrPut(allocator, var_name);
+                        if (get_or_put.found_existing) {
+                            if (!get_or_put.value_ptr.eql(node)) {
+                                @panic("unimplemented: var already bound to different value");
                             }
+                        } else {
+                            get_or_put.value_ptr.* = node;
                         }
                     }
                     current = variable.entry.value_ptr;
@@ -1529,18 +1527,35 @@ pub const Trie = struct {
         return self.evaluateBounded(allocator, .{ .lower = lower_bound, .upper = self.size() }, pattern);
     }
 
+    var eval_depth: usize = 0;
+
     fn evaluateBounded(
         self: Self,
         allocator: Allocator,
         bound: Bound,
         pattern: Pattern,
     ) Allocator.Error!Eval {
+        eval_depth += 1;
+        defer eval_depth -= 1;
+        if (eval_depth > 20) {
+            std.debug.print("DEPTH LIMIT at bound [{}, {})\n", .{ bound.lower, bound.upper });
+            @panic("Recursion depth limit exceeded");
+        }
+        if (debug_mode) {
+            const pat_str = pattern.toString(allocator) catch "?";
+            defer allocator.free(pat_str);
+            std.debug.print("evaluateBounded depth={} bound=[{},{}) h={}: {s}\n", .{
+                eval_depth, bound.lower, bound.upper, pattern.height, pat_str,
+            });
+        }
         var matched: Match = .{ .node_ptr = &self };
         var index: usize = bound.lower;
         const upper = bound.upper;
         var current: Pattern = try pattern.copy(allocator);
         var term_bindings = VarBindings{};
         defer term_bindings.deinit(allocator);
+        // Track the index of the last rule that matched (for nested recursion bounds)
+        var last_match_index: ?usize = null;
         while (index < upper) {
             // while (current.height < pattern.height) : (len_matched += matched.len) {
             // } else
@@ -1557,6 +1572,8 @@ pub const Trie = struct {
                 break;
             };
 
+            last_match_index = matched.match_index;
+
             // Rewrite all current bindings into the matched value
             // Deinit old current after rewrite completes, since term_bindings
             // may reference current.root
@@ -1570,11 +1587,10 @@ pub const Trie = struct {
             // Reset bindings for each new match index
             term_bindings.clearRetainingCapacity();
 
-            // Only recurse if height decreased (structural recursion), which
-            // guarantees termination. Non-structural rewrites continue in the
-            // main loop with increasing index. Limit upper bound to matched.match_index
-            // to prevent re-matching the same rule in recursive calls.
-            const is_structural = current.height > rewritten.height;
+            // Only recurse if height decreased relative to ORIGINAL pattern
+            // (structural recursion), which guarantees termination. Non-structural
+            // rewrites continue in the main loop with increasing index.
+            const is_structural = pattern.height > rewritten.height;
             debug(
                 "is_structural: current {} > rewritten {}",
                 .{ current.height, rewritten.height },
@@ -1604,25 +1620,49 @@ pub const Trie = struct {
             debug("Next eval index: {}\n", .{index});
         }
 
-        // Recurse into nested expressions when the main loop couldn't fully
-        // evaluate. For structural recursion (inner height < original input),
-        // allow re-using the same rule since termination is guaranteed by
-        // decreasing height. Non-structural must exclude the matched rule.
+        // Recurse into nested expressions. Two cases must be distinguished:
+        //
+        //  - Structural recursion (form 2), e.g. `(x, *xs) -> x, (*xs)`: the
+        //    nested expression is strictly *smaller* than the pattern that was
+        //    matched, so progress is guaranteed and the producing rule may fire
+        //    again. The recursive call may match up to and including the current
+        //    index, so its upper bound is `mi + 1`.
+        //
+        //  - Nested recursion (form 3), e.g. `A -> (A)`: the nested expression
+        //    is the *same* size, just wrapped one level deeper. Reusing the
+        //    producing rule would loop forever, so the recursive call must match
+        //    strictly before the current index, giving an upper bound of `mi`.
+        //
+        // The two are told apart by comparing the nested node's height (which
+        // includes its own nesting level) against the matched pattern's height,
+        // measured the same way. If this level matched nothing (e.g. the user
+        // queried `(A)` directly) there is no producing index, so the contents
+        // are evaluated against the full upper bound.
+        const structural_upper = if (last_match_index) |mi| mi + 1 else bound.upper;
+        const nested_upper = if (last_match_index) |mi| mi else bound.upper;
         for (current.root, 0..) |*nested, i| switch (nested.*) {
             inline else => |sub_pattern, tag| if (@TypeOf(sub_pattern) == Pattern) {
-                debug("Recursing into pattern at index {} of len {}", .{
-                    i,
-                    sub_pattern.root.len,
+                // A wrapper node (paren, list, ...) stores a height that includes
+                // its own nesting level, while its `root` holds only the inner
+                // content. Measure the content height directly so it can be
+                // compared consistently against the matched pattern's height, and
+                // recurse on the content with that corrected height so the nested
+                // call doesn't see an inflated (off-by-one) height.
+                var content_height: usize = 0;
+                for (sub_pattern.root) |node|
+                    content_height = @max(content_height, node.height());
+                const inner = Pattern{ .root = sub_pattern.root, .height = content_height };
+                const is_smaller = content_height < pattern.height;
+                const recurse_upper = if (is_smaller) structural_upper else nested_upper;
+                debug("Nested recurse [{d}] tag={s} content_h={d} pat_h={d} upper={d}", .{
+                    i, @tagName(tag), content_height, pattern.height, recurse_upper,
                 });
-                const is_structural = sub_pattern.height < pattern.height;
-                const nested_lower: usize = 0;
-                const nested_upper = if (is_structural) matched.match_index + 1 else matched.match_index;
                 const nested_eval = try self.evaluateBounded(
                     allocator,
-                    .{ .lower = nested_lower, .upper = nested_upper },
-                    sub_pattern,
+                    .{ .lower = 0, .upper = recurse_upper },
+                    inner,
                 );
-                const new_value = nested_eval.value orelse try sub_pattern.copy(allocator);
+                const new_value = nested_eval.value orelse try inner.copy(allocator);
                 @constCast(&sub_pattern).deinit(allocator);
                 nested.* = @unionInit(Node, @tagName(tag), new_value);
             },
@@ -2492,4 +2532,78 @@ test "rebuildKey: multiple nested tries" {
     const str = try rebuilt.toString(testing.allocator);
     defer testing.allocator.free(str);
     try testing.expectEqualStrings("{ A -> B } X { C -> D, E -> F }", str);
+}
+
+test "Structural recursion with var_pattern: (x, *xs) --> x, (*xs)" {
+    const Parser = @import("../Parser.zig");
+    var arena = ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    var trie = try Parser.parseTrie(allocator,
+        \\(x) --> x
+        \\(x, *xs) --> x, (*xs)
+    );
+
+    // First verify (1, 2) works
+    const query2 = try Parser.parse(allocator, "(1, 2)");
+    std.debug.print("\nQuery (1, 2) height: {}\n", .{query2.height});
+    const eval_result2 = try trie.evaluateComplete(allocator, 0, query2);
+    if (eval_result2.value) |value| {
+        const str = try value.toString(allocator);
+        std.debug.print("(1, 2) -> {s}\n", .{str});
+    }
+
+    // Then (2, 3)
+    const query3 = try Parser.parse(allocator, "(2, 3)");
+    std.debug.print("Query (2, 3) height: {}\n", .{query3.height});
+    const eval_result3 = try trie.evaluateComplete(allocator, 0, query3);
+    if (eval_result3.value) |value| {
+        const str = try value.toString(allocator);
+        std.debug.print("(2, 3) -> {s}\n", .{str});
+    }
+
+    // (1, 2, 3) should evaluate to 1, 2, 3
+    const query = try Parser.parse(allocator, "(1, 2, 3)");
+    std.debug.print("Query (1, 2, 3) height: {}\n", .{query.height});
+    const eval_result = try trie.evaluateComplete(allocator, 0, query);
+
+    if (eval_result.value) |value| {
+        const str = try value.toString(allocator);
+        std.debug.print("(1, 2, 3) -> {s}\n", .{str});
+        try testing.expectEqualStrings("1, 2, 3", str);
+    } else {
+        return error.TestUnexpectedResult;
+    }
+}
+
+test "Height calculation for patterns" {
+    const Parser = @import("../Parser.zig");
+    var arena = ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    // (1, 2, 3) - pattern with list inside
+    const p1 = try Parser.parse(allocator, "(1, 2, 3)");
+    std.debug.print("(1, 2, 3) height: {}\n", .{p1.height});
+
+    // 1, (2, 3) - list with nested pattern
+    const p2 = try Parser.parse(allocator, "1, (2, 3)");
+    std.debug.print("1, (2, 3) height: {}\n", .{p2.height});
+
+    // (2, 3) - smaller pattern
+    const p3 = try Parser.parse(allocator, "(2, 3)");
+    std.debug.print("(2, 3) height: {}\n", .{p3.height});
+
+    // (1, 2) - two element pattern
+    const p4 = try Parser.parse(allocator, "(1, 2)");
+    std.debug.print("(1, 2) height: {}\n", .{p4.height});
+
+    // 1, (2) - rewritten form
+    const p5 = try Parser.parse(allocator, "1, (2)");
+    std.debug.print("1, (2) height: {}\n", .{p5.height});
+
+    // (2) - single element in parens
+    const p6 = try Parser.parse(allocator, "(2)");
+    std.debug.print("(2) height: {}\n", .{p6.height});
 }

@@ -955,3 +955,14 @@ test "parseTrie: comma with varpattern - A, *x --> *x" {
     // After comma, there should be a variable *x
     try testing.expect(comma_trie.var_branches.items.len > 0);
 }
+
+test "parseTrie: mixed operators" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    // Entry 1: list of 3 (A, B->C, D) --> E
+    // Entry 2: F --> G
+    const trie = try parseTrie(arena.allocator(), "A, B -> C, D --> E; F --> G");
+    try testing.expectEqual(@as(usize, 2), trie.size());
+    try testing.expect(trie.map.contains("A"));
+    try testing.expect(trie.map.contains("F"));
+}
