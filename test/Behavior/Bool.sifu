@@ -1,0 +1,22 @@
+Bool -> { True, False }
+
+Not (True)  -> False
+Not (False) -> True
+
+Xor (x : Bool, y : Bool) -> Not (x == y)
+
+If (bool : Bool) Then (*true) Else (*false) -> bool : {
+    True  -> *true
+    False -> *false
+}
+
+x == y --> (x : {y}) and (y : {x}) :: {
+    () -> False
+    _  -> True
+}
+
+
+# ===
+
+# ---
+

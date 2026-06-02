@@ -2651,3 +2651,38 @@ test "Parse structure: comma lists" {
     try testing.expectEqual(@as(usize, 1), bc.height);
     try testing.expectEqual(@as(usize, 1), c_inner.height);
 }
+
+test "Match: trie size as lower bound never matches" {
+    const Parser = @import("../Parser.zig");
+    var arena = ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    var trie = try Parser.parseTrie(allocator,
+        \\A --> 1
+        \\B --> 2
+    );
+    const query = try Parser.parse(allocator, "A");
+
+    // Sanity check: the query matches when starting from the beginning.
+    var lower_bindings = VarBindings{};
+    const matched = try trie.match(
+        allocator,
+        .{ .lower = 0, .upper = trie.size() },
+        &lower_bindings,
+        query,
+    );
+    try testing.expect(matched.value != null);
+
+    // Starting at the trie's size, there is no branch at or after the lower
+    // bound, so nothing can ever match.
+    var bindings = VarBindings{};
+    const unmatched = try trie.match(
+        allocator,
+        .{ .lower = trie.size(), .upper = trie.size() },
+        &bindings,
+        query,
+    );
+    try testing.expect(unmatched.value == null);
+    try testing.expectEqual(@as(usize, 0), unmatched.len);
+}

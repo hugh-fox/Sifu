@@ -39,6 +39,10 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .optimize = optimize,
     });
+    const cli = b.dependency("cli", .{
+        .target = target,
+        .optimize = optimize,
+    });
 
     const module = b.addModule("sifu", .{
         .root_source_file = b.path("src/root.zig"),
@@ -65,6 +69,7 @@ pub fn build(b: *std.Build) void {
             },
         }),
     });
+    exe.root_module.addImport("cli", cli.module("cli"));
     if (use_tree_sitter)
         exe.root_module.addImport("tree_sitter_sifu", tree_sitter_sifu.module("tree_sitter_sifu"));
 
@@ -186,6 +191,9 @@ pub fn build(b: *std.Build) void {
     build_options.addOption([]const []const u8, "behavior_files", behavior_list.items);
 
     integration_tests.root_module.addOptions("build_options", build_options);
+    const integration_options = b.addOptions();
+    integration_options.addOptionPath("sifu_exe", exe.getEmittedBin());
+    integration_tests.root_module.addOptions("integration_options", integration_options);
     const run_integration_tests = b.addRunArtifact(integration_tests);
     const integration_test_step = b.step("integration", "Run integration tests on test/ folder");
     integration_test_step.dependOn(&run_integration_tests.step);

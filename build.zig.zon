@@ -30,6 +30,10 @@
             // .url = "git+https://github.com/hugh-fox/Tree-Sitter-Sifu?ref=HEAD#10836887d82680ec937bd03f55037fd9f7122e76",
             // .hash = "tree_sitter_sifu-0.0.0-GITWtPovAAD6_-xTRcKQUm9tYzS03FEURq5a2bHCJPWp",
         },
+        .cli = .{
+            .url = "git+https://github.com/sam701/zig-cli#036341c48b32ef355274d66461551772fc1f202d",
+            .hash = "cli-0.11.0-2eKe_6sIAQB1njsE9sfrNvd2HxmQej13ebo-D3kBuFX3",
+        },
     },
 
     .paths = .{

@@ -30,6 +30,15 @@ const PackedSlice = packed struct(u64) {
     len: u32,
 };
 
+/// The result of a match/eval, allocated on the wasm heap and returned by
+/// pointer. The caller (js) reads the fields, then frees the result string and
+/// this struct. `index` is the trie index the match actually occurred at.
+const MatchResult = extern struct {
+    ptr: u32,
+    len: u32,
+    index: u32,
+};
+
 fn panic(comptime msg: []const u8) noreturn {
     err(msg.ptr, msg.len);
     @trap();
@@ -46,6 +55,12 @@ export fn parseSliceAsTrie(ptr: [*]const u8, len: u32) u32 {
         panic("Error parsing trie");
 
     return @intFromPtr(trie_ptr);
+}
+
+/// Frees a trie (and all of its internal allocations) previously returned by
+/// `parseSliceAsTrie`.
+export fn destroyTrie(trie_ptr: u32) void {
+    @as(*Trie, @ptrFromInt(trie_ptr)).destroy(wasm_allocator);
 }
 
 export fn parse(ptr: [*]const u8, len: u32) u32 {
@@ -70,14 +85,15 @@ fn parseStrMatch(
     var query = try Parser.parse(allocator, query_str);
     defer query.deinit(allocator);
     var term_bindings = VarBindings{};
-    return trie.match(allocator, bound, &term_bindings, query);
+    return trie.match(allocator, .{ .lower = bound, .upper = trie.size() }, &term_bindings, query);
 }
 
-/// Caller frees.
-export fn matchStr(trie_ptr: u32, query_ptr: [*]const u8, query_len: u32) u64 {
+/// Caller frees the result string and the returned `MatchResult`. Matches
+/// starting from `index` rather than always from 0.
+export fn matchStr(trie_ptr: u32, query_ptr: [*]const u8, query_len: u32, index: u32) u32 {
     const trie: *Trie = @ptrFromInt(trie_ptr);
     const slice = query_ptr[0..query_len];
-    const result = parseStrMatch(trie.*, wasm_allocator, 0, slice) catch
+    const result = parseStrMatch(trie.*, wasm_allocator, index, slice) catch
         panic("Match error");
     const expr = result.value orelse
         result.key;
@@ -85,10 +101,14 @@ export fn matchStr(trie_ptr: u32, query_ptr: [*]const u8, query_len: u32) u64 {
     const expr_string = expr.toString(wasm_allocator) catch
         panic("Writing match expr failed");
 
-    return @bitCast(PackedSlice{
+    const out = wasm_allocator.create(MatchResult) catch
+        panic("Allocation of match result failed");
+    out.* = .{
         .ptr = @intCast(@intFromPtr(expr_string.ptr)),
         .len = @intCast(expr_string.len),
-    });
+        .index = @intCast(result.match_index),
+    };
+    return @intCast(@intFromPtr(out));
 }
 
 /// Convenience function for directly passing a string to parse
@@ -103,11 +123,12 @@ fn parseStrEval(
     return trie.evaluateComplete(allocator, bound, query);
 }
 
-/// Caller frees.
-export fn evalStr(trie_ptr: u32, query_ptr: [*]const u8, query_len: u32) u64 {
+/// Caller frees the result string and the returned `MatchResult`. Evaluates
+/// starting from `index` rather than always from 0.
+export fn evalStr(trie_ptr: u32, query_ptr: [*]const u8, query_len: u32, index: u32) u32 {
     const trie: *Trie = @ptrFromInt(trie_ptr);
     const slice = query_ptr[0..query_len];
-    const result = parseStrEval(trie.*, wasm_allocator, 0, slice) catch
+    const result = parseStrEval(trie.*, wasm_allocator, index, slice) catch
         panic("Match error");
 
     const expr_string = if (result.value) |value|
@@ -116,10 +137,14 @@ export fn evalStr(trie_ptr: u32, query_ptr: [*]const u8, query_len: u32) u64 {
     else
         slice;
 
-    return @bitCast(PackedSlice{
+    const out = wasm_allocator.create(MatchResult) catch
+        panic("Allocation of match result failed");
+    out.* = .{
         .ptr = @intCast(@intFromPtr(expr_string.ptr)),
         .len = @intCast(expr_string.len),
-    });
+        .index = @intCast(result.index),
+    };
+    return @intCast(@intFromPtr(out));
 }
 
 // Allocator `len` bytes using the wasm allocator

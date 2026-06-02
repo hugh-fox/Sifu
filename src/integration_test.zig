@@ -2,6 +2,7 @@ const std = @import("std");
 const mem = std.mem;
 const testing = std.testing;
 const Allocator = std.mem.Allocator;
+const ArrayList = std.ArrayList;
 const Parser = @import("Parser.zig");
 const trie_module = @import("sifu/trie.zig");
 const Trie = trie_module.Trie;
@@ -61,30 +62,97 @@ const ParsedTestFile = struct {
     tests: []const TestCase,
 };
 
-fn parseTestFile(content: []const u8, tests_buf: *[64]TestCase) !ParsedTestFile {
+fn parseTestFile(allocator: Allocator, content: []const u8) !ParsedTestFile {
     const section_delimiter = "\n\n# ===\n\n";
     const case_delimiter = "\n\n# ---\n\n";
 
-    var test_count: usize = 0;
+    var tests: ArrayList(TestCase) = .empty;
 
     var sections = mem.splitSequence(u8, content, section_delimiter);
     const trie_section = sections.first();
 
     while (sections.next()) |test_section| {
-        const trimmed = mem.trim(u8, test_section, &std.ascii.whitespace);
-        if (trimmed.len == 0) continue;
-
         const delim_pos = mem.indexOf(u8, test_section, case_delimiter) orelse {
-            std.debug.print("ERROR: test section has no # --- delimiter: '{s}'\n", .{trimmed});
+            std.debug.print(
+                "ERROR: test section has no # --- delimiter: '{s}'\n",
+                .{test_section},
+            );
             return error.MissingDelimiter;
         };
-        const query = mem.trim(u8, test_section[0..delim_pos], &std.ascii.whitespace);
-        const expected = mem.trim(u8, test_section[delim_pos + case_delimiter.len ..], &std.ascii.whitespace);
-        tests_buf[test_count] = .{ .query = query, .expected = expected };
-        test_count += 1;
+        const query = test_section[0..delim_pos];
+        const expected = mem.trimEnd(u8, test_section[delim_pos + case_delimiter.len ..], &.{'\n'});
+        try tests.append(allocator, .{ .query = query, .expected = expected });
     }
 
-    return .{ .trie = trie_section, .tests = tests_buf[0..test_count] };
+    return .{ .trie = trie_section, .tests = try tests.toOwnedSlice(allocator) };
+}
+
+/// How long a single sifu invocation may run before we give up and kill it.
+const sifu_timeout: Io.Timeout = .{
+    .duration = .{ .raw = .fromSeconds(3), .clock = .awake },
+};
+
+/// Writes all of `bytes` to `file`, giving up once `deadline` passes so a
+/// child that stops reading its stdin can never wedge the test.
+fn writeAllTimeout(file: Io.File, bytes: []const u8, deadline: Io.Timeout) !void {
+    var index: usize = 0;
+    while (index < bytes.len) {
+        const data = [_][]const u8{bytes[index..]};
+        const result = try Io.operateTimeout(
+            testing.io,
+            .{ .file_write_streaming = .{
+                .file = file,
+                .header = &.{},
+                .data = &data,
+                .splat = 1,
+            } },
+            deadline,
+        );
+        index += try result.file_write_streaming;
+    }
+}
+
+/// Spawns the sifu executable, feeds it `trie_content` on stdin and `query` as
+/// an argument, and returns its stdout. Caller owns the returned slice. Every
+/// stream (stdin, stdout, stderr) shares a single deadline, so a hung child is
+/// always killed rather than blocking the test forever.
+fn runSifu(allocator: Allocator, trie_content: []const u8, query: []const u8) ![]u8 {
+    const sifu_exe = @import("integration_options").sifu_exe;
+
+    var child = try std.process.spawn(testing.io, .{
+        .argv = &.{ sifu_exe, query },
+        .stdin = .pipe,
+        .stdout = .pipe,
+        .stderr = .pipe,
+    });
+    errdefer child.kill(testing.io);
+
+    // Anchor a single deadline that bounds the whole interaction.
+    const deadline = sifu_timeout.toDeadline(testing.io);
+
+    // Send the trie definition, then close stdin so the child sees EOF.
+    try writeAllTimeout(child.stdin.?, trie_content, deadline);
+    child.stdin.?.close(testing.io);
+    child.stdin = null;
+
+    // Drain stdout and stderr concurrently into heap-grown buffers; reading
+    // both at once avoids deadlocking on a child that fills either pipe.
+    var reader_buffer: Io.File.MultiReader.Buffer(2) = undefined;
+    var multi_reader: Io.File.MultiReader = undefined;
+    multi_reader.init(
+        allocator,
+        testing.io,
+        reader_buffer.toStreams(),
+        &.{ child.stdout.?, child.stderr.? },
+    );
+    defer multi_reader.deinit();
+
+    try multi_reader.fillRemaining(deadline);
+    try multi_reader.checkAnyError();
+
+    _ = try child.wait(testing.io);
+
+    return multi_reader.toOwnedSlice(0);
 }
 
 fn runBehaviorTest(allocator: Allocator, comptime name: []const u8) !void {
@@ -92,86 +160,35 @@ fn runBehaviorTest(allocator: Allocator, comptime name: []const u8) !void {
     defer behavior.close(testing.io);
 
     const file_content = try readFile(behavior, name ++ ".sifu", allocator);
-    var tests_buf: [64]TestCase = undefined;
-    const parsed = try parseTestFile(file_content, &tests_buf);
-
-    var zig_trie = try Parser.parseTrie(allocator, parsed.trie);
-    defer zig_trie.deinit(allocator);
-    const zig_trie_str = try zig_trie.toString(allocator);
-
-    const ast = try parseWithTreeSitter(parsed.trie);
-    defer ast.destroy();
-    var ts_trie = try ts.astNodeToTrie(allocator, parsed.trie, ast);
-    defer ts_trie.deinit(allocator);
-    const ts_trie_str = try ts_trie.toString(allocator);
-
-    // TODO
-    _ = ts_trie_str;
-    _ = zig_trie_str;
-    // try testing.expectEqualStrings(zig_trie_str, ts_trie_str);
+    const parsed = try parseTestFile(allocator, file_content);
 
     var passed: usize = 0;
     var failed: usize = 0;
 
     for (parsed.tests, 0..) |test_case, i| {
-        var zig_query = Parser.parse(allocator, test_case.query) catch |err| {
-            std.debug.print("  FAIL: test {d} - zig query parse error: {}\n", .{ i + 1, err });
+        const actual = runSifu(allocator, parsed.trie, test_case.query) catch |err| {
+            std.debug.print("  FAIL: test {d} - sifu error: {}\n", .{ i + 1, err });
             failed += 1;
             continue;
         };
-        defer zig_query.deinit(allocator);
+        defer allocator.free(actual);
 
-        const query_ast = parseWithTreeSitter(test_case.query) catch |err| {
-            std.debug.print("  FAIL: test {d} - tree-sitter query parse failed: {}\n", .{ i + 1, err });
-            failed += 1;
-            continue;
-        };
-        defer query_ast.destroy();
-        var ts_query = ts.astToPattern(allocator, test_case.query, query_ast.rootNode()) catch |err| {
-            std.debug.print("  FAIL: test {d} - tree-sitter query conversion error: {}\n", .{ i + 1, err });
-            failed += 1;
-            continue;
-        };
-        defer ts_query.deinit(allocator);
-
-        const zig_query_str = zig_query.toString(allocator) catch |err| {
-            std.debug.print("  FAIL: test {d} - zig query toString error: {}\n", .{ i + 1, err });
-            failed += 1;
-            continue;
-        };
-        const ts_query_str = ts_query.toString(allocator) catch |err| {
-            std.debug.print("  FAIL: test {d} - ts query toString error: {}\n", .{ i + 1, err });
-            failed += 1;
-            continue;
-        };
-
-        testing.expectEqualStrings(zig_query_str, ts_query_str) catch {
-            failed += 1;
-            continue;
-        };
-
-        const eval_result = zig_trie.evaluateComplete(allocator, 0, zig_query) catch |err| {
-            std.debug.print("  FAIL: test {d} - eval error: {}\n", .{ i + 1, err });
-            failed += 1;
-            continue;
-        };
-        const actual_output = if (eval_result.value) |value| blk: {
-            var val = value;
-            defer val.deinit(allocator);
-            break :blk try val.toString(allocator);
-        } else "";
-
-        const actual_trimmed = mem.trim(u8, actual_output, &std.ascii.whitespace);
-
-        testing.expectEqualStrings(test_case.expected, actual_trimmed) catch {
-            std.debug.print("  FAIL test {d}: expected '{s}', got '{s}'\n", .{ i + 1, test_case.expected, actual_trimmed });
+        testing.expectEqualStrings(test_case.expected, actual) catch {
+            std.debug.print("  FAIL test {d}: expected '{s}', got '{s}'\n", .{
+                i + 1,
+                test_case.expected,
+                actual,
+            });
             failed += 1;
             continue;
         };
         passed += 1;
     }
 
-    std.debug.print("Behavior: " ++ name ++ ": {d} passed, {d} failed\n", .{ passed, failed });
+    std.debug.print(
+        "Behavior: " ++ name ++ ": {d} passed, {d} failed\n",
+        .{ passed, failed },
+    );
     if (failed > 0) return error.TestsFailed;
     if (passed == 0) return error.NoTestsRun;
 }

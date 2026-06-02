@@ -1,10 +1,15 @@
+/// === For testing memory usage ===
+// @compileLog(@sizeOf(Trie));
+// @compileLog(@sizeOf(Pattern.Node));
+// @compileLog(@sizeOf(Pattern));
+///
 const std = @import("std");
 const Trie = @import("sifu/trie.zig").Trie;
 const Pattern = @import("sifu/trie.zig").Pattern;
 const Node = @import("sifu/trie.zig").Node;
 const ArenaAllocator = std.heap.ArenaAllocator;
 const Allocator = std.mem.Allocator;
-const ArrayList = std.ArrayList; // Update import
+const ArrayList = std.ArrayList;
 const fs = std.fs;
 const Io = std.Io;
 const mem = std.mem;
@@ -23,11 +28,15 @@ const use_tree_sitter = @import("build_options").tree_sitter;
 const Parser = @import("Parser.zig");
 const ts = if (use_tree_sitter) @import("tree_sitter_parser.zig") else struct {};
 const debug = std.log.debug;
-// @compileLog(@sizeOf(Pat));
-// @compileLog(@sizeOf(Pat.Node));
-// @compileLog(@sizeOf(ArrayListUnmanaged(Pat.Node)));
+const cli = @import("cli");
+var config = struct {
+    interactive: bool = false,
+    expression: []const u8 = "",
+}{};
 
-pub fn main(init: std.process.Init) void {
+fn noOp() !void {}
+
+pub fn main(init: std.process.Init) !void {
     var arena = ArenaAllocator.init(init.gpa);
     var debug_allocator = if (comptime detect_leaks)
         std.heap.DebugAllocator(.{}){}
@@ -36,49 +45,133 @@ pub fn main(init: std.process.Init) void {
         debug_allocator.allocator()
     else
         arena.allocator();
+    defer {
+        if (comptime detect_leaks)
+            _ = debug_allocator.detectLeaks()
+        else
+            arena.deinit();
+    }
 
     const streams = Streams.init(init.io);
-    repl(
-        allocator,
-        streams,
-    ) catch |e|
-        panic("{}", .{e});
 
-    if (comptime detect_leaks)
-        _ = debug_allocator.detectLeaks()
-    else
-        arena.deinit();
+    var r = cli.AppRunner.init(&init);
+    defer r.deinit();
+
+    const app = cli.App{
+        .command = cli.Command{
+            .name = "sifu",
+            .description = .{ .one_line = "Sifu interactive REPL" },
+            .options = try r.allocOptions(&.{
+                .{
+                    .long_name = "interactive",
+                    .short_alias = 'i',
+                    .help = "start interactive REPL",
+                    .value_ref = r.mkRef(&config.interactive),
+                },
+            }),
+            .target = cli.CommandTarget{
+                .action = cli.CommandAction{
+                    .positional_args = .{
+                        .optional = try r.allocPositionalArgs(&.{
+                            .{
+                                .name = "expression",
+                                .help = "expression to evaluate",
+                                .value_ref = r.mkRef(&config.expression),
+                            },
+                        }),
+                    },
+                    .exec = noOp,
+                },
+            },
+        },
+    };
+    _ = try r.getAction(&app);
+
+    if (config.interactive) {
+        return repl(allocator, streams);
+    }
+
+    const stdin_is_piped = !(std.Io.File.stdin().isTty(init.io) catch false);
+    const has_expr = config.expression.len > 0;
+
+    var trie = Trie{};
+    defer trie.deinit(allocator);
+
+    if (stdin_is_piped)
+        try loadTrie(allocator, streams, &trie);
+
+    if (has_expr) {
+        try evalExpr(allocator, streams, &trie, config.expression);
+    } else if (stdin_is_piped) {
+        try trie.writeCanonical(streams.out);
+        try streams.out.flush();
+    }
 }
 
-// TODO: Implement repl/file specific behavior
-fn repl(
-    allocator: Allocator,
-    streams: Streams,
-) !void {
-    var trie = Trie{}; // This will be cleaned up with the arena
+fn loadTrie(allocator: Allocator, streams: Streams, trie: *Trie) !void {
+    while (true) {
+        var buffer = std.Io.Writer.Allocating.init(allocator);
+        defer buffer.deinit();
+        const at_end = blk: {
+            _ = streams.in.streamDelimiter(&buffer.writer, '\n') catch |err| switch (err) {
+                // streamDelimiter writes the partial line before returning EndOfStream
+                error.EndOfStream => break :blk true,
+                else => return err,
+            };
+            _ = streams.in.takeByte() catch {};
+            break :blk false;
+        };
+        const line = buffer.written();
+        if (line.len > 0) {
+            var pattern = try Parser.parse(allocator, line);
+            defer pattern.deinit(allocator);
+            const root = pattern.root;
+            if (root.len > 0 and root[root.len - 1] == .arrow) {
+                const key = root[0 .. root.len - 1];
+                const val = root[root.len - 1].arrow;
+                _ = try trie.append(
+                    allocator,
+                    .{ .root = key, .height = pattern.height },
+                    val,
+                );
+            }
+        }
+        if (at_end) return;
+    }
+}
+
+fn evalExpr(allocator: Allocator, streams: Streams, trie: *Trie, expr: []const u8) !void {
+    var pattern = try Parser.parse(allocator, expr);
+    defer pattern.deinit(allocator);
+
+    debug("Eval Complete from {*}", .{trie});
+    const eval = try trie.evaluateComplete(allocator, 0, pattern);
+    if (eval.value) |*value| {
+        defer @constCast(value).deinit(allocator);
+        try value.writeIndent(streams.out, 0);
+    } else {
+        try streams.out.print("No match.", .{});
+    }
+    try streams.out.flush();
+}
+
+fn repl(allocator: Allocator, streams: Streams) !void {
+    var trie = Trie{};
     defer trie.deinit(allocator);
 
     while (replStep(allocator, streams, &trie)) |_| {
         try streams.out.flush();
     } else |err| switch (err) {
         error.EndOfStream => return,
-        // error.StreamTooLong => return e, // TODO: handle somehow
         else => return err,
     }
 }
 
-fn replStep(
-    allocator: Allocator,
-    streams: Streams,
-    trie: *Trie,
-) !?void {
+fn replStep(allocator: Allocator, streams: Streams, trie: *Trie) !?void {
     var buffer = std.Io.Writer.Allocating.init(allocator);
     defer buffer.deinit();
     var pattern = if (comptime use_tree_sitter) blk: {
-        const ast_option = try ts.parser.parseLine(
-            &buffer,
-            streams.in,
-        );
+        const ast_option = try ts.parser.parseLine(&buffer, streams.in);
         const ast_ptr = ast_option orelse panic("Empty parse\n", .{});
         defer ast_ptr.destroy();
         {
@@ -89,14 +182,13 @@ fn replStep(
                 .{ node.kind(), node.childCount(), text },
             );
         }
-        break :blk try ts
-            .astToPattern(allocator, buffer.written(), ast_ptr.rootNode());
+        break :blk try ts.astToPattern(allocator, buffer.written(), ast_ptr.rootNode());
     } else blk: {
         _ = streams.in.streamDelimiter(&buffer.writer, '\n') catch |err| switch (err) {
             error.EndOfStream => return error.EndOfStream,
             else => return err,
         };
-        _ = try streams.in.takeByte(); // consume the newline
+        _ = try streams.in.takeByte();
         break :blk try Parser.parse(allocator, buffer.written());
     };
     defer pattern.deinit(allocator);
@@ -105,69 +197,16 @@ fn replStep(
         "Converted pattern {} high and {} wide, of types: ",
         .{ pattern.height, pattern.root.len },
     );
-    // for (root) |app| {
-    // debug("{s} ", .{@tagName(app)});
-    // app.writeSExp(streams.err, 0) catch unreachable;
-    // streams.err.writeByte(' ') catch unreachable;
-    // }
-    // pattern.debug("Pattern: {s}");
 
-    // if (comptime detect_leaks) try debug(
-    //     "String Arena Allocated: {} bytes",
-    //     .{str_arena.queryCapacity()},
-    // );
-
-    // TODO: read a "file" from stdin first, until eof, then start eval/matching
-    // until another eof.
     if (root.len > 0 and root[root.len - 1] == .arrow) {
         const key = root[0 .. root.len - 1];
         const val = root[root.len - 1].arrow;
-        // TODO: calculate correct tree height
         _ = try trie.append(
             allocator,
             .{ .root = key, .height = pattern.height },
-            // try val.copy(allocator),
             val,
         );
     } else {
-        // Free the rest of the match's string allocations. Those used in
-        // rewriting must be completely copied.
-        // defer str_arena.deinit();
-
-        // If not inserting, then try to match the expression
-        // TODO: put into a comptime for eval kind
-        // print("Parsed ast hash: {}", .{ast.hash()});
-
-        // const match = try trie.match(allocator, 0, pattern);
-        // print("Matched {} nodes ", .{match.len});
-        // if (match.value) |value| {
-        //     try writer.print("at {}: ", .{match.index});
-        //     try value.writeIndent(writer, 0);
-        // } else print("null", .{});
-        // try writer.writeByte('\n');
-
-        // const result = try trie.evaluate(allocator, pattern);
-        // defer result.deinit(allocator);
-        // try result.write(writer);
-        // try writer.writeByte('\n');
-
-        // const result = try trie.evaluateComplete(allocator, 0, pattern);
-        // _ = result;
-
-        // if (result.value) |*value|
-        //     value.deinit(allocator);
-        // try result.value.write(writer);
-        // try writer.writeByte('\n');
-
-        // const index, const step = try trie.evaluateStep(allocator, 0, pattern);
-        // defer step.deinit(allocator);
-        // print("Match at {}, Rewrite: ", .{index});
-        // try step.write(writer);
-        // try writer.writeByte('\n');
-
-        // var buff = ArrayList(Node).empty;
-        // defer buff.deinit(allocator);
-        // const result = try trie.evaluateSlice(allocator, pattern, &buff);
         debug("Eval Complete from {*}", .{trie});
         const eval = try trie.evaluateComplete(allocator, 0, pattern);
         if (eval.value) |*value| {
@@ -175,7 +214,6 @@ fn replStep(
             try streams.out.print("Eval at {} of length {}: ", .{ eval.index, eval.len });
             std.log.debug("WriteIndent on pattern len {}", .{value.root.len});
             try value.writeIndent(streams.out, 0);
-            // for (result.root) |r| try r.writeSExp(streams.out, 0);
             try streams.out.writeByte('\n');
         } else {
             try streams.out.print("No match.\n", .{});
@@ -183,6 +221,5 @@ fn replStep(
         }
     }
 
-    // try trie.writeIndent(streams.out, 0);
     try trie.writeCanonical(streams.out);
 }
