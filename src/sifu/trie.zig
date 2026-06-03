@@ -57,6 +57,9 @@ pub const Node = union(enum) {
     /// Lists are operators that are recognized as separators for
     /// patterns.
     list: Pattern,
+    /// A newline-separated entry. Like list/semicolon but uses newline
+    /// for pretty-print isomorphism.
+    newline: Pattern,
     /// An expression in braces.
     trie: Trie,
 
@@ -155,7 +158,7 @@ pub const Node = union(enum) {
 
     pub fn height(self: Node) usize {
         return switch (self) {
-            .pattern, .infix, .match, .arrow, .list => |p| p.height,
+            .pattern, .infix, .match, .arrow, .list, .newline => |p| p.height,
             else => 0,
         };
     }
@@ -196,6 +199,7 @@ pub const Node = union(enum) {
                     .arrow => try writer.writeAll("-> "),
                     .match => try writer.writeAll(": "),
                     .list => try writer.writeAll(", "),
+                    .newline => try writer.writeByte('\n'),
                     else => {},
                 }
                 try pattern.writeIndent(writer, optional_indent);
@@ -231,13 +235,13 @@ pub const Pattern = struct {
         if (slice.len == 1) {
             return;
         } else for (slice[1 .. slice.len - 1]) |*node| {
-            // Don't add space before list nodes or comma keys
-            if (node.* != .list and !node.isCommaKey())
+            // Don't add space before list/newline nodes or comma keys
+            if (node.* != .list and node.* != .newline and !node.isCommaKey())
                 try writer.writeByte(' ');
             try node.writeSExp(writer, optional_indent);
         }
-        // Don't add space before list nodes or comma keys
-        if (slice[slice.len - 1] != .list and !slice[slice.len - 1].isCommaKey())
+        // Don't add space before list/newline nodes or comma keys
+        if (slice[slice.len - 1] != .list and slice[slice.len - 1] != .newline and !slice[slice.len - 1].isCommaKey())
             try writer.writeByte(' ');
         try slice[slice.len - 1]
             .writeSExp(writer, optional_indent);
@@ -772,6 +776,13 @@ pub const Trie = struct {
 
                 break :blk next;
             },
+            .newline => |nl| blk: {
+                var next = trie;
+                next = try next.getOrPutKey(allocator, index, "\n");
+                next = try next.ensurePath(allocator, index, nl);
+
+                break :blk next;
+            },
             .infix => |sub_pat| blk: {
                 var next = trie;
                 next = try next.ensurePath(allocator, index, sub_pat);
@@ -862,7 +873,7 @@ pub const Trie = struct {
     }
 
     /// A partial or complete match of a given pattern against a trie.
-    pub const Match = struct {
+    const Match = struct {
         key: Pattern = .{}, // The pattern that was attempted to match
         value: ?Pattern = null,
         node_ptr: *const Trie,
@@ -1173,12 +1184,13 @@ pub const Trie = struct {
                 };
             },
 
-            .list => |pattern| {
-                debug("Matching list with len {}", .{pattern.root.len});
-                const open_entry = self.map.getEntry(",") orelse
+            .list, .newline => |pattern, tag| {
+                const sep_key = if (tag == .newline) "\n" else ",";
+                debug("Matching {s} with len {}", .{ @tagName(tag), pattern.root.len });
+                const open_entry = self.map.getEntry(sep_key) orelse
                     return null;
                 const open_trie = open_entry.value_ptr;
-                debug("Matched comma at {*}", .{open_trie});
+                debug("Matched separator at {*}", .{open_trie});
                 var index, _ = open_trie.findNext(bound) orelse
                     return null;
 
@@ -1190,14 +1202,14 @@ pub const Trie = struct {
 
                 // Check that the full pattern matched
                 if (pattern_match.len != pattern.root.len) {
-                    debug("List match failed: only matched {} of {} terms", .{
+                    debug("Separator match failed: only matched {} of {} terms", .{
                         pattern_match.len,
                         pattern.root.len,
                     });
                     return null;
                 }
 
-                debug("Matched list tail at {*}", .{pattern_match.node_ptr});
+                debug("Matched separator tail at {*}", .{pattern_match.node_ptr});
                 // Get the branch from the final matched position
                 const final_branch = pattern_match.node_ptr.findNext(.{ .lower = index, .upper = bound.upper }) orelse
                     return null;
@@ -1526,6 +1538,31 @@ pub const Trie = struct {
         return self.evaluateBounded(allocator, .{ .lower = lower_bound, .upper = self.size() }, pattern);
     }
 
+    /// Performs a single match + rewrite step. Same API as evaluateComplete but
+    /// only does one step instead of iterating to fixpoint. Returns the rewritten
+    /// pattern if a match was found, or null if no match. The caller owns the
+    /// returned pattern and should free it with `Pattern.deinit(allocator)`.
+    pub fn evaluateMatch(
+        self: Self,
+        allocator: Allocator,
+        lower_bound: usize,
+        pattern: Pattern,
+    ) Allocator.Error!Eval {
+        const bound = Bound{ .lower = lower_bound, .upper = self.size() };
+        var term_bindings = VarBindings{};
+        defer term_bindings.deinit(allocator);
+
+        var matched = try self.match(allocator, bound, &term_bindings, pattern);
+        defer matched.deinit(allocator);
+
+        const matched_value = matched.value orelse {
+            return Eval{ .value = null, .index = matched.match_index, .len = matched.len };
+        };
+
+        const rewritten = try self.rewrite(allocator, matched_value, &term_bindings);
+        return Eval{ .value = rewritten, .index = matched.match_index, .len = matched.len };
+    }
+
     var eval_depth: usize = 0;
 
     fn evaluateBounded(
@@ -1640,7 +1677,7 @@ pub const Trie = struct {
                     const new_root = try allocator.alloc(Node, head_val.root.len + tail.len);
                     for (head_val.root, new_root[0..head_val.root.len]) |node, *dst|
                         dst.* = try node.copy(allocator);
-                    @memcpy(new_root[head_val.root.len ..], tail);
+                    @memcpy(new_root[head_val.root.len..], tail);
                     for (current.root[0..list_pos]) |*node|
                         @constCast(node).deinit(allocator);
                     allocator.free(current.root);

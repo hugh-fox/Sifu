@@ -38,9 +38,10 @@ pub const Tag = enum {
     string,
     symbol,
     semicolon,
+    newline,
+    comma,
     long_match,
     long_arrow,
-    comma,
     match,
     arrow,
     left_paren,
@@ -110,17 +111,42 @@ fn advance(self: *Self) Token {
         '`' => return self.single(.backtick),
         ';' => return self.single(.semicolon),
         '\n' => {
-            // Skip trailing newlines (newline followed only by whitespace/newlines)
-            var check_pos = self.pos + 1;
-            while (check_pos < self.source.len) : (check_pos += 1) {
-                const ch = self.source[check_pos];
-                if (ch != ' ' and ch != '\t' and ch != '\r' and ch != '\n') break;
-            } else {
-                // Only whitespace/newlines until EOF - skip this newline
+            // Skip newlines that end comment-only lines (look back to start of line).
+            // This makes `# comment\n` disappear entirely.
+            var line_start = self.pos;
+            while (line_start > 0 and self.source[line_start - 1] != '\n')
+                line_start -= 1;
+            var has_code = false;
+            var scan = line_start;
+            while (scan < self.pos) : (scan += 1) {
+                const ch = self.source[scan];
+                if (ch == '#') break; // Rest is comment
+                if (ch != ' ' and ch != '\t' and ch != '\r') {
+                    has_code = true;
+                    break;
+                }
+            }
+            if (!has_code) {
+                // Line was whitespace/comment only - skip this newline
                 self.pos += 1;
                 return self.advance();
             }
-            return self.single(.semicolon);
+
+            // Skip trailing newlines (newline followed only by whitespace/newlines/comments)
+            var check_pos = self.pos + 1;
+            while (check_pos < self.source.len) : (check_pos += 1) {
+                const ch = self.source[check_pos];
+                if (ch == '#') {
+                    // Skip comment
+                    while (check_pos < self.source.len and self.source[check_pos] != '\n')
+                        check_pos += 1;
+                } else if (ch != ' ' and ch != '\t' and ch != '\r' and ch != '\n') break;
+            } else {
+                // Only whitespace/newlines/comments until EOF - skip this newline
+                self.pos += 1;
+                return self.advance();
+            }
+            return self.single(.newline);
         },
         ',' => return self.single(.comma),
         '"' => return self.lexString(),
@@ -287,10 +313,11 @@ pub fn parsePattern(self: *Self, allocator: Allocator) Oom!Pattern {
     return self.parsePrec1(allocator);
 }
 
-/// Prec 1: semicolon (right-associative to match Tree-sitter grammar)
+/// Prec 1: semicolon/newline (right-associative to match Tree-sitter grammar)
+/// All three list separators (semicolon, newline, comma) produce .list nodes.
 fn parsePrec1(self: *Self, allocator: Allocator) Oom!Pattern {
-    // Handle leading semicolon (empty LHS)
-    if (self.peek() == .semicolon) {
+    // Handle leading separator (empty LHS)
+    if (self.peek() == .semicolon or self.peek() == .newline) {
         _ = self.eat();
         const rhs = try self.parseOptionalPrec1(allocator);
         var nodes = try allocator.alloc(Node, 1);
@@ -299,9 +326,9 @@ fn parsePrec1(self: *Self, allocator: Allocator) Oom!Pattern {
     }
 
     const lhs = try self.parsePrec2(allocator);
-    if (self.peek() != .semicolon) return lhs;
+    if (self.peek() != .semicolon and self.peek() != .newline) return lhs;
 
-    // Consume semicolon and recursively parse rhs (right-associative)
+    // Consume separator and recursively parse rhs (right-associative)
     _ = self.eat();
     const rhs = try self.parseOptionalPrec1(allocator);
 
@@ -541,53 +568,47 @@ fn patternToTrie(allocator: Allocator, pattern: Pattern) Oom!Trie {
 
     if (pattern.root.len == 0) return result;
 
-    // With right-associative parsing, multiple entries are incrementHeight:
+    // With right-associative parsing, multiple entries are structured as:
     // "A -> 1; B -> 2" = [A, arrow([1]), list([B, arrow([2])])]
-    // We need to recursively process the .list nodes that represent semicolons.
+    // We need to recursively process the .list nodes that represent semicolons/newlines.
     //
-    // Semicolons vs commas:
-    // - Semicolons separate trie entries (have arrows in their contents)
-    // - Commas are part of pattern structure (no arrows, or arrows incrementHeight deeper)
+    // Semicolons/newlines vs commas:
+    // - Semicolons/newlines at prec 1 separate trie entries
+    // - Commas at prec 3 are part of pattern structure within entries
     //
-    // Heuristic: A .list at the end of a pattern is a semicolon if it contains
-    // an arrow at its top level.
+    // Heuristic: A .list at the END of the root pattern is an entry separator.
+    // Commas within entries create .list nodes but they appear nested inside
+    // arrow/infix patterns, not at the end of the root.
 
     try appendEntryRecursive(&result, allocator, pattern);
     return result;
 }
 
 /// Recursively extract entries from a right-associative pattern.
-/// If the pattern ends with a .list containing an arrow, that's a semicolon
-/// separator - process the prefix as one entry and recurse on the list contents.
+/// Any .list at the end of the root pattern is treated as an entry separator.
 fn appendEntryRecursive(result: *Trie, allocator: Allocator, pattern: Pattern) Oom!void {
     if (pattern.root.len == 0) return;
 
-    // Check if the last element is a .list that might be a semicolon
+    // Check if the last element is a .list - this indicates an entry separator
     const last_idx = pattern.root.len - 1;
     const last_node = pattern.root[last_idx];
 
-    if (last_node == .list) {
-        // Check if this list contains an arrow at its top level (semicolon separator)
-        var is_semicolon = false;
-        for (last_node.list.root) |inner| {
-            if (inner == .arrow) {
-                is_semicolon = true;
-                break;
-            }
-        }
+    const sep_contents: ?Pattern = switch (last_node) {
+        .list => |p| p,
+        else => null,
+    };
 
-        if (is_semicolon) {
-            // This is a semicolon: prefix is one entry, .list contents are more entries
-            if (last_idx > 0) {
-                try appendEntry(result, allocator, patternFromSlice(pattern.root[0..last_idx]));
-            }
-            // Recursively process the list contents
-            try appendEntryRecursive(result, allocator, last_node.list);
-            return;
+    if (sep_contents) |contents| {
+        // This is an entry separator: prefix is one entry, contents are more entries
+        if (last_idx > 0) {
+            try appendEntry(result, allocator, patternFromSlice(pattern.root[0..last_idx]));
         }
+        // Recursively process the separator contents
+        try appendEntryRecursive(result, allocator, contents);
+        return;
     }
 
-    // No semicolon found - treat entire pattern as a single entry
+    // No separator found - treat entire pattern as a single entry
     try appendEntry(result, allocator, pattern);
 }
 
@@ -645,7 +666,7 @@ pub fn parse(allocator: Allocator, source: []const u8) Oom!Pattern {
 
 const testing = std.testing;
 
-const NodeTag = enum { key, variable, var_pattern, pattern, infix, match, arrow, list, trie };
+const NodeTag = enum { key, variable, var_pattern, pattern, infix, match, arrow, list, newline, trie };
 
 fn expectNodes(pattern: Pattern, expected_tags: []const NodeTag) !void {
     try testing.expectEqual(expected_tags.len, pattern.root.len);
@@ -658,6 +679,7 @@ fn expectNodes(pattern: Pattern, expected_tags: []const NodeTag) !void {
             .match => .match,
             .arrow => .arrow,
             .list => .list,
+            .newline => .newline,
             .trie => .trie,
         };
         try testing.expectEqual(expected_tag, actual_tag);
@@ -849,7 +871,7 @@ test "infix: 1 + 2" {
 test "comment skipped" {
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
-    // Newlines are semicolons, so "A # comment\nB" becomes "A; B"
+    // Newlines separate entries, "A # comment\nB" becomes "A\nB"
     const p = try parse(arena.allocator(), "A # comment\nB");
     try expectNodes(p, &.{ .key, .list });
     try testing.expectEqualStrings("A", p.root[0].key);
@@ -965,4 +987,152 @@ test "parseTrie: mixed operators" {
     try testing.expectEqual(@as(usize, 2), trie.size());
     try testing.expect(trie.map.contains("A"));
     try testing.expect(trie.map.contains("F"));
+}
+
+test "multiline: newlines separate entries" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    // Newlines work like semicolons and produce .list nodes
+    const p = try parse(arena.allocator(), "A\nB\nC");
+    // [A, list([B, list([C])])]
+    try expectNodes(p, &.{ .key, .list });
+    try testing.expectEqualStrings("A", p.root[0].key);
+    try testing.expectEqualStrings("B", p.root[1].list.root[0].key);
+    try expectNodes(p.root[1].list, &.{ .key, .list });
+    try testing.expectEqualStrings("C", p.root[1].list.root[1].list.root[0].key);
+}
+
+test "multiline: trailing arrow is empty" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    // Arrow at end of line has empty RHS, newline separates
+    const p = try parse(arena.allocator(), "A ->\nB");
+    // [A, arrow([]), list([B])]
+    try expectNodes(p, &.{ .key, .arrow, .list });
+    try testing.expectEqualStrings("A", p.root[0].key);
+    try testing.expectEqual(@as(usize, 0), p.root[1].arrow.root.len);
+    try testing.expectEqualStrings("B", p.root[2].list.root[0].key);
+}
+
+test "multiline: trailing comma separates" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    // Comma (prec 3) has empty RHS, newline (prec 1) separates B
+    const p = try parse(arena.allocator(), "A,\nB");
+    // [A, list([]), list([B])] - comma with empty, then newline with B
+    try expectNodes(p, &.{ .key, .list, .list });
+    try testing.expectEqualStrings("A", p.root[0].key);
+    try testing.expectEqual(@as(usize, 0), p.root[1].list.root.len);
+    try testing.expectEqualStrings("B", p.root[2].list.root[0].key);
+}
+
+test "multiline: trailing long arrow is empty" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const p = try parse(arena.allocator(), "A -->\nB");
+    // [A, arrow([]), list([B])]
+    try expectNodes(p, &.{ .key, .arrow, .list });
+    try testing.expectEqualStrings("A", p.root[0].key);
+    try testing.expectEqual(@as(usize, 0), p.root[1].arrow.root.len);
+    try testing.expectEqualStrings("B", p.root[2].list.root[0].key);
+}
+
+test "multiline: trailing match is empty" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const p = try parse(arena.allocator(), "x :\nInt");
+    // [x, match([]), list([Int])]
+    try expectNodes(p, &.{ .variable, .match, .list });
+    try testing.expectEqualStrings("x", p.root[0].variable);
+    try testing.expectEqual(@as(usize, 0), p.root[1].match.root.len);
+    try testing.expectEqualStrings("Int", p.root[2].list.root[0].key);
+}
+
+test "multiline: trie with newline entries" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const trie = try parseTrie(arena.allocator(), "A -> 1\nB -> 2");
+    try testing.expectEqual(@as(usize, 2), trie.size());
+    try testing.expect(trie.map.contains("A"));
+    try testing.expect(trie.map.contains("B"));
+}
+
+test "multiline: trie with trailing arrow has empty value" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    // Arrow at end of line has empty value, B is separate entry
+    const trie = try parseTrie(arena.allocator(), "A ->\nB");
+    try testing.expectEqual(@as(usize, 2), trie.size());
+    try testing.expect(trie.map.contains("A"));
+    try testing.expect(trie.map.contains("B"));
+    // A's value should be empty
+    const a_value = trie.getIndexOrNull(0).?;
+    try testing.expectEqual(@as(usize, 0), a_value.root.len);
+}
+
+test "multiline: comment after trailing op" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    // Comment after trailing operator, B is separate entry
+    const p = try parse(arena.allocator(), "A -> # value is B\nB");
+    // [A, arrow([]), list([B])]
+    try expectNodes(p, &.{ .key, .arrow, .list });
+    try testing.expectEqualStrings("A", p.root[0].key);
+    try testing.expectEqual(@as(usize, 0), p.root[1].arrow.root.len);
+    try testing.expectEqualStrings("B", p.root[2].list.root[0].key);
+}
+
+test "multiline: multiple newlines are separate entries" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    // Two newlines = two separations (one entry per line)
+    const p = try parse(arena.allocator(), "A\n\nB");
+    // A, then list([list([B])]) - empty line is empty entry
+    try expectNodes(p, &.{ .key, .list });
+}
+
+test "multiline: multi-line pattern without continuation" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    // Each line is a separate entry (no line continuation)
+    const src =
+        \\Map fn () -> ()
+        \\Map fn (x, *xs) --> fn x, Map fn (*xs)
+    ;
+    const trie = try parseTrie(arena.allocator(), src);
+    try testing.expectEqual(@as(usize, 2), trie.size());
+    try testing.expect(trie.map.contains("Map"));
+}
+
+test "multiline: newlines and semicolons produce same structure" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    // Newlines and semicolons both produce .list nodes
+    const with_newline = try parse(arena.allocator(), "A\nB");
+    const with_semicolon = try parse(arena.allocator(), "A; B");
+
+    // Both should produce: [A, list([B])]
+    try expectNodes(with_newline, &.{ .key, .list });
+    try expectNodes(with_semicolon, &.{ .key, .list });
+    try testing.expectEqualStrings("A", with_newline.root[0].key);
+    try testing.expectEqualStrings("A", with_semicolon.root[0].key);
+    try testing.expectEqualStrings("B", with_newline.root[1].list.root[0].key);
+    try testing.expectEqualStrings("B", with_semicolon.root[1].list.root[0].key);
+}
+
+test "multiline: trailing operators do not continue" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    // Single line vs multiline produce different structures
+    const single_line = try parse(arena.allocator(), "A -> B");
+    const with_newline = try parse(arena.allocator(), "A ->\nB");
+
+    // Single line: [A, arrow([B])]
+    try expectNodes(single_line, &.{ .key, .arrow });
+    try testing.expectEqualStrings("B", single_line.root[1].arrow.root[0].key);
+
+    // Multiline: [A, arrow([]), list([B])]
+    try expectNodes(with_newline, &.{ .key, .arrow, .list });
+    try testing.expectEqual(@as(usize, 0), with_newline.root[1].arrow.root.len);
+    try testing.expectEqualStrings("B", with_newline.root[2].list.root[0].key);
 }

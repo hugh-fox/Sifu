@@ -1,9 +1,12 @@
 # This comment should be ignored while matching
-A -> B
+A -> B # and this
+# also this
 
 # ===
 
-A
+# As should this
+A # and this
+# also this
 
 # ---
 

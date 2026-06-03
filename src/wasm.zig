@@ -14,10 +14,7 @@ const ts = if (use_tree_sitter) @import("tree_sitter_parser.zig") else struct {}
 const trie_module = @import("sifu/trie.zig");
 const Pattern = trie_module.Pattern;
 const Trie = trie_module.Trie;
-const Match = Trie.Match;
-const Eval = Trie.Eval;
 const Streams = @import("streams.zig").Streams;
-pub const VarBindings = trie_module.VarBindings;
 
 // const Node = Pattern.Node;
 const wasm_allocator = std.heap.wasm_allocator;
@@ -33,10 +30,14 @@ const PackedSlice = packed struct(u64) {
 /// The result of a match/eval, allocated on the wasm heap and returned by
 /// pointer. The caller (js) reads the fields, then frees the result string and
 /// this struct. `index` is the trie index the match actually occurred at.
+/// `pattern` is a heap `*Pattern` clone of the result, kept so a chained
+/// evaluation can be driven straight from it (via `matchPattern`/`evalPattern`)
+/// without re-parsing a string; the caller frees it with `destroyPattern`.
 const MatchResult = extern struct {
     ptr: u32,
     len: u32,
     index: u32,
+    pattern: u32,
 };
 
 fn panic(comptime msg: []const u8) noreturn {
@@ -75,67 +76,40 @@ export fn parse(ptr: [*]const u8, len: u32) u32 {
     return @intFromPtr(pattern_ptr);
 }
 
-/// Convenience function for directly passing a string to parse
-fn parseStrMatch(
-    trie: Trie,
-    allocator: Allocator,
-    bound: usize,
-    query_str: []const u8,
-) !Match {
-    var query = try Parser.parse(allocator, query_str);
-    defer query.deinit(allocator);
-    var term_bindings = VarBindings{};
-    return trie.match(allocator, .{ .lower = bound, .upper = trie.size() }, &term_bindings, query);
+/// Frees a pattern previously returned by `parse` or kept in a `MatchResult`.
+export fn destroyPattern(pattern_ptr: u32) void {
+    @as(*Pattern, @ptrFromInt(pattern_ptr)).destroy(wasm_allocator);
 }
 
-/// Caller frees the result string and the returned `MatchResult`. Matches
-/// starting from `index` rather than always from 0.
+/// Caller frees the result string, the result `pattern`, and the returned
+/// `MatchResult`. Parses `query` into a pattern then delegates to
+/// `matchPattern`.
 export fn matchStr(trie_ptr: u32, query_ptr: [*]const u8, query_len: u32, index: u32) u32 {
+    const query = wasm_allocator.create(Pattern) catch
+        panic("Allocation of query failed");
+    defer query.destroy(wasm_allocator);
+    query.* = Parser.parse(wasm_allocator, query_ptr[0..query_len]) catch
+        panic("Error parsing query");
+    return matchPattern(trie_ptr, @intCast(@intFromPtr(query)), index);
+}
+
+/// Caller frees the result string, the result `pattern`, and the returned
+/// `MatchResult`. Performs one match + rewrite step on the already-parsed
+/// `pattern` starting from `index`, which lets chained evaluations skip
+/// re-parsing.
+export fn matchPattern(trie_ptr: u32, pattern_ptr: u32, index: u32) u32 {
     const trie: *Trie = @ptrFromInt(trie_ptr);
-    const slice = query_ptr[0..query_len];
-    const result = parseStrMatch(trie.*, wasm_allocator, index, slice) catch
+    const pattern: *Pattern = @ptrFromInt(pattern_ptr);
+    const result = trie.evaluateMatch(wasm_allocator, index, pattern.*) catch
         panic("Match error");
+
     const expr = result.value orelse
-        result.key;
+        return 0; // no match
 
     const expr_string = expr.toString(wasm_allocator) catch
         panic("Writing match expr failed");
-
-    const out = wasm_allocator.create(MatchResult) catch
-        panic("Allocation of match result failed");
-    out.* = .{
-        .ptr = @intCast(@intFromPtr(expr_string.ptr)),
-        .len = @intCast(expr_string.len),
-        .index = @intCast(result.match_index),
-    };
-    return @intCast(@intFromPtr(out));
-}
-
-/// Convenience function for directly passing a string to parse
-fn parseStrEval(
-    trie: Trie,
-    allocator: Allocator,
-    bound: usize,
-    query_str: []const u8,
-) !Eval {
-    var query = try Parser.parse(allocator, query_str);
-    defer query.deinit(allocator);
-    return trie.evaluateComplete(allocator, bound, query);
-}
-
-/// Caller frees the result string and the returned `MatchResult`. Evaluates
-/// starting from `index` rather than always from 0.
-export fn evalStr(trie_ptr: u32, query_ptr: [*]const u8, query_len: u32, index: u32) u32 {
-    const trie: *Trie = @ptrFromInt(trie_ptr);
-    const slice = query_ptr[0..query_len];
-    const result = parseStrEval(trie.*, wasm_allocator, index, slice) catch
-        panic("Match error");
-
-    const expr_string = if (result.value) |value|
-        value.toString(wasm_allocator) catch
-            panic("Writing match expr failed")
-    else
-        slice;
+    const result_pattern = expr.clone(wasm_allocator) catch
+        panic("Cloning match pattern failed");
 
     const out = wasm_allocator.create(MatchResult) catch
         panic("Allocation of match result failed");
@@ -143,6 +117,45 @@ export fn evalStr(trie_ptr: u32, query_ptr: [*]const u8, query_len: u32, index: 
         .ptr = @intCast(@intFromPtr(expr_string.ptr)),
         .len = @intCast(expr_string.len),
         .index = @intCast(result.index),
+        .pattern = @intCast(@intFromPtr(result_pattern)),
+    };
+    return @intCast(@intFromPtr(out));
+}
+
+/// Caller frees the result string, the result `pattern`, and the returned
+/// `MatchResult`. Parses `query` into a pattern then delegates to `evalPattern`.
+export fn evalStr(trie_ptr: u32, query_ptr: [*]const u8, query_len: u32, index: u32) u32 {
+    const query = wasm_allocator.create(Pattern) catch
+        panic("Allocation of query failed");
+    defer query.destroy(wasm_allocator);
+    query.* = Parser.parse(wasm_allocator, query_ptr[0..query_len]) catch
+        panic("Error parsing query");
+    return evalPattern(trie_ptr, @intCast(@intFromPtr(query)), index);
+}
+
+/// Caller frees the result string, the result `pattern`, and the returned
+/// `MatchResult`. Evaluates the already-parsed `pattern` starting from `index`,
+/// which lets chained evaluations skip re-parsing.
+export fn evalPattern(trie_ptr: u32, pattern_ptr: u32, index: u32) u32 {
+    const trie: *Trie = @ptrFromInt(trie_ptr);
+    const pattern: *Pattern = @ptrFromInt(pattern_ptr);
+    const result = trie.evaluateComplete(wasm_allocator, index, pattern.*) catch
+        panic("Eval error");
+
+    const expr = result.value orelse
+        return 0; // no match
+    const expr_string = expr.toString(wasm_allocator) catch
+        panic("Writing eval expr failed");
+    const result_pattern = expr.clone(wasm_allocator) catch
+        panic("Cloning eval pattern failed");
+
+    const out = wasm_allocator.create(MatchResult) catch
+        panic("Allocation of match result failed");
+    out.* = .{
+        .ptr = @intCast(@intFromPtr(expr_string.ptr)),
+        .len = @intCast(expr_string.len),
+        .index = @intCast(result.index),
+        .pattern = @intCast(@intFromPtr(result_pattern)),
     };
     return @intCast(@intFromPtr(out));
 }

@@ -109,34 +109,20 @@ pub fn main(init: std.process.Init) !void {
 }
 
 fn loadTrie(allocator: Allocator, streams: Streams, trie: *Trie) !void {
+    // Read all of stdin at once to support multi-line patterns
+    var buffer = std.Io.Writer.Allocating.init(allocator);
+    defer buffer.deinit();
     while (true) {
-        var buffer = std.Io.Writer.Allocating.init(allocator);
-        defer buffer.deinit();
-        const at_end = blk: {
-            _ = streams.in.streamDelimiter(&buffer.writer, '\n') catch |err| switch (err) {
-                // streamDelimiter writes the partial line before returning EndOfStream
-                error.EndOfStream => break :blk true,
-                else => return err,
-            };
-            _ = streams.in.takeByte() catch {};
-            break :blk false;
+        _ = streams.in.streamDelimiter(&buffer.writer, '\n') catch |err| switch (err) {
+            error.EndOfStream => break,
+            else => return err,
         };
-        const line = buffer.written();
-        if (line.len > 0) {
-            var pattern = try Parser.parse(allocator, line);
-            defer pattern.deinit(allocator);
-            const root = pattern.root;
-            if (root.len > 0 and root[root.len - 1] == .arrow) {
-                const key = root[0 .. root.len - 1];
-                const val = root[root.len - 1].arrow;
-                _ = try trie.append(
-                    allocator,
-                    .{ .root = key, .height = pattern.height },
-                    val,
-                );
-            }
-        }
-        if (at_end) return;
+        try buffer.writer.writeByte('\n');
+        _ = streams.in.takeByte() catch break;
+    }
+    const content = buffer.written();
+    if (content.len > 0) {
+        trie.* = try Parser.parseTrie(allocator, content);
     }
 }
 

@@ -1,0 +1,13 @@
+# <Should be ignored>
+A -> # and this
+  B # also this
+
+# ===
+
+# As should this
+A # and this
+# also this
+
+# ---
+
+B

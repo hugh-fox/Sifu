@@ -77,6 +77,7 @@ pub fn astToPattern(
 
     // Check if this is an operator node
     const is_operator = mem.eql(u8, node_kind, "semicolon") or
+        mem.eql(u8, node_kind, "newline_sep") or
         mem.eql(u8, node_kind, "long_match") or
         mem.eql(u8, node_kind, "long_arrow") or
         mem.eql(u8, node_kind, "comma") or
@@ -251,7 +252,10 @@ fn convertRHS(
         return Node{ .pattern = rhs_pattern.* };
     } else if (mem.eql(u8, node_kind, "semicolon")) {
         defer rhs_pattern.* = .{};
-        return Node{ .list = rhs_pattern.* }; // TODO: add node type of semicolon list
+        return Node{ .list = rhs_pattern.* };
+    } else if (mem.eql(u8, node_kind, "newline_sep")) {
+        defer rhs_pattern.* = .{};
+        return Node{ .newline = rhs_pattern.* };
     } else if (mem.eql(u8, node_kind, "comma")) {
         defer rhs_pattern.* = .{};
         return Node{ .list = rhs_pattern.* };
@@ -308,7 +312,8 @@ fn appendToTrie(
 ) error{OutOfMemory}!void {
     const node_kind = node.kind();
 
-    if (mem.eql(u8, node_kind, "semicolon")) {
+    // Both semicolon and newline_sep are entry separators
+    if (mem.eql(u8, node_kind, "semicolon") or mem.eql(u8, node_kind, "newline_sep")) {
         var cursor = node.walk();
         if (cursor.gotoFirstChild()) {
             while (true) {
