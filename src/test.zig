@@ -503,3 +503,110 @@ test "Pattern height: nested patterns" {
     try testing.expectEqual(@as(usize, 3), (try Parser.parse(alloc, "1,(2,3)")).height);
     try testing.expectEqual(@as(usize, 1), (try Parser.parse(alloc, "1 + 2")).height);
 }
+
+test "Structural recursion with var_pattern: (x, *xs) --> x, (*xs)" {
+    var arena = ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    var trie = try Parser.parseTrie(allocator,
+        \\(x) --> x
+        \\(x, *xs) --> x, (*xs)
+    );
+
+    // First verify (1, 2) works
+    const query2 = try Parser.parse(allocator, "(1, 2)");
+    const eval_result2 = try trie.evaluateComplete(allocator, 0, query2);
+    _ = eval_result2;
+
+    // Then (2, 3)
+    const query3 = try Parser.parse(allocator, "(2, 3)");
+    const eval_result3 = try trie.evaluateComplete(allocator, 0, query3);
+    _ = eval_result3;
+
+    // (1, 2, 3) should evaluate to 1, 2, 3
+    const query = try Parser.parse(allocator, "(1, 2, 3)");
+    const eval_result = try trie.evaluateComplete(allocator, 0, query);
+
+    if (eval_result.value) |value| {
+        const str = try value.toString(allocator);
+        try testing.expectEqualStrings("1, 2, 3", str);
+    } else {
+        return error.TestUnexpectedResult;
+    }
+}
+
+test "Debug trie structure" {
+    var trie = try Parser.parseTrie(testing.allocator, "A, *x --> *x");
+    defer trie.deinit(testing.allocator);
+
+    var trie2 = try Parser.parseTrie(testing.allocator, "x, y --> y, x");
+    defer trie2.deinit(testing.allocator);
+    try testing.expect(trie2.var_branches.items.len >= 1);
+}
+
+test "Parse structure: comma lists" {
+    var arena = ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    // A, B, C should be: [A, list([B, list([C])])]
+    const abc = try Parser.parse(allocator, "A, B, C");
+    try testing.expectEqual(@as(usize, 2), abc.root.len);
+    try testing.expect(abc.root[0] == .key);
+    try testing.expectEqualStrings("A", abc.root[0].key);
+    try testing.expect(abc.root[1] == .list);
+    const bc_list = abc.root[1].list;
+    try testing.expectEqual(@as(usize, 2), bc_list.root.len);
+    try testing.expect(bc_list.root[0] == .key);
+    try testing.expectEqualStrings("B", bc_list.root[0].key);
+    try testing.expect(bc_list.root[1] == .list);
+    const c_list = bc_list.root[1].list;
+    try testing.expectEqual(@as(usize, 1), c_list.root.len);
+    try testing.expect(c_list.root[0] == .key);
+    try testing.expectEqualStrings("C", c_list.root[0].key);
+
+    // B, C should be: [B, list([C])]
+    const bc = try Parser.parse(allocator, "B, C");
+    try testing.expectEqual(@as(usize, 2), bc.root.len);
+    try testing.expect(bc.root[0] == .key);
+    try testing.expectEqualStrings("B", bc.root[0].key);
+    try testing.expect(bc.root[1] == .list);
+    const c_inner = bc.root[1].list;
+    try testing.expectEqual(@as(usize, 1), bc.height);
+    try testing.expectEqual(@as(usize, 1), c_inner.height);
+}
+
+test "Match: trie size as lower bound never matches" {
+    var arena = ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    var trie = try Parser.parseTrie(allocator,
+        \\A --> 1
+        \\B --> 2
+    );
+    const query = try Parser.parse(allocator, "A");
+
+    // Sanity check: the query matches when starting from the beginning.
+    var lower_bindings = trie_mod.VarBindings{};
+    const matched = try trie.match(
+        allocator,
+        .{ .lower = 0, .upper = trie.size() },
+        &lower_bindings,
+        query,
+    );
+    try testing.expect(matched.value != null);
+
+    // Starting at the trie's size, there is no branch at or after the lower
+    // bound, so nothing can ever match.
+    var bindings = trie_mod.VarBindings{};
+    const unmatched = try trie.match(
+        allocator,
+        .{ .lower = trie.size(), .upper = trie.size() },
+        &bindings,
+        query,
+    );
+    try testing.expect(unmatched.value == null);
+    try testing.expectEqual(@as(usize, 0), unmatched.len);
+}
