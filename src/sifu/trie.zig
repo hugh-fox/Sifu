@@ -1262,7 +1262,69 @@ pub const Trie = struct {
         return Eval{ .value = rewritten, .index = matched.match_index, .len = matched.len };
     }
 
-    fn evaluateBounded(
+    /// Recurse into nested expressions. Two cases must be distinguished:
+    ///
+    ///  - Structural recursion (form 2), e.g. `(x, *xs) -> x, (*xs)`: the
+    ///    nested expression is strictly *smaller* than the pattern that was
+    ///    matched, so progress is guaranteed and the producing rule may fire
+    ///    again. The recursive call may match up to and including the current
+    ///    index, so its upper bound is `structural_upper`.
+    ///
+    ///  - Nested recursion (form 3), e.g. `A -> (A)`: the nested expression
+    ///    is the *same* size, just wrapped one level deeper. Reusing the
+    ///    producing rule would loop forever, so the recursive call must match
+    ///    strictly before the current index, giving an upper bound of `nested_upper`.
+    ///
+    /// The two are told apart by comparing the nested node's height (which
+    /// includes its own nesting level) against the matched pattern's height,
+    /// measured the same way.
+    fn evaluateNested(
+        self: Self,
+        allocator: Allocator,
+        pattern_height: usize,
+        structural_upper: usize,
+        nested_upper: usize,
+        current: Pattern,
+    ) Allocator.Error!Eval {
+        const result = current;
+        for (result.root, 0..) |*nested, i| switch (nested.*) {
+            inline else => |sub_pattern, tag| if (@TypeOf(sub_pattern) == Pattern) {
+                // A wrapper node (paren, list, ...) stores a height that includes
+                // its own nesting level, while its `root` holds only the inner
+                // content. Measure the content height directly so it can be
+                // compared consistently against the matched pattern's height.
+                var content_height: usize = 0;
+                for (sub_pattern.root) |node|
+                    content_height = @max(content_height, node.height());
+                const inner = Pattern{ .root = sub_pattern.root, .height = content_height };
+                const is_smaller = content_height < pattern_height;
+                const recurse_upper = if (is_smaller) structural_upper else nested_upper;
+                debug("Nested recurse [{d}] tag={s} content_h={d} pat_h={d} upper={d}", .{
+                    i, @tagName(tag), content_height, pattern_height, recurse_upper,
+                });
+                const nested_eval = try self.evaluateBounded(
+                    allocator,
+                    .{ .lower = 0, .upper = recurse_upper },
+                    inner,
+                );
+                // The evaluated content carries only its own (content) height,
+                // because `inner` stripped the wrapper's nesting level before
+                // recursing. Re-inflate by one so the reconstructed wrapper node
+                // keeps the height that includes its own nesting level.
+                var new_value = nested_eval.value orelse try inner.copy(allocator);
+                new_value.height += 1;
+                @constCast(&sub_pattern).deinit(allocator);
+                nested.* = @unionInit(Node, @tagName(tag), new_value);
+            },
+        };
+        return Eval{ .value = result };
+    }
+
+    /// Main match loop with structural recursion. Iterates through rules
+    /// bottom-up by index, applying rewrites. When height decreases
+    /// (structural recursion), recursively evaluates with the same rule set.
+    /// Otherwise continues with increasing index to prevent infinite loops.
+    fn evaluateBottomUp(
         self: Self,
         allocator: Allocator,
         bound: Bound,
@@ -1271,40 +1333,35 @@ pub const Trie = struct {
         var index: usize = bound.lower;
         const upper = bound.upper;
         var current: Pattern = try pattern.copy(allocator);
-        // Track the index of the last rule that matched (for nested recursion bounds)
-        var last_match_index: ?usize = null;
-        var last_index: usize = 0;
+        var last_index: usize = upper;
         var last_len: usize = 0;
+
         while (index < upper) {
             const step = try self.evaluateMatch(allocator, .{ .lower = index, .upper = upper }, current);
             if (step.index < index)
                 panic("Match index bug: step.index {} < index {}", .{ step.index, index });
 
-            last_index = step.index;
-            last_len = step.len;
             index = step.index + 1;
 
             const rewritten = step.value orelse {
                 debug("Eval, no match", .{});
+                index = upper;
                 break;
             };
 
-            last_match_index = step.index;
+            last_index = step.index;
+            last_len = step.len;
 
             var old_current = current;
             defer old_current.deinit(allocator);
 
-            // Only recurse if height decreased relative to ORIGINAL pattern
-            // (structural recursion), which guarantees termination. Non-structural
-            // rewrites continue in the main loop with increasing index.
             const is_structural = pattern.height > rewritten.height;
             debug(
                 "is_structural: current {} > rewritten {}",
                 .{ current.height, rewritten.height },
             );
+
             if (is_structural) {
-                // Structural recursion: height decreased, so we can safely
-                // re-use all rules (termination guaranteed by decreasing height)
                 const rewritten_eval = try self.evaluateBounded(
                     allocator,
                     .{ .lower = bound.lower, .upper = step.index + 1 },
@@ -1313,10 +1370,8 @@ pub const Trie = struct {
                 if (rewritten_eval.value) |val| {
                     var rewritten_mut = rewritten;
                     rewritten_mut.deinit(allocator);
-                    current = val;
-                    // Structural recursion fully evaluates the result, return directly
                     return Eval{
-                        .value = current,
+                        .value = val,
                         .index = step.index,
                         .len = step.len,
                     };
@@ -1329,6 +1384,32 @@ pub const Trie = struct {
 
             debug("Next eval index: {}\n", .{index});
         }
+
+        return if (last_index < upper) .{
+            .value = current,
+            .index = last_index,
+            .len = last_len,
+        } else blk: {
+            current.deinit(allocator);
+            break :blk .{
+                .value = null,
+                .index = upper,
+                .len = 0,
+            };
+        };
+    }
+
+    fn evaluateBounded(
+        self: Self,
+        allocator: Allocator,
+        bound: Bound,
+        pattern: Pattern,
+    ) Allocator.Error!Eval {
+        const bottom_up = try self.evaluateBottomUp(allocator, bound, pattern);
+        const matched = bottom_up.value != null;
+        var current = bottom_up.value orelse try pattern.copy(allocator);
+        const last_index = bottom_up.index;
+        const last_len = bottom_up.len;
 
         // Evaluate the head of an apposition. When the result is an apposition
         // (a non-list prefix followed by a top-level comma `,` list node), the
@@ -1371,56 +1452,11 @@ pub const Trie = struct {
             }
         }
 
-        // Recurse into nested expressions. Two cases must be distinguished:
-        //
-        //  - Structural recursion (form 2), e.g. `(x, *xs) -> x, (*xs)`: the
-        //    nested expression is strictly *smaller* than the pattern that was
-        //    matched, so progress is guaranteed and the producing rule may fire
-        //    again. The recursive call may match up to and including the current
-        //    index, so its upper bound is `mi + 1`.
-        //
-        //  - Nested recursion (form 3), e.g. `A -> (A)`: the nested expression
-        //    is the *same* size, just wrapped one level deeper. Reusing the
-        //    producing rule would loop forever, so the recursive call must match
-        //    strictly before the current index, giving an upper bound of `mi`.
-        //
-        // The two are told apart by comparing the nested node's height (which
-        // includes its own nesting level) against the matched pattern's height,
-        // measured the same way. If this level matched nothing (e.g. the user
-        // queried `(A)` directly) there is no producing index, so the contents
-        // are evaluated against the full upper bound.
-        const structural_upper = if (last_match_index) |mi| mi + 1 else bound.upper;
-        const nested_upper = if (last_match_index) |mi| mi else bound.upper;
-        for (current.root, 0..) |*nested, i| switch (nested.*) {
-            inline else => |sub_pattern, tag| if (@TypeOf(sub_pattern) == Pattern) {
-                // A wrapper node (paren, list, ...) stores a height that includes
-                // its own nesting level, while its `root` holds only the inner
-                // content. Measure the content height directly so it can be
-                // compared consistently against the matched pattern's height.
-                var content_height: usize = 0;
-                for (sub_pattern.root) |node|
-                    content_height = @max(content_height, node.height());
-                const inner = Pattern{ .root = sub_pattern.root, .height = content_height };
-                const is_smaller = content_height < pattern.height;
-                const recurse_upper = if (is_smaller) structural_upper else nested_upper;
-                debug("Nested recurse [{d}] tag={s} content_h={d} pat_h={d} upper={d}", .{
-                    i, @tagName(tag), content_height, pattern.height, recurse_upper,
-                });
-                const nested_eval = try self.evaluateBounded(
-                    allocator,
-                    .{ .lower = 0, .upper = recurse_upper },
-                    inner,
-                );
-                // The evaluated content carries only its own (content) height,
-                // because `inner` stripped the wrapper's nesting level before
-                // recursing. Re-inflate by one so the reconstructed wrapper node
-                // keeps the height that includes its own nesting level.
-                var new_value = nested_eval.value orelse try inner.copy(allocator);
-                new_value.height += 1;
-                @constCast(&sub_pattern).deinit(allocator);
-                nested.* = @unionInit(Node, @tagName(tag), new_value);
-            },
-        };
+        const structural_upper = if (matched) last_index + 1 else bound.upper;
+        const nested_upper = if (matched) last_index else bound.upper;
+        const nested_eval = try self.evaluateNested(allocator, pattern.height, structural_upper, nested_upper, current);
+        current = nested_eval.value orelse current;
+
         const eval = Eval{
             .value = current,
             .index = last_index,
@@ -2240,4 +2276,3 @@ test "rebuildKey: multiple nested tries" {
     defer testing.allocator.free(str);
     try testing.expectEqualStrings("{ A -> B } X { C -> D, E -> F }", str);
 }
-
