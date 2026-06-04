@@ -100,7 +100,7 @@ export fn matchStr(trie_ptr: u32, query_ptr: [*]const u8, query_len: u32, index:
 export fn matchPattern(trie_ptr: u32, pattern_ptr: u32, index: u32) u32 {
     const trie: *Trie = @ptrFromInt(trie_ptr);
     const pattern: *Pattern = @ptrFromInt(pattern_ptr);
-    const result = trie.evaluateMatch(wasm_allocator, index, pattern.*) catch
+    const result = trie.evaluateMatch(wasm_allocator, .{ .lower = index, .upper = trie.size() }, pattern.*) catch
         panic("Match error");
 
     const expr = result.value orelse

@@ -45,7 +45,7 @@ pub fn build(b: *std.Build) void {
     });
 
     const module = b.addModule("sifu", .{
-        .root_source_file = b.path("src/root.zig"),
+        .root_source_file = b.path("src/sifu/trie.zig"),
         .target = target,
     });
 

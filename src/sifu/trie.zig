@@ -390,7 +390,7 @@ pub const BranchList = ArrayList(IndexBranch);
 /// For directing evaluations to completion. Initially, lower bound begins
 /// at 0, for the upper bound, the length of the pattern (inclusive/exclusive
 /// respectively).
-const Bound = struct { lower: usize = 0, upper: usize };
+pub const Bound = struct { lower: usize = 0, upper: usize };
 
 /// Keeps track of which vars and var_pattern are bound to what part of an
 /// expression given during matching.
@@ -984,8 +984,8 @@ pub const Trie = struct {
         return min_branch;
     }
 
-    // // If the index is unchanged, its trivially the minimum match. If the
-    // // next index is a variable or value its always the next branch.
+    // If the index is unchanged, its trivially the minimum match. If the
+    // next index is a variable or value its always the next branch.
 
     /// The first half of evaluation with backtracking. The variables in the node match
     /// anything in the trie, and vars in the trie match anything in
@@ -1538,17 +1538,15 @@ pub const Trie = struct {
         return self.evaluateBounded(allocator, .{ .lower = lower_bound, .upper = self.size() }, pattern);
     }
 
-    /// Performs a single match + rewrite step. Same API as evaluateComplete but
-    /// only does one step instead of iterating to fixpoint. Returns the rewritten
-    /// pattern if a match was found, or null if no match. The caller owns the
-    /// returned pattern and should free it with `Pattern.deinit(allocator)`.
+    /// Performs a single match + rewrite step. Returns the rewritten pattern if a
+    /// match was found, or null if no match. The caller owns the returned pattern
+    /// and should free it with `Pattern.deinit(allocator)`.
     pub fn evaluateMatch(
         self: Self,
         allocator: Allocator,
-        lower_bound: usize,
+        bound: Bound,
         pattern: Pattern,
     ) Allocator.Error!Eval {
-        const bound = Bound{ .lower = lower_bound, .upper = self.size() };
         var term_bindings = VarBindings{};
         defer term_bindings.deinit(allocator);
 
@@ -1563,56 +1561,37 @@ pub const Trie = struct {
         return Eval{ .value = rewritten, .index = matched.match_index, .len = matched.len };
     }
 
-    var eval_depth: usize = 0;
-
     fn evaluateBounded(
         self: Self,
         allocator: Allocator,
         bound: Bound,
         pattern: Pattern,
     ) Allocator.Error!Eval {
-        eval_depth += 1;
-        defer eval_depth -= 1;
-        if (eval_depth > 20)
-            @panic("Recursion depth limit exceeded");
-        var matched: Match = .{ .node_ptr = &self };
         var index: usize = bound.lower;
         const upper = bound.upper;
         var current: Pattern = try pattern.copy(allocator);
-        var term_bindings = VarBindings{};
-        defer term_bindings.deinit(allocator);
         // Track the index of the last rule that matched (for nested recursion bounds)
         var last_match_index: ?usize = null;
+        var last_index: usize = 0;
+        var last_len: usize = 0;
         while (index < upper) {
-            // while (current.height < pattern.height) : (len_matched += matched.len) {
-            // } else
-            matched.deinit(allocator);
-            matched = try self.match(allocator, .{ .lower = index, .upper = upper }, &term_bindings, current);
-            if (matched.match_index < index)
-                panic("Match index bug: matched.match_index {} < index {}", .{ matched.match_index, index });
+            const step = try self.evaluateMatch(allocator, .{ .lower = index, .upper = upper }, current);
+            if (step.index < index)
+                panic("Match index bug: step.index {} < index {}", .{ step.index, index });
 
-            index = matched.match_index + 1;
+            last_index = step.index;
+            last_len = step.len;
+            index = step.index + 1;
 
-            const next = matched.value orelse {
-                debug("Eval match at {*}, but no value", .{matched.node_ptr});
-                // current.destroy(allocator);
+            const rewritten = step.value orelse {
+                debug("Eval, no match", .{});
                 break;
             };
 
-            last_match_index = matched.match_index;
+            last_match_index = step.index;
 
-            // Rewrite all current bindings into the matched value
-            // Deinit old current after rewrite completes, since term_bindings
-            // may reference current.root
             var old_current = current;
             defer old_current.deinit(allocator);
-            const rewritten = try self.rewrite(
-                allocator,
-                next,
-                &term_bindings,
-            );
-            // Reset bindings for each new match index
-            term_bindings.clearRetainingCapacity();
 
             // Only recurse if height decreased relative to ORIGINAL pattern
             // (structural recursion), which guarantees termination. Non-structural
@@ -1627,7 +1606,7 @@ pub const Trie = struct {
                 // re-use all rules (termination guaranteed by decreasing height)
                 const rewritten_eval = try self.evaluateBounded(
                     allocator,
-                    .{ .lower = bound.lower, .upper = matched.match_index + 1 },
+                    .{ .lower = bound.lower, .upper = step.index + 1 },
                     rewritten,
                 );
                 if (rewritten_eval.value) |val| {
@@ -1635,8 +1614,11 @@ pub const Trie = struct {
                     rewritten_mut.deinit(allocator);
                     current = val;
                     // Structural recursion fully evaluates the result, return directly
-                    matched.deinit(allocator);
-                    return Eval{ .value = current, .index = matched.match_index, .len = matched.len };
+                    return Eval{
+                        .value = current,
+                        .index = step.index,
+                        .len = step.len,
+                    };
                 } else {
                     current = rewritten;
                 }
@@ -1740,10 +1722,9 @@ pub const Trie = struct {
         };
         const eval = Eval{
             .value = current,
-            .index = matched.match_index,
-            .len = matched.len,
+            .index = last_index,
+            .len = last_len,
         };
-        matched.deinit(allocator);
         debug("Evaluated {} nodes at index {}\n", .{ eval.len, eval.index });
         return eval;
     }
