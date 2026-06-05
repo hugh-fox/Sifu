@@ -199,7 +199,9 @@ pub const Trie = struct {
     // use putAssumeCapacity
     // TODO: use iterator instead of manually copying
     pub fn copy(self: Self, allocator: Allocator) Allocator.Error!Self {
-        var result = Self{};
+        var result = Self{ .depth = self.depth };
+
+        // Copy the map entries
         var keys_iter = self.map.iterator();
         while (keys_iter.next()) |entry|
             try result.map.putNoClobber(
@@ -207,6 +209,18 @@ pub const Trie = struct {
                 entry.key_ptr.*,
                 try entry.value_ptr.*.copy(allocator),
             );
+
+        // Copy the branch lists
+        try result.key_branches.appendSlice(allocator, self.key_branches.items);
+        try result.var_branches.appendSlice(allocator, self.var_branches.items);
+
+        // Value branches contain Patterns that need deep copying
+        try result.value_branches.ensureTotalCapacity(allocator, self.value_branches.items.len);
+        for (self.value_branches.items) |index_branch| {
+            const idx, const branch = index_branch;
+            const copied_value = try branch.value.copy(allocator);
+            result.value_branches.appendAssumeCapacity(.{ idx, .{ .value = copied_value } });
+        }
 
         return result;
     }
@@ -1411,46 +1425,7 @@ pub const Trie = struct {
         const last_index = bottom_up.index;
         const last_len = bottom_up.len;
 
-        // Evaluate the head of an apposition. When the result is an apposition
-        // (a non-list prefix followed by a top-level comma `,` list node), the
-        // complete-match loop above cannot reduce the prefix on its own because
-        // the trailing comma prevents the whole pattern from matching any rule,
-        // and the nested-recursion loop below only descends into wrapper nodes.
-        // Reduce the prefix here as its own sub-pattern, e.g. the head `F 1` of
-        // `F 1, (2, 3)` reduces to `G 1`.
-        {
-            var list_pos: usize = current.root.len;
-            for (current.root, 0..) |node, i| {
-                if (node == .list) {
-                    list_pos = i;
-                    break;
-                }
-            }
-            if (list_pos > 0 and list_pos < current.root.len) {
-                var head_height: usize = 0;
-                for (current.root[0..list_pos]) |node|
-                    head_height = @max(head_height, node.height());
-                var head_eval = try self.evaluateBounded(
-                    allocator,
-                    .{ .lower = 0, .upper = bound.upper },
-                    .{ .root = current.root[0..list_pos], .height = head_height },
-                );
-                if (head_eval.value) |*head_val| {
-                    defer head_val.deinit(allocator);
-                    const tail = current.root[list_pos..];
-                    const new_root = try allocator.alloc(Node, head_val.root.len + tail.len);
-                    for (head_val.root, new_root[0..head_val.root.len]) |node, *dst|
-                        dst.* = try node.copy(allocator);
-                    @memcpy(new_root[head_val.root.len..], tail);
-                    for (current.root[0..list_pos]) |*node|
-                        @constCast(node).deinit(allocator);
-                    allocator.free(current.root);
-                    var new_height: usize = 0;
-                    for (new_root) |node| new_height = @max(new_height, node.height());
-                    current = .{ .root = new_root, .height = new_height };
-                }
-            }
-        }
+        current = try self.evaluateLHS(allocator, bound, current);
 
         const structural_upper = if (matched) last_index + 1 else bound.upper;
         const nested_upper = if (matched) last_index else bound.upper;
@@ -1464,6 +1439,61 @@ pub const Trie = struct {
         };
         debug("Evaluated {} nodes at index {}\n", .{ eval.len, eval.index });
         return eval;
+    }
+
+    /// Evaluate the head (LHS) of a pattern. When the result is a list/op
+    /// (a non-list prefix followed by a top-level comma `,` list node), the
+    /// complete-match loop cannot reduce the prefix on its own because the
+    /// trailing comma prevents the whole pattern from matching any rule, and
+    /// the nested-recursion loop only descends into wrapper nodes. Reduce the
+    /// prefix here as its own sub-pattern, e.g. the head `F 1` of `F 1, (2, 3)`
+    /// reduces to `G 1`. Returns `current` unchanged if there is no reducible
+    /// head; otherwise the old root is freed and a new one is returned.
+    ///
+    /// Also evaluates match operators (`:`) via Pattern.evaluatePure.
+    fn evaluateLHS(
+        self: Self,
+        allocator: Allocator,
+        bound: Bound,
+        current: Pattern,
+    ) Allocator.Error!Pattern {
+        // First evaluate any match operators (`:`) using evaluatePure
+        var result = try current.evaluatePure(allocator);
+        @constCast(&current).deinit(allocator);
+
+        // Then handle list prefix reduction
+        var list_pos: usize = result.root.len;
+        for (result.root, 0..) |node, i| {
+            if (node == .list) {
+                list_pos = i;
+                break;
+            }
+        }
+        if (list_pos > 0 and list_pos < result.root.len) {
+            var head_height: usize = 0;
+            for (result.root[0..list_pos]) |node|
+                head_height = @max(head_height, node.height());
+            var head_eval = try self.evaluateBounded(
+                allocator,
+                .{ .lower = 0, .upper = bound.upper },
+                .{ .root = result.root[0..list_pos], .height = head_height },
+            );
+            if (head_eval.value) |*head_val| {
+                defer head_val.deinit(allocator);
+                const tail = result.root[list_pos..];
+                const new_root = try allocator.alloc(Node, head_val.root.len + tail.len);
+                for (head_val.root, new_root[0..head_val.root.len]) |node, *dst|
+                    dst.* = try node.copy(allocator);
+                @memcpy(new_root[head_val.root.len..], tail);
+                for (result.root[0..list_pos]) |*node|
+                    @constCast(node).deinit(allocator);
+                allocator.free(result.root);
+                var new_height: usize = 0;
+                for (new_root) |node| new_height = @max(new_height, node.height());
+                result = .{ .root = new_root, .height = new_height };
+            }
+        }
+        return result;
     }
 
     pub fn size(self: Self) usize {
@@ -1614,7 +1644,7 @@ pub const Trie = struct {
     }
 
     /// Returns sorted, deduplicated value indices. Caller owns the returned slice.
-    fn valueIndices(self: *const Self, allocator: Allocator) Allocator.Error![]usize {
+    pub fn valueIndices(self: *const Self, allocator: Allocator) Allocator.Error![]usize {
         var indices = std.ArrayList(usize).empty;
         errdefer indices.deinit(allocator);
         try self.collectValueIndices(allocator, &indices);

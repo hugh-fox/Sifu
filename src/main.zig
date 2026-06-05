@@ -87,10 +87,6 @@ pub fn main(init: std.process.Init) !void {
     };
     _ = try r.getAction(&app);
 
-    if (config.interactive) {
-        return repl(allocator, streams);
-    }
-
     const stdin_is_piped = !(std.Io.File.stdin().isTty(init.io) catch false);
     const has_expr = config.expression.len > 0;
 
@@ -99,6 +95,22 @@ pub fn main(init: std.process.Init) !void {
 
     if (stdin_is_piped)
         try loadTrie(allocator, streams, &trie);
+
+    if (config.interactive) {
+        if (stdin_is_piped) {
+            // Reopen TTY for interactive input after loading trie from pipe
+            var tty_buffer: [1024]u8 = undefined;
+            const tty_file = try Io.Dir.openFileAbsolute(init.io, "/dev/tty", .{});
+            var tty_reader = tty_file.reader(init.io, &tty_buffer);
+            const tty_streams = Streams{
+                .in = &tty_reader.interface,
+                .out = streams.out,
+                .err = streams.err,
+            };
+            return replWithTrie(allocator, tty_streams, &trie);
+        }
+        return replWithTrie(allocator, streams, &trie);
+    }
 
     if (has_expr) {
         try evalExpr(allocator, streams, &trie, config.expression);
@@ -144,8 +156,11 @@ fn evalExpr(allocator: Allocator, streams: Streams, trie: *Trie, expr: []const u
 fn repl(allocator: Allocator, streams: Streams) !void {
     var trie = Trie{};
     defer trie.deinit(allocator);
+    return replWithTrie(allocator, streams, &trie);
+}
 
-    while (replStep(allocator, streams, &trie)) |_| {
+fn replWithTrie(allocator: Allocator, streams: Streams, trie: *Trie) !void {
+    while (replStep(allocator, streams, trie)) |_| {
         try streams.out.flush();
     } else |err| switch (err) {
         error.EndOfStream => return,
