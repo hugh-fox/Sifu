@@ -10,6 +10,7 @@ const trie_module = @import("../sifu/trie.zig");
 const Trie = trie_module.Trie;
 const Bound = trie_module.Bound;
 const VarBindings = trie_module.VarBindings;
+const pure = @import("pure.zig");
 
 pub const Eval = struct {
     value: ?Pattern = null,
@@ -546,14 +547,14 @@ test "Structural recursion with var_pattern: (x, *xs) --> x, (*xs)" {
 /// reduces to `G 1`. Returns `current` unchanged if there is no reducible
 /// head; otherwise the old root is freed and a new one is returned.
 ///
-/// Also evaluates match operators (`:`) via Pattern.evaluatePure.
+/// Also evaluates match operators (`:`) via pure.evaluatePure.
 fn evaluateLHS(
     trie: Trie,
     allocator: Allocator,
     bound: Bound,
     current: Pattern,
 ) Allocator.Error!Pattern {
-    var result = try current.evaluatePure(allocator);
+    var result = try pure.evaluatePure(current, allocator);
     @constCast(&current).deinit(allocator);
 
     var list_pos: usize = result.root.len;
