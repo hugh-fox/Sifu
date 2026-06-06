@@ -14,6 +14,7 @@ const Writer = Io.Writer;
 
 pub const Node = @import("node.zig").Node;
 pub const Pattern = @import("pattern.zig").Pattern;
+pub const core = @import("../interpreter/core.zig");
 
 pub const HashMap = std.StringHashMapUnmanaged(Trie);
 pub const GetOrPutResult = HashMap.GetOrPutResult;
@@ -618,12 +619,7 @@ pub const Trie = struct {
     // TODO: convert to PriorityQueue
     const MatchQueue = ArrayList(IndexBranchTrie);
 
-    /// A partial or complete sequence of matches of a pattern against a trie.
-    pub const Eval = struct {
-        value: ?Pattern = null,
-        index: usize = 0,
-        len: usize = 0, // For partial matches
-    };
+    pub const Eval = core.Eval;
 
     /// Find the first branch at or after bound in the given branch list.
     fn findNextInBranches(branches: []const IndexBranch, bound: Bound) ?IndexBranch {
@@ -1130,370 +1126,6 @@ pub const Trie = struct {
             .match_index = index,
             .len = pattern_index,
         };
-    }
-
-    /// The second half of an evaluation step. Rewrites all variable
-    /// captures into the matched expression. Copies any variables in node
-    /// if they are keys in bindings with their values. If there are no
-    /// matches in bindings, this functions is equivalent to copy. The
-    /// result should be freed shallowly with ArrayList.deinit.
-    /// This function takes an arraylist instead of an allocator, which is
-    /// assumed empty and returned empty.
-    pub fn rewrite(
-        self: Self,
-        allocator: Allocator,
-        pattern: Pattern,
-        term_bindings: *VarBindings,
-    ) Allocator.Error!Pattern {
-        // debug("Rewrite pattern of len {}", .{pattern.root.len});
-        var result = ArrayList(Node).empty;
-        errdefer result.deinit(allocator);
-        var max_child: usize = 0;
-
-        for (pattern.root) |node| switch (node) {
-            .key => |key| try result.append(allocator, Node.ofKey(key)),
-            .variable => |variable| {
-                // Check if this is a var_pattern (starts with '*')
-                const is_var_pattern = variable.len > 0 and variable[0] == '*';
-                if (is_var_pattern) {
-                    if (term_bindings.get(variable)) |sub_pattern| {
-                        debug("Var pattern found: {s}", .{variable});
-                        // Deep copy each node to avoid use-after-free
-                        for (sub_pattern.pattern.root) |sub_node| {
-                            const copied = try sub_node.copy(allocator);
-                            max_child = @max(max_child, copied.height());
-                            try result.append(allocator, copied);
-                        }
-                    } else try result.append(allocator, node);
-                } else {
-                    if (term_bindings.get(variable)) |bound_node| {
-                        debug("Var found: {s}", .{variable});
-                        // Deep copy the bound node to avoid use-after-free
-                        const copied = try bound_node.copy(allocator);
-                        max_child = @max(max_child, copied.height());
-                        try result.append(allocator, copied);
-                    } else {
-                        debug("Var not found", .{});
-                        try result.append(allocator, node);
-                    }
-                }
-            },
-            inline .pattern, .arrow, .match, .list, .infix => |nested, tag| {
-                const rewritten = try self.rewrite(allocator, nested, term_bindings);
-                const wrapped = Pattern{ .root = rewritten.root, .height = rewritten.height + 1 };
-
-                // debug("Rewrite recursing on {s} len {}", .{ @tagName(tag), nested.root.len });
-                max_child = @max(max_child, wrapped.height);
-                try result.append(allocator, @unionInit(
-                    Node,
-                    @tagName(tag),
-                    wrapped,
-                ));
-            },
-            else => panic("unimplemented", .{}),
-        };
-        // debug(
-        //     "Rewrite returning on pattern len {} with result len {}",
-        //     .{ pattern.root.len, result.items.len },
-        // );
-
-        const nodes = try result.toOwnedSlice(allocator);
-        return Pattern{ .root = nodes, .height = max_child };
-    }
-
-    /// Follow `pattern` in `self` until no matches. Performs a partial,
-    /// but exhaustive match (keeps evaluating any results of the query) and
-    /// if possible a rewrite.
-    /// Starts matching between [lower, upper) bounds, shrinking the upper bound
-    /// to each matched value's index. If nothing matches, then a single node
-    /// trie with the same value as self is returned.
-    /// Caller owns and should free the result's value and bindings with
-    /// Match.deinit.
-    pub fn evaluateSlice(
-        self: Self,
-        allocator: Allocator,
-        pattern: Pattern,
-        result: *ArrayList(Node),
-    ) Allocator.Error!Pattern {
-        var bound: Bound = .{ .upper = self.size() };
-        var total_matched: usize = 0;
-        var matched: Match = .{ .index = 0 };
-        var term_bindings = VarBindings{};
-        defer term_bindings.deinit(allocator);
-        while (matched.match_index < bound.upper) : (bound.upper = matched.match_index) {
-            debug("Matching from bounds [{},{})", .{ bound.lower, bound.upper });
-            matched = try self.match(allocator, bound, &term_bindings, pattern);
-            defer matched.deinit(allocator);
-            debug(
-                "Match result: {} of {} pattern nodes at index {}, ",
-                .{ matched.len, pattern.root.len, matched.match_index },
-            );
-            if (matched.value) |value| {
-                debug("matched value: {}", .{value});
-                // return value;
-                // _ = result;
-                return try rewrite(allocator, value, matched.bindings, result);
-            } else debug("but no match", .{});
-            total_matched += matched.len;
-            if (total_matched < pattern.root.len)
-                break;
-        }
-        return try pattern.copy(allocator);
-    }
-
-    /// A simple evaluator that matches patterns only if all their terms match
-    /// (unlike concatenative evaluation, that supports partial matches)
-    /// Caller frees with `Pattern.deinit(allocator)`
-    pub fn evaluateComplete(
-        self: Self,
-        allocator: Allocator,
-        lower_bound: usize,
-        pattern: Pattern,
-    ) Allocator.Error!Eval {
-        return self.evaluateBounded(allocator, .{ .lower = lower_bound, .upper = self.size() }, pattern);
-    }
-
-    /// Performs a single match + rewrite step. Returns the rewritten pattern if a
-    /// match was found, or null if no match. The caller owns the returned pattern
-    /// and should free it with `Pattern.deinit(allocator)`.
-    pub fn evaluateMatch(
-        self: Self,
-        allocator: Allocator,
-        bound: Bound,
-        pattern: Pattern,
-    ) Allocator.Error!Eval {
-        var term_bindings = VarBindings{};
-        defer term_bindings.deinit(allocator);
-
-        var matched = try self.match(allocator, bound, &term_bindings, pattern);
-        defer matched.deinit(allocator);
-
-        const matched_value = matched.value orelse {
-            return Eval{ .value = null, .index = matched.match_index, .len = matched.len };
-        };
-
-        const rewritten = try self.rewrite(allocator, matched_value, &term_bindings);
-        return Eval{ .value = rewritten, .index = matched.match_index, .len = matched.len };
-    }
-
-    /// Recurse into nested expressions. Two cases must be distinguished:
-    ///
-    ///  - Structural recursion (form 2), e.g. `(x, *xs) -> x, (*xs)`: the
-    ///    nested expression is strictly *smaller* than the pattern that was
-    ///    matched, so progress is guaranteed and the producing rule may fire
-    ///    again. The recursive call may match up to and including the current
-    ///    index, so its upper bound is `structural_upper`.
-    ///
-    ///  - Nested recursion (form 3), e.g. `A -> (A)`: the nested expression
-    ///    is the *same* size, just wrapped one level deeper. Reusing the
-    ///    producing rule would loop forever, so the recursive call must match
-    ///    strictly before the current index, giving an upper bound of `nested_upper`.
-    ///
-    /// The two are told apart by comparing the nested node's height (which
-    /// includes its own nesting level) against the matched pattern's height,
-    /// measured the same way.
-    fn evaluateNested(
-        self: Self,
-        allocator: Allocator,
-        pattern_height: usize,
-        structural_upper: usize,
-        nested_upper: usize,
-        current: Pattern,
-    ) Allocator.Error!Eval {
-        const result = current;
-        for (result.root, 0..) |*nested, i| switch (nested.*) {
-            inline else => |sub_pattern, tag| if (@TypeOf(sub_pattern) == Pattern) {
-                // A wrapper node (paren, list, ...) stores a height that includes
-                // its own nesting level, while its `root` holds only the inner
-                // content. Measure the content height directly so it can be
-                // compared consistently against the matched pattern's height.
-                var content_height: usize = 0;
-                for (sub_pattern.root) |node|
-                    content_height = @max(content_height, node.height());
-                const inner = Pattern{ .root = sub_pattern.root, .height = content_height };
-                const is_smaller = content_height < pattern_height;
-                const recurse_upper = if (is_smaller) structural_upper else nested_upper;
-                debug("Nested recurse [{d}] tag={s} content_h={d} pat_h={d} upper={d}", .{
-                    i, @tagName(tag), content_height, pattern_height, recurse_upper,
-                });
-                const nested_eval = try self.evaluateBounded(
-                    allocator,
-                    .{ .lower = 0, .upper = recurse_upper },
-                    inner,
-                );
-                // The evaluated content carries only its own (content) height,
-                // because `inner` stripped the wrapper's nesting level before
-                // recursing. Re-inflate by one so the reconstructed wrapper node
-                // keeps the height that includes its own nesting level.
-                var new_value = nested_eval.value orelse try inner.copy(allocator);
-                new_value.height += 1;
-                @constCast(&sub_pattern).deinit(allocator);
-                nested.* = @unionInit(Node, @tagName(tag), new_value);
-            },
-        };
-        return Eval{ .value = result };
-    }
-
-    /// Main match loop with structural recursion. Iterates through rules
-    /// bottom-up by index, applying rewrites. When height decreases
-    /// (structural recursion), recursively evaluates with the same rule set.
-    /// Otherwise continues with increasing index to prevent infinite loops.
-    fn evaluateBottomUp(
-        self: Self,
-        allocator: Allocator,
-        bound: Bound,
-        pattern: Pattern,
-    ) Allocator.Error!Eval {
-        var index: usize = bound.lower;
-        const upper = bound.upper;
-        var current: Pattern = try pattern.copy(allocator);
-        var last_index: usize = upper;
-        var last_len: usize = 0;
-
-        while (index < upper) {
-            const step = try self.evaluateMatch(allocator, .{ .lower = index, .upper = upper }, current);
-            if (step.index < index)
-                panic("Match index bug: step.index {} < index {}", .{ step.index, index });
-
-            index = step.index + 1;
-
-            const rewritten = step.value orelse {
-                debug("Eval, no match", .{});
-                index = upper;
-                break;
-            };
-
-            last_index = step.index;
-            last_len = step.len;
-
-            var old_current = current;
-            defer old_current.deinit(allocator);
-
-            const is_structural = pattern.height > rewritten.height;
-            debug(
-                "is_structural: current {} > rewritten {}",
-                .{ current.height, rewritten.height },
-            );
-
-            if (is_structural) {
-                const rewritten_eval = try self.evaluateBounded(
-                    allocator,
-                    .{ .lower = bound.lower, .upper = step.index + 1 },
-                    rewritten,
-                );
-                if (rewritten_eval.value) |val| {
-                    var rewritten_mut = rewritten;
-                    rewritten_mut.deinit(allocator);
-                    return Eval{
-                        .value = val,
-                        .index = step.index,
-                        .len = step.len,
-                    };
-                } else {
-                    current = rewritten;
-                }
-            } else {
-                current = rewritten;
-            }
-
-            debug("Next eval index: {}\n", .{index});
-        }
-
-        return if (last_index < upper) .{
-            .value = current,
-            .index = last_index,
-            .len = last_len,
-        } else blk: {
-            current.deinit(allocator);
-            break :blk .{
-                .value = null,
-                .index = upper,
-                .len = 0,
-            };
-        };
-    }
-
-    fn evaluateBounded(
-        self: Self,
-        allocator: Allocator,
-        bound: Bound,
-        pattern: Pattern,
-    ) Allocator.Error!Eval {
-        const bottom_up = try self.evaluateBottomUp(allocator, bound, pattern);
-        const matched = bottom_up.value != null;
-        var current = bottom_up.value orelse try pattern.copy(allocator);
-        const last_index = bottom_up.index;
-        const last_len = bottom_up.len;
-
-        current = try self.evaluateLHS(allocator, bound, current);
-
-        const structural_upper = if (matched) last_index + 1 else bound.upper;
-        const nested_upper = if (matched) last_index else bound.upper;
-        const nested_eval = try self.evaluateNested(allocator, pattern.height, structural_upper, nested_upper, current);
-        current = nested_eval.value orelse current;
-
-        const eval = Eval{
-            .value = current,
-            .index = last_index,
-            .len = last_len,
-        };
-        debug("Evaluated {} nodes at index {}\n", .{ eval.len, eval.index });
-        return eval;
-    }
-
-    /// Evaluate the head (LHS) of a pattern. When the result is a list/op
-    /// (a non-list prefix followed by a top-level comma `,` list node), the
-    /// complete-match loop cannot reduce the prefix on its own because the
-    /// trailing comma prevents the whole pattern from matching any rule, and
-    /// the nested-recursion loop only descends into wrapper nodes. Reduce the
-    /// prefix here as its own sub-pattern, e.g. the head `F 1` of `F 1, (2, 3)`
-    /// reduces to `G 1`. Returns `current` unchanged if there is no reducible
-    /// head; otherwise the old root is freed and a new one is returned.
-    ///
-    /// Also evaluates match operators (`:`) via Pattern.evaluatePure.
-    fn evaluateLHS(
-        self: Self,
-        allocator: Allocator,
-        bound: Bound,
-        current: Pattern,
-    ) Allocator.Error!Pattern {
-        // First evaluate any match operators (`:`) using evaluatePure
-        var result = try current.evaluatePure(allocator);
-        @constCast(&current).deinit(allocator);
-
-        // Then handle list prefix reduction
-        var list_pos: usize = result.root.len;
-        for (result.root, 0..) |node, i| {
-            if (node == .list) {
-                list_pos = i;
-                break;
-            }
-        }
-        if (list_pos > 0 and list_pos < result.root.len) {
-            var head_height: usize = 0;
-            for (result.root[0..list_pos]) |node|
-                head_height = @max(head_height, node.height());
-            var head_eval = try self.evaluateBounded(
-                allocator,
-                .{ .lower = 0, .upper = bound.upper },
-                .{ .root = result.root[0..list_pos], .height = head_height },
-            );
-            if (head_eval.value) |*head_val| {
-                defer head_val.deinit(allocator);
-                const tail = result.root[list_pos..];
-                const new_root = try allocator.alloc(Node, head_val.root.len + tail.len);
-                for (head_val.root, new_root[0..head_val.root.len]) |node, *dst|
-                    dst.* = try node.copy(allocator);
-                @memcpy(new_root[head_val.root.len..], tail);
-                for (result.root[0..list_pos]) |*node|
-                    @constCast(node).deinit(allocator);
-                allocator.free(result.root);
-                var new_height: usize = 0;
-                for (new_root) |node| new_height = @max(new_height, node.height());
-                result = .{ .root = new_root, .height = new_height };
-            }
-        }
-        return result;
     }
 
     pub fn size(self: Self) usize {
@@ -2082,7 +1714,7 @@ test "Roundtrip: A -> C -> B" {
 
     // Query A, should evaluate to B
     var query = [_]Node{.{ .key = "A" }};
-    const eval_result = try trie.evaluateComplete(testing.allocator, 0, Pattern{ .root = &query });
+    const eval_result = try core.evaluateComplete(trie, testing.allocator, 0, Pattern{ .root = &query });
 
     if (eval_result.value) |value| {
         var val = value;
@@ -2138,7 +1770,8 @@ test "List with variables: x, y --> y, x" {
         .{ .list = .{ .root = &query_list } },
     };
 
-    const eval_result = try trie.evaluateComplete(
+    const eval_result = try core.evaluateComplete(
+        trie,
         testing.allocator,
         0,
         Pattern{ .root = &query_root },
@@ -2188,7 +1821,8 @@ test "VarPattern in nested pattern" {
     };
     var query_root = [_]Node{.{ .pattern = .{ .root = &query_inner } }};
 
-    const eval_result = try trie.evaluateComplete(
+    const eval_result = try core.evaluateComplete(
+        trie,
         testing.allocator,
         0,
         Pattern{ .root = &query_root },

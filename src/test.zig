@@ -4,6 +4,7 @@ const ArenaAllocator = std.heap.ArenaAllocator;
 const trie_mod = @import("sifu/trie.zig");
 const Trie = trie_mod.Trie;
 const Pattern = trie_mod.Pattern;
+const core = @import("interpreter/core.zig");
 const Parser = @import("Parser.zig");
 
 fn parseAndMatch(allocator: std.mem.Allocator, trie: Trie, query_str: []const u8) !?Pattern {
@@ -97,7 +98,7 @@ test "parseTrie: roundtrip" {
 fn expectEval(allocator: std.mem.Allocator, trie: Trie, query_str: []const u8, expected_str: []const u8) !void {
     var query = try Parser.parse(allocator, query_str);
     defer query.deinit(allocator);
-    const eval = try trie.evaluateComplete(allocator, 0, query);
+    const eval = try core.evaluateComplete(trie, allocator, 0, query);
     if (eval.value) |*val| {
         defer @constCast(val).deinit(allocator);
         var expected = try Parser.parse(allocator, expected_str);
@@ -135,7 +136,7 @@ test "evaluateComplete: no match returns original" {
     defer trie.deinit(testing.allocator);
     var query = try Parser.parse(testing.allocator, "C");
     defer query.deinit(testing.allocator);
-    const eval = try trie.evaluateComplete(testing.allocator, 0, query);
+    const eval = try core.evaluateComplete(trie, testing.allocator, 0, query);
     if (eval.value) |*val| {
         defer @constCast(val).deinit(testing.allocator);
         try testing.expect(val.eql(query));
@@ -210,7 +211,7 @@ test "rewrite: simple variable substitution" {
     try bindings.put(testing.allocator, "x", trie_mod.Node{ .key = "A" });
 
     // Rewrite should replace x with A
-    var result = try trie.rewrite(testing.allocator, value_pattern, &bindings);
+    var result = try core.rewrite(testing.allocator, value_pattern, &bindings);
     defer result.deinit(testing.allocator);
 
     try testing.expectEqual(@as(usize, 1), result.root.len);
@@ -235,7 +236,7 @@ test "rewrite: nested list with variables" {
     try bindings.put(testing.allocator, "y", trie_mod.Node{ .key = "B" });
 
     // Rewrite should produce [B, list([A])]
-    var result = try trie.rewrite(testing.allocator, value_pattern, &bindings);
+    var result = try core.rewrite(testing.allocator, value_pattern, &bindings);
     defer result.deinit(testing.allocator);
 
     try testing.expectEqual(@as(usize, 2), result.root.len);
@@ -254,7 +255,7 @@ test "evaluateComplete: step by step x, y --> y, x" {
     var query = try Parser.parse(testing.allocator, "A, B");
     defer query.deinit(testing.allocator);
 
-    const eval = try trie.evaluateComplete(testing.allocator, 0, query);
+    const eval = try core.evaluateComplete(trie, testing.allocator, 0, query);
     var result = eval.value orelse return error.NoEvalResult;
     defer result.deinit(testing.allocator);
 
@@ -458,7 +459,7 @@ test "Structural recursion: height tracking through evaluation" {
     try testing.expect(match_result.value != null);
 
     // Rewrite step
-    var rewritten = try trie.rewrite(testing.allocator, match_result.value.?, &bindings);
+    var rewritten = try core.rewrite(testing.allocator, match_result.value.?, &bindings);
     defer rewritten.deinit(testing.allocator);
 
     // Check structural recursion condition
@@ -509,24 +510,24 @@ test "Structural recursion with var_pattern: (x, *xs) --> x, (*xs)" {
     defer arena.deinit();
     const allocator = arena.allocator();
 
-    var trie = try Parser.parseTrie(allocator,
+    const trie = try Parser.parseTrie(allocator,
         \\(x) --> x
         \\(x, *xs) --> x, (*xs)
     );
 
     // First verify (1, 2) works
     const query2 = try Parser.parse(allocator, "(1, 2)");
-    const eval_result2 = try trie.evaluateComplete(allocator, 0, query2);
+    const eval_result2 = try core.evaluateComplete(trie, allocator, 0, query2);
     _ = eval_result2;
 
     // Then (2, 3)
     const query3 = try Parser.parse(allocator, "(2, 3)");
-    const eval_result3 = try trie.evaluateComplete(allocator, 0, query3);
+    const eval_result3 = try core.evaluateComplete(trie, allocator, 0, query3);
     _ = eval_result3;
 
     // (1, 2, 3) should evaluate to 1, 2, 3
     const query = try Parser.parse(allocator, "(1, 2, 3)");
-    const eval_result = try trie.evaluateComplete(allocator, 0, query);
+    const eval_result = try core.evaluateComplete(trie, allocator, 0, query);
 
     if (eval_result.value) |value| {
         const str = try value.toString(allocator);

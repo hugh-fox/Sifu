@@ -123,7 +123,7 @@ fn runSifu(allocator: Allocator, trie_content: []const u8, query: []const u8) ![
         .argv = &.{ sifu_exe, query },
         .stdin = .pipe,
         .stdout = .pipe,
-        .stderr = .pipe,
+        .stderr = .ignore,
     });
     errdefer child.kill(testing.io);
 
@@ -137,13 +137,13 @@ fn runSifu(allocator: Allocator, trie_content: []const u8, query: []const u8) ![
 
     // Drain stdout and stderr concurrently into heap-grown buffers; reading
     // both at once avoids deadlocking on a child that fills either pipe.
-    var reader_buffer: Io.File.MultiReader.Buffer(2) = undefined;
+    var reader_buffer: Io.File.MultiReader.Buffer(1) = undefined;
     var multi_reader: Io.File.MultiReader = undefined;
     multi_reader.init(
         allocator,
         testing.io,
         reader_buffer.toStreams(),
-        &.{ child.stdout.?, child.stderr.? },
+        &.{child.stdout.?},
     );
     defer multi_reader.deinit();
 

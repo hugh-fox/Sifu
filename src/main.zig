@@ -7,6 +7,7 @@ const std = @import("std");
 const Trie = @import("sifu/trie.zig").Trie;
 const Pattern = @import("sifu/trie.zig").Pattern;
 const Node = @import("sifu/trie.zig").Node;
+const core = @import("interpreter/core.zig");
 const ArenaAllocator = std.heap.ArenaAllocator;
 const Allocator = std.mem.Allocator;
 const ArrayList = std.ArrayList;
@@ -17,7 +18,6 @@ const wasm = @import("wasm.zig");
 const builtin = @import("builtin");
 const no_os = builtin.target.os.tag == .freestanding;
 const Streams = @import("streams.zig").Streams;
-const util = @import("sifu/util.zig");
 const panic = std.debug.panic;
 const detect_leaks = @import("build_options").detect_leaks;
 const debug_mode = @import("builtin").mode == .Debug;
@@ -143,7 +143,7 @@ fn evalExpr(allocator: Allocator, streams: Streams, trie: *Trie, expr: []const u
     defer pattern.deinit(allocator);
 
     debug("Eval Complete from {*}", .{trie});
-    const eval = try trie.evaluateComplete(allocator, 0, pattern);
+    const eval = try core.evaluateComplete(trie.*, allocator, 0, pattern);
     if (eval.value) |*value| {
         defer @constCast(value).deinit(allocator);
         try value.writeIndent(streams.out, 0);
@@ -209,7 +209,7 @@ fn replStep(allocator: Allocator, streams: Streams, trie: *Trie) !?void {
         );
     } else {
         debug("Eval Complete from {*}", .{trie});
-        const eval = try trie.evaluateComplete(allocator, 0, pattern);
+        const eval = try core.evaluateComplete(trie.*, allocator, 0, pattern);
         if (eval.value) |*value| {
             defer @constCast(value).deinit(allocator);
             try streams.out.print("Eval at {} of length {}: ", .{ eval.index, eval.len });

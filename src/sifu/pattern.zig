@@ -5,6 +5,7 @@ const Writer = Io.Writer;
 const debug = std.log.debug;
 
 const Node = @import("node.zig").Node;
+const core = @import("../interpreter/core.zig");
 
 pub const Pattern = struct {
     root: []Node = &.{},
@@ -229,7 +230,7 @@ pub const Pattern = struct {
 
         if (matched.value) |value| {
             // Found a direct match with a value - rewrite with bindings
-            return try trie.rewrite(allocator, value, &term_bindings);
+            return try core.rewrite(allocator, value, &term_bindings);
         }
 
         return null;

@@ -14,6 +14,7 @@ const ts = if (use_tree_sitter) @import("tree_sitter_parser.zig") else struct {}
 const trie_module = @import("sifu/trie.zig");
 const Pattern = trie_module.Pattern;
 const Trie = trie_module.Trie;
+const core = @import("interpreter/core.zig");
 const Streams = @import("streams.zig").Streams;
 
 // const Node = Pattern.Node;
@@ -64,6 +65,13 @@ export fn destroyTrie(trie_ptr: u32) void {
     @as(*Trie, @ptrFromInt(trie_ptr)).destroy(wasm_allocator);
 }
 
+/// The number of indexed entries in a trie. A match/eval that reports an index
+/// equal to (or greater than) this never actually fired a rule (the search ran
+/// off the end), which lets the caller tell a real result from an echo.
+export fn trieSize(trie_ptr: u32) u32 {
+    return @intCast(@as(*Trie, @ptrFromInt(trie_ptr)).size());
+}
+
 export fn parse(ptr: [*]const u8, len: u32) u32 {
     const pattern_ptr = wasm_allocator.create(Pattern) catch
         panic("Allocation of trie failed");
@@ -100,7 +108,7 @@ export fn matchStr(trie_ptr: u32, query_ptr: [*]const u8, query_len: u32, index:
 export fn matchPattern(trie_ptr: u32, pattern_ptr: u32, index: u32) u32 {
     const trie: *Trie = @ptrFromInt(trie_ptr);
     const pattern: *Pattern = @ptrFromInt(pattern_ptr);
-    const result = trie.evaluateMatch(wasm_allocator, .{ .lower = index, .upper = trie.size() }, pattern.*) catch
+    const result = core.evaluateMatch(trie.*, wasm_allocator, .{ .lower = index, .upper = trie.size() }, pattern.*) catch
         panic("Match error");
 
     const expr = result.value orelse
@@ -139,7 +147,7 @@ export fn evalStr(trie_ptr: u32, query_ptr: [*]const u8, query_len: u32, index: 
 export fn evalPattern(trie_ptr: u32, pattern_ptr: u32, index: u32) u32 {
     const trie: *Trie = @ptrFromInt(trie_ptr);
     const pattern: *Pattern = @ptrFromInt(pattern_ptr);
-    const result = trie.evaluateComplete(wasm_allocator, index, pattern.*) catch
+    const result = core.evaluateComplete(trie.*, wasm_allocator, index, pattern.*) catch
         panic("Eval error");
 
     const expr = result.value orelse
