@@ -23,7 +23,7 @@ pub const Eval = struct {
 pub fn rewrite(
     allocator: Allocator,
     pattern: Pattern,
-    term_bindings: *VarBindings,
+    term_bindings: *const VarBindings,
 ) Allocator.Error!Pattern {
     var result = ArrayList(Node).empty;
     errdefer result.deinit(allocator);
@@ -252,6 +252,289 @@ pub fn evaluateBounded(
     };
     debug("Evaluated {} nodes at index {}\n", .{ eval.len, eval.index });
     return eval;
+}
+
+// Tests
+
+const testing = std.testing;
+const ArenaAllocator = std.heap.ArenaAllocator;
+const Parser = @import("../Parser.zig");
+
+fn expectEval(allocator: Allocator, trie: Trie, query_str: []const u8, expected_str: []const u8) !void {
+    var query = try Parser.parse(allocator, query_str);
+    defer query.deinit(allocator);
+    const eval = try evaluateComplete(trie, allocator, 0, query);
+    if (eval.value) |*val| {
+        defer @constCast(val).deinit(allocator);
+        var expected = try Parser.parse(allocator, expected_str);
+        defer expected.deinit(allocator);
+        if (!val.eql(expected)) {
+            const result_str = try val.toString(allocator);
+            defer allocator.free(result_str);
+            try testing.expectEqualStrings(expected_str, result_str);
+        }
+    } else {
+        return error.NoEvalResult;
+    }
+}
+
+test "evaluateComplete: simple rewrite" {
+    var trie = try Parser.parseTrie(testing.allocator, "A -> B");
+    defer trie.deinit(testing.allocator);
+    try expectEval(testing.allocator, trie, "A", "B");
+}
+
+test "evaluateComplete: variable binding" {
+    var trie = try Parser.parseTrie(testing.allocator, "x -> x");
+    defer trie.deinit(testing.allocator);
+    try expectEval(testing.allocator, trie, "Foo", "Foo");
+}
+
+test "evaluateComplete: multi-term with variable" {
+    var trie = try Parser.parseTrie(testing.allocator, "Inc x -> x");
+    defer trie.deinit(testing.allocator);
+    try expectEval(testing.allocator, trie, "Inc 5", "5");
+}
+
+test "evaluateComplete: no match returns original" {
+    var trie = try Parser.parseTrie(testing.allocator, "A -> B");
+    defer trie.deinit(testing.allocator);
+    var query = try Parser.parse(testing.allocator, "C");
+    defer query.deinit(testing.allocator);
+    const eval = try evaluateComplete(trie, testing.allocator, 0, query);
+    if (eval.value) |*val| {
+        defer @constCast(val).deinit(testing.allocator);
+        try testing.expect(val.eql(query));
+    }
+}
+
+test "evaluateComplete: roundtrip" {
+    var trie = try Parser.parseTrie(testing.allocator, "A -> B; B -> A");
+    defer trie.deinit(testing.allocator);
+    try expectEval(testing.allocator, trie, "A", "A");
+}
+
+test "evaluateComplete: VarPattern in nested list" {
+    var trie = try Parser.parseTrie(testing.allocator, "A, *x --> *x");
+    defer trie.deinit(testing.allocator);
+
+    try expectEval(testing.allocator, trie, "A,", "");
+    try expectEval(testing.allocator, trie, "A, B", "B");
+    try expectEval(testing.allocator, trie, "A, B, C", "B, C");
+    try expectEval(testing.allocator, trie, "A, B, C,", "B, C,");
+}
+
+test "evaluateComplete: nested pattern" {
+    var trie = try Parser.parseTrie(testing.allocator, "x, y --> y, x");
+    defer trie.deinit(testing.allocator);
+
+    // Verify trie structure: x -> , -> y -> value
+    try testing.expect(trie.var_branches.items.len == 1);
+    const x_trie = trie.map.get("x") orelse return error.MissingX;
+    try testing.expect(x_trie.map.contains(","));
+    const comma_trie = x_trie.map.get(",") orelse return error.MissingComma;
+    try testing.expect(comma_trie.var_branches.items.len == 1);
+
+    // Test the match directly
+    var query = try Parser.parse(testing.allocator, "A, B");
+    defer query.deinit(testing.allocator);
+    try testing.expectEqual(@as(usize, 2), query.root.len);
+    try testing.expect(query.root[0] == .key);
+    try testing.expect(query.root[1] == .list);
+
+    var term_bindings = VarBindings{};
+    defer term_bindings.deinit(testing.allocator);
+    var match_result = try trie.match(testing.allocator, .{ .upper = trie.size() }, &term_bindings, query);
+    defer match_result.deinit(testing.allocator);
+
+    // Match should succeed with value
+    try testing.expect(match_result.value != null);
+
+    // Check bindings
+    try testing.expect(term_bindings.get("x") != null);
+    try testing.expect(term_bindings.get("y") != null);
+
+    try expectEval(testing.allocator, trie, "A, B", "B, A");
+}
+
+test "evaluateComplete: VarPattern in nested pattern" {
+    var trie = try Parser.parseTrie(testing.allocator, "(x, *x) --> x + *x");
+    defer trie.deinit(testing.allocator);
+    try expectEval(testing.allocator, trie, "(A, B C)", "A + B C");
+}
+
+test "rewrite: simple variable substitution" {
+    var trie = try Parser.parseTrie(testing.allocator, "x --> x");
+    defer trie.deinit(testing.allocator);
+
+    // Value pattern is [variable(x)]
+    const value_pattern = trie.getIndex(0);
+
+    // Set up bindings: x = A
+    var bindings = VarBindings{};
+    defer bindings.deinit(testing.allocator);
+    try bindings.put(testing.allocator, "x", Node{ .key = "A" });
+
+    // Rewrite should replace x with A
+    var result = try rewrite(testing.allocator, value_pattern, &bindings);
+    defer result.deinit(testing.allocator);
+
+    try testing.expectEqual(@as(usize, 1), result.root.len);
+    try testing.expect(result.root[0] == .key);
+    try testing.expectEqualStrings("A", result.root[0].key);
+}
+
+test "rewrite: nested list with variables" {
+    var trie = try Parser.parseTrie(testing.allocator, "x, y --> y, x");
+    defer trie.deinit(testing.allocator);
+
+    // Value pattern is [variable(y), list([variable(x)])]
+    const value_pattern = trie.getIndex(0);
+    try testing.expectEqual(@as(usize, 2), value_pattern.root.len);
+    try testing.expect(value_pattern.root[0] == .variable);
+    try testing.expect(value_pattern.root[1] == .list);
+
+    // Set up bindings: x = A, y = B
+    var bindings = VarBindings{};
+    defer bindings.deinit(testing.allocator);
+    try bindings.put(testing.allocator, "x", Node{ .key = "A" });
+    try bindings.put(testing.allocator, "y", Node{ .key = "B" });
+
+    // Rewrite should produce [B, list([A])]
+    var result = try rewrite(testing.allocator, value_pattern, &bindings);
+    defer result.deinit(testing.allocator);
+
+    try testing.expectEqual(@as(usize, 2), result.root.len);
+    try testing.expect(result.root[0] == .key);
+    try testing.expectEqualStrings("B", result.root[0].key);
+    try testing.expect(result.root[1] == .list);
+    try testing.expectEqual(@as(usize, 1), result.root[1].list.root.len);
+    try testing.expect(result.root[1].list.root[0] == .key);
+    try testing.expectEqualStrings("A", result.root[1].list.root[0].key);
+}
+
+test "evaluateComplete: step by step x, y --> y, x" {
+    var trie = try Parser.parseTrie(testing.allocator, "x, y --> y, x");
+    defer trie.deinit(testing.allocator);
+
+    var query = try Parser.parse(testing.allocator, "A, B");
+    defer query.deinit(testing.allocator);
+
+    const eval = try evaluateComplete(trie, testing.allocator, 0, query);
+    var result = eval.value orelse return error.NoEvalResult;
+    defer result.deinit(testing.allocator);
+
+    // Result should be [B, list([A])]
+    try testing.expectEqual(@as(usize, 2), result.root.len);
+    try testing.expect(result.root[0] == .key);
+    try testing.expectEqualStrings("B", result.root[0].key);
+    try testing.expect(result.root[1] == .list);
+    try testing.expectEqual(@as(usize, 1), result.root[1].list.root.len);
+    try testing.expect(result.root[1].list.root[0] == .key);
+    try testing.expectEqualStrings("A", result.root[1].list.root[0].key);
+}
+
+test "evaluateComplete: simple var_pattern unwrap" {
+    // (*xs) --> *xs should unwrap the outer parens
+    var trie = try Parser.parseTrie(testing.allocator, "(*xs) --> *xs");
+    defer trie.deinit(testing.allocator);
+
+    try expectEval(testing.allocator, trie, "(A)", "A");
+    try expectEval(testing.allocator, trie, "(A, B)", "A, B");
+    try expectEval(testing.allocator, trie, "(A, B, C)", "A, B, C");
+}
+
+test "Structural recursion: height tracking through evaluation" {
+    // Simulate the evaluation of (1, 2, 3) with rules:
+    // (x) --> x           (rule 0)
+    // (x, *xs) --> x, (*xs)  (rule 1)
+    //
+    // Heights with new model (each op adds 1):
+    // - "(1, 2, 3)": parens(1) + comma(1) + comma(1) = 3
+    // - "1, (2, 3)": comma(1) + parens(1) + comma(1) = 3
+    // - "(2, 3)": parens(1) + comma(1) = 2
+    //
+    // Step 1: (1, 2, 3) matches rule 1, x=1, *xs=(2, 3)
+    // Rewrite to: 1, (2, 3) with height 3
+    // is_structural: query.height(3) > rewritten.height(3) = false
+
+    var trie = try Parser.parseTrie(testing.allocator, "(x) --> x\n(x, *xs) --> x, (*xs)");
+    defer trie.deinit(testing.allocator);
+
+    var query = try Parser.parse(testing.allocator, "(1, 2, 3)");
+    defer query.deinit(testing.allocator);
+    try testing.expectEqual(@as(usize, 3), query.height);
+
+    // Match step
+    var bindings = VarBindings{};
+    defer bindings.deinit(testing.allocator);
+    var match_result = try trie.match(testing.allocator, .{ .upper = trie.size() }, &bindings, query);
+    defer match_result.deinit(testing.allocator);
+
+    // Should match rule 1
+    try testing.expectEqual(@as(usize, 1), match_result.match_index);
+    try testing.expect(match_result.value != null);
+
+    // Rewrite step
+    var rewritten = try rewrite(testing.allocator, match_result.value.?, &bindings);
+    defer rewritten.deinit(testing.allocator);
+
+    // Check structural recursion condition
+    const is_structural_top = query.height > rewritten.height;
+    try testing.expect(!is_structural_top); // 3 > 3 = false
+
+    // Check the nested pattern inside the rewritten result
+    // rewritten = [1, list([pattern(2, 3)])]
+    try testing.expectEqual(@as(usize, 2), rewritten.root.len);
+    try testing.expect(rewritten.root[1] == .list);
+
+    const list_pattern = rewritten.root[1].list;
+    try testing.expectEqual(@as(usize, 1), list_pattern.root.len);
+    try testing.expect(list_pattern.root[0] == .pattern);
+
+    const nested_pattern_node = list_pattern.root[0];
+    // Node.height() returns the Pattern's height inside the node
+    // (2, 3) = parens(1) + comma(1) = 2
+    try testing.expectEqual(@as(usize, 2), nested_pattern_node.height());
+
+    const nested_content = nested_pattern_node.pattern;
+    try testing.expectEqual(@as(usize, 2), nested_content.height);
+
+    // Structural recursion check: nested height 2 < query height 3
+    const is_structural_nested = nested_pattern_node.height() < query.height;
+    try testing.expect(is_structural_nested); // 2 < 3 = true
+}
+
+test "Structural recursion with var_pattern: (x, *xs) --> x, (*xs)" {
+    var arena = ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    const trie = try Parser.parseTrie(allocator,
+        \\(x) --> x
+        \\(x, *xs) --> x, (*xs)
+    );
+
+    // First verify (1, 2) works
+    const query2 = try Parser.parse(allocator, "(1, 2)");
+    const eval_result2 = try evaluateComplete(trie, allocator, 0, query2);
+    _ = eval_result2;
+
+    // Then (2, 3)
+    const query3 = try Parser.parse(allocator, "(2, 3)");
+    const eval_result3 = try evaluateComplete(trie, allocator, 0, query3);
+    _ = eval_result3;
+
+    // (1, 2, 3) should evaluate to 1, 2, 3
+    const query = try Parser.parse(allocator, "(1, 2, 3)");
+    const eval_result = try evaluateComplete(trie, allocator, 0, query);
+
+    if (eval_result.value) |value| {
+        const str = try value.toString(allocator);
+        try testing.expectEqualStrings("1, 2, 3", str);
+    } else {
+        return error.TestUnexpectedResult;
+    }
 }
 
 /// Evaluate the head (LHS) of a pattern. When the result is a list/op

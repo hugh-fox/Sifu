@@ -1136,3 +1136,140 @@ test "multiline: trailing operators do not continue" {
     try testing.expectEqual(@as(usize, 0), with_newline.root[1].arrow.root.len);
     try testing.expectEqualStrings("B", with_newline.root[2].list.root[0].key);
 }
+
+fn parseAndMatch(allocator: std.mem.Allocator, trie: Trie, query_str: []const u8) !?Pattern {
+    var query = try parse(allocator, query_str);
+    defer query.deinit(allocator);
+    var term_bindings = trie_module.VarBindings{};
+    defer term_bindings.deinit(allocator);
+    var result = try trie.match(allocator, .{ .upper = trie.size() }, &term_bindings, query);
+    defer result.deinit(allocator);
+    if (result.value) |val| {
+        return try val.copy(allocator);
+    }
+    return null;
+}
+
+fn expectMatch(allocator: std.mem.Allocator, trie: Trie, query_str: []const u8, expected_str: []const u8) !void {
+    const result = try parseAndMatch(allocator, trie, query_str);
+    try testing.expect(result != null);
+    var result_mut = result.?;
+    defer result_mut.deinit(allocator);
+    var expected = try parse(allocator, expected_str);
+    defer expected.deinit(allocator);
+    try testing.expect(result_mut.eql(expected));
+}
+
+fn expectNoMatch(allocator: std.mem.Allocator, trie: Trie, query_str: []const u8) !void {
+    const result = try parseAndMatch(allocator, trie, query_str);
+    try testing.expect(result == null);
+}
+
+test "parseTrie and match: simple vals" {
+    var trie1 = try parseTrie(testing.allocator, "Aa Bb Cc -> 123");
+    defer trie1.deinit(testing.allocator);
+    var trie2 = try parseTrie(testing.allocator, "Aa Bb Cc -> 123");
+    defer trie2.deinit(testing.allocator);
+    try testing.expect(trie1.eql(trie2));
+
+    // Test branching: add Aa Bb2 -> 456
+    var trie_with_branch = try parseTrie(testing.allocator, "Aa Bb Cc -> 123; Aa Bb2 -> 456");
+    defer trie_with_branch.deinit(testing.allocator);
+    try testing.expect(!trie1.eql(trie_with_branch));
+
+    // Verify match returns value
+    try expectMatch(testing.allocator, trie1, "Aa Bb Cc", "123");
+}
+
+test "parseTrie and match: single key-value pair" {
+    var trie = try parseTrie(testing.allocator, "A -> B");
+    defer trie.deinit(testing.allocator);
+    try expectMatch(testing.allocator, trie, "A", "B");
+}
+
+test "parseTrie and match: multiple entries with semicolon" {
+    var trie = try parseTrie(testing.allocator, "A -> B; C -> D");
+    defer trie.deinit(testing.allocator);
+    try expectMatch(testing.allocator, trie, "A", "B");
+    try expectMatch(testing.allocator, trie, "C", "D");
+}
+
+test "parseTrie and match: multi-token key" {
+    var trie = try parseTrie(testing.allocator, "A B C -> X");
+    defer trie.deinit(testing.allocator);
+    try expectMatch(testing.allocator, trie, "A B C", "X");
+}
+
+test "parseTrie and match: entry without arrow" {
+    var trie = try parseTrie(testing.allocator, "Foo");
+    defer trie.deinit(testing.allocator);
+    try expectMatch(testing.allocator, trie, "Foo", "Foo");
+}
+
+test "parseTrie and match: empty input" {
+    const trie = try parseTrie(testing.allocator, "");
+    // Shouldn't be anything to free here
+    try expectNoMatch(testing.allocator, trie, "anything");
+}
+
+test "parseTrie and match: roundtrip" {
+    var trie = try parseTrie(testing.allocator, "A -> B; B -> A; A -> B");
+    defer trie.deinit(testing.allocator);
+    try expectMatch(testing.allocator, trie, "A", "B");
+    try expectMatch(testing.allocator, trie, "B", "A");
+}
+
+test "Parser structure: x, y --> y, x" {
+    var zig_pattern = try parse(testing.allocator, "x, y --> y, x");
+    defer zig_pattern.deinit(testing.allocator);
+
+    // Due to precedence (comma=3 > long_arrow=2), this parses as: (x, y) --> (y, x)
+    // Which gives: [variable(x), list([variable(y)]), arrow([variable(y), list([variable(x)])])]
+    try testing.expectEqual(@as(usize, 3), zig_pattern.root.len);
+    try testing.expect(zig_pattern.root[0] == .variable);
+    try testing.expect(zig_pattern.root[1] == .list);
+    try testing.expect(zig_pattern.root[2] == .arrow);
+}
+
+test "Parser structure: A, B" {
+    var zig_pattern = try parse(testing.allocator, "A, B");
+    defer zig_pattern.deinit(testing.allocator);
+
+    // Zig parser should produce: [key(A), list([key(B)])]
+    try testing.expectEqual(@as(usize, 2), zig_pattern.root.len);
+    try testing.expect(zig_pattern.root[0] == .key);
+    try testing.expect(zig_pattern.root[1] == .list);
+    try testing.expectEqual(@as(usize, 1), zig_pattern.root[1].list.root.len);
+}
+
+test "Parse structure: comma lists" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    // A, B, C should be: [A, list([B, list([C])])]
+    const abc = try parse(allocator, "A, B, C");
+    try testing.expectEqual(@as(usize, 2), abc.root.len);
+    try testing.expect(abc.root[0] == .key);
+    try testing.expectEqualStrings("A", abc.root[0].key);
+    try testing.expect(abc.root[1] == .list);
+    const bc_list = abc.root[1].list;
+    try testing.expectEqual(@as(usize, 2), bc_list.root.len);
+    try testing.expect(bc_list.root[0] == .key);
+    try testing.expectEqualStrings("B", bc_list.root[0].key);
+    try testing.expect(bc_list.root[1] == .list);
+    const c_list = bc_list.root[1].list;
+    try testing.expectEqual(@as(usize, 1), c_list.root.len);
+    try testing.expect(c_list.root[0] == .key);
+    try testing.expectEqualStrings("C", c_list.root[0].key);
+
+    // B, C should be: [B, list([C])]
+    const bc = try parse(allocator, "B, C");
+    try testing.expectEqual(@as(usize, 2), bc.root.len);
+    try testing.expect(bc.root[0] == .key);
+    try testing.expectEqualStrings("B", bc.root[0].key);
+    try testing.expect(bc.root[1] == .list);
+    const c_inner = bc.root[1].list;
+    try testing.expectEqual(@as(usize, 1), bc.height);
+    try testing.expectEqual(@as(usize, 1), c_inner.height);
+}

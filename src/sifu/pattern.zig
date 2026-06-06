@@ -320,3 +320,23 @@ test "Pattern: toString" {
     defer testing.allocator.free(str);
     try testing.expectEqualStrings("Bb Cc", str);
 }
+
+const ArenaAllocator = std.heap.ArenaAllocator;
+const Parser = @import("../Parser.zig");
+
+test "Pattern height: nested patterns" {
+    var arena = ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    try testing.expectEqual(@as(usize, 0), (try Parser.parse(alloc, "")).height);
+    try testing.expectEqual(@as(usize, 0), (try Parser.parse(alloc, "A B")).height);
+    try testing.expectEqual(@as(usize, 1), (try Parser.parse(alloc, "()")).height);
+    try testing.expectEqual(@as(usize, 1), (try Parser.parse(alloc, ",")).height);
+    try testing.expectEqual(@as(usize, 1), (try Parser.parse(alloc, "1,")).height);
+    try testing.expectEqual(@as(usize, 1), (try Parser.parse(alloc, "1, 2")).height);
+    try testing.expectEqual(@as(usize, 2), (try Parser.parse(alloc, "1, 2,")).height);
+    try testing.expectEqual(@as(usize, 2), (try Parser.parse(alloc, "1,(2)")).height);
+    try testing.expectEqual(@as(usize, 3), (try Parser.parse(alloc, "1,(2,3)")).height);
+    try testing.expectEqual(@as(usize, 1), (try Parser.parse(alloc, "1 + 2")).height);
+}

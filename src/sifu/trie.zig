@@ -1940,3 +1940,154 @@ test "rebuildKey: multiple nested tries" {
     defer testing.allocator.free(str);
     try testing.expectEqualStrings("{ A -> B } X { C -> D, E -> F }", str);
 }
+
+const Parser = @import("../Parser.zig");
+
+fn expectRebuildRoundtrip(trie: Trie, index: usize) !void {
+    var rebuilt = try trie.rebuildKey(testing.allocator, index);
+    defer testing.allocator.free(rebuilt.root);
+    const str = try rebuilt.toString(testing.allocator);
+    defer testing.allocator.free(str);
+
+    var parsed = try Parser.parse(testing.allocator, str);
+    defer parsed.deinit(testing.allocator);
+
+    // Verify parsed pattern matches the trie at this index
+    var bindings = VarBindings{};
+    defer bindings.deinit(testing.allocator);
+    var match_result = try trie.match(testing.allocator, .{ .lower = index, .upper = trie.size() }, &bindings, parsed);
+    defer match_result.deinit(testing.allocator);
+    try testing.expect(match_result.value != null);
+}
+
+test "rebuildKey: multiple entries roundtrip" {
+    var trie = Trie{};
+    defer trie.deinit(testing.allocator);
+
+    var key0 = [_]Node{ .{ .key = "A" }, .{ .key = "B" }, .{ .variable = "x" } };
+    var key1 = [_]Node{ .{ .key = "A" }, .{ .key = "C" } };
+    var key2 = [_]Node{ .{ .key = "A" }, .{ .key = "B" }, .{ .variable = "y" } };
+    var val = [_]Node{.{ .key = "V" }};
+    _ = try trie.append(testing.allocator, .{ .root = &key0 }, .{ .root = &val });
+    _ = try trie.append(testing.allocator, .{ .root = &key1 }, .{ .root = &val });
+    _ = try trie.append(testing.allocator, .{ .root = &key2 }, .{ .root = &val });
+
+    try expectRebuildRoundtrip(trie, 0);
+    try expectRebuildRoundtrip(trie, 1);
+    try expectRebuildRoundtrip(trie, 2);
+}
+
+test "rebuildKey: nested with list roundtrip" {
+    var trie = Trie{};
+    defer trie.deinit(testing.allocator);
+
+    var list_inner = [_]Node{.{ .variable = "y" }};
+    var inner = [_]Node{ .{ .variable = "x" }, .{ .list = .{ .root = &list_inner } } };
+    var key = [_]Node{.{ .pattern = .{ .root = &inner } }};
+    var val = [_]Node{.{ .key = "V" }};
+    _ = try trie.append(testing.allocator, .{ .root = &key }, .{ .root = &val });
+
+    try expectRebuildRoundtrip(trie, 0);
+}
+
+test "rebuildKey: embedded trie roundtrip" {
+    var trie = Trie{};
+    defer trie.deinit(testing.allocator);
+
+    var inner_trie = Trie{};
+    defer inner_trie.deinit(testing.allocator);
+    var inner_key0 = [_]Node{.{ .key = "A" }};
+    var inner_val0 = [_]Node{.{ .key = "B" }};
+    var inner_key1 = [_]Node{ .{ .key = "C" }, .{ .key = "D" } };
+    var inner_val1 = [_]Node{.{ .key = "E" }};
+    _ = try inner_trie.append(testing.allocator, .{ .root = &inner_key0 }, .{ .root = &inner_val0 });
+    _ = try inner_trie.append(testing.allocator, .{ .root = &inner_key1 }, .{ .root = &inner_val1 });
+
+    var key = [_]Node{ .{ .key = "X" }, .{ .trie = inner_trie }, .{ .key = "Y" } };
+    var val = [_]Node{.{ .key = "V" }};
+    _ = try trie.append(testing.allocator, .{ .root = &key }, .{ .root = &val });
+
+    try expectRebuildRoundtrip(trie, 0);
+}
+
+test "rebuildKey: multiple nested tries roundtrip" {
+    var trie = Trie{};
+    defer trie.deinit(testing.allocator);
+
+    var inner1 = Trie{};
+    defer inner1.deinit(testing.allocator);
+    var i1_key = [_]Node{.{ .key = "A" }};
+    var i1_val = [_]Node{.{ .key = "B" }};
+    _ = try inner1.append(testing.allocator, .{ .root = &i1_key }, .{ .root = &i1_val });
+
+    var inner2 = Trie{};
+    defer inner2.deinit(testing.allocator);
+    var i2_key0 = [_]Node{.{ .key = "C" }};
+    var i2_val0 = [_]Node{.{ .key = "D" }};
+    var i2_key1 = [_]Node{.{ .key = "E" }};
+    var i2_val1 = [_]Node{.{ .key = "F" }};
+    _ = try inner2.append(testing.allocator, .{ .root = &i2_key0 }, .{ .root = &i2_val0 });
+    _ = try inner2.append(testing.allocator, .{ .root = &i2_key1 }, .{ .root = &i2_val1 });
+
+    var key = [_]Node{ .{ .trie = inner1 }, .{ .key = "X" }, .{ .trie = inner2 } };
+    var val = [_]Node{.{ .key = "V" }};
+    _ = try trie.append(testing.allocator, .{ .root = &key }, .{ .root = &val });
+
+    try expectRebuildRoundtrip(trie, 0);
+}
+
+test "rebuildKey: height preserved" {
+    var trie = Trie{};
+    defer trie.deinit(testing.allocator);
+
+    var key = [_]Node{ .{ .key = "A" }, .{ .variable = "x" } };
+    var val = [_]Node{.{ .key = "V" }};
+    _ = try trie.append(testing.allocator, .{ .root = &key }, .{ .root = &val });
+
+    const rebuilt = try trie.rebuildKey(testing.allocator, 0);
+    defer testing.allocator.free(rebuilt.root);
+    try testing.expectEqual(@as(usize, 0), rebuilt.height);
+}
+
+test "Debug trie structure" {
+    var trie = try Parser.parseTrie(testing.allocator, "A, *x --> *x");
+    defer trie.deinit(testing.allocator);
+
+    var trie2 = try Parser.parseTrie(testing.allocator, "x, y --> y, x");
+    defer trie2.deinit(testing.allocator);
+    try testing.expect(trie2.var_branches.items.len >= 1);
+}
+
+test "Match: trie size as lower bound never matches" {
+    var arena = ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    var trie = try Parser.parseTrie(allocator,
+        \\A --> 1
+        \\B --> 2
+    );
+    const query = try Parser.parse(allocator, "A");
+
+    // Sanity check: the query matches when starting from the beginning.
+    var lower_bindings = VarBindings{};
+    const matched = try trie.match(
+        allocator,
+        .{ .lower = 0, .upper = trie.size() },
+        &lower_bindings,
+        query,
+    );
+    try testing.expect(matched.value != null);
+
+    // Starting at the trie's size, there is no branch at or after the lower
+    // bound, so nothing can ever match.
+    var bindings = VarBindings{};
+    const unmatched = try trie.match(
+        allocator,
+        .{ .lower = trie.size(), .upper = trie.size() },
+        &bindings,
+        query,
+    );
+    try testing.expect(unmatched.value == null);
+    try testing.expectEqual(@as(usize, 0), unmatched.len);
+}
