@@ -1,62 +1,125 @@
 digraph SifuProject {
-    node [style=filled, shape="rectangle" fontname="Maple Mono", fontsize=10];
-    // Entry points
-    main [fillcolor="#FFD1DC", label="main"];
-    wasm [fillcolor="#FFD1DC", label="wasm"];
+    compound=true;
+    graph [overlap=false, splines=true, sep="+0.5", nodesep=0.5, ranksep=0.8];
+    node [style=filled, shape="rectangle", fontname="Monospace", fontsize=10];
 
-    // Core module
-    sifu [fillcolor="#FFFACD", label="sifu"];
-
-    // Utilities
-    util [fillcolor="#E6E6FA", label="util"];
-    streams [fillcolor="#ADD8E6", label="streams"];
-    generics_util [fillcolor="#FFE4E1", label="generics_util"];
-
-    // Core components
-    lexer [fillcolor="#FFB6C1", label="Lexer"];
-    parser [fillcolor="#E0FFFF", label="parser"];
-    pattern [fillcolor="#F0FFF0", label="pattern"];
-    syntax [fillcolor="#F0F8FF", label="syntax"];
-    trie [fillcolor="#FFF0F5", label="trie"];
-
-    // Pattern sub-node
-    pattern_node [fillcolor="#F0FFF0", label="node"];
-
-    // Dependencies
-    main -> sifu;
-    wasm -> sifu;
-    sifu -> util;
-    sifu -> parser;
-    util -> streams;
-    lexer -> syntax;
-    parser -> lexer;
-    parser -> trie;
-    parser -> pattern;
-    parser -> syntax;
-    trie -> pattern;
-    pattern -> syntax;
-    pattern -> pattern_node;
-    syntax -> util;
-    trie -> util;
-
-    // Group for sifu-related nodes
-    subgraph cluster_sifu {
-        label = "Sifu";
-        style = filled;
-        fillcolor = "#F5F5F5";
-        
-        sifu;
-        parser;
-        lexer;
-        syntax;
-        trie;
-
-        subgraph cluster_pattern {
-        label = "Pattern";
-        pattern_node;
-        pattern;
-        }
+    subgraph cluster_entry {
+        label = "Entry Points";
+        style = filled; fillcolor = "#F5F5F5";
+        main  [fillcolor="#FFD1DC", label="main.zig"];
+        wasm  [fillcolor="#FFD1DC", label="wasm.zig"];
     }
 
+    subgraph cluster_parser {
+        label = "Parser";
+        style = filled; fillcolor = "#F5F5F5";
+        parser [fillcolor="#E0FFFF", label="Parser.zig"];
+        ts     [fillcolor="#E0FFFF", label="tree_sitter_parser.zig"];
+    }
 
+    subgraph cluster_core {
+        label = "Core Data Structures";
+        style = filled; fillcolor = "#F5F5F5";
+        trie    [fillcolor="#FFFACD", label="sifu/trie.zig"];
+        pattern [fillcolor="#F0FFF0", label="sifu/pattern.zig"];
+        "node"  [fillcolor="#FFF0F5", label="sifu/node.zig"];
+    }
+
+    subgraph cluster_interp {
+        label = "Interpreter";
+        style = filled; fillcolor = "#F5F5F5";
+        core     [fillcolor="#E6E6FA", label="interpreter/core.zig"];
+        pure     [fillcolor="#E6E6FA", label="interpreter/pure.zig"];
+        comments [fillcolor="#E6E6FA", label="interpreter/comments.zig"];
+        string   [fillcolor="#E6E6FA", label="interpreter/string.zig"];
+        math     [fillcolor="#E6E6FA", label="interpreter/math.zig"];
+        concat   [fillcolor="#E6E6FA", label="interpreter/concat.zig"];
+    }
+
+    subgraph cluster_compiler {
+        label = "Compiler";
+        style = filled; fillcolor = "#F5F5F5";
+        compiler [fillcolor="#FFE4E1", label="compiler/core.zig"];
+    }
+
+    subgraph cluster_io {
+        label = "I/O";
+        style = filled; fillcolor = "#F5F5F5";
+        streams [fillcolor="#ADD8E6", label="streams.zig"];
+    }
+
+    subgraph cluster_external {
+        label = "External Dependencies";
+        style = filled; fillcolor = "#F5F5F5";
+        cli     [fillcolor="#D3D3D3", label="zig-cli", shape="cylinder"];
+        sifu_ts [fillcolor="#D3D3D3", label="tree_sitter_sifu", shape="cylinder"];
+    }
+
+    subgraph cluster_test {
+        label = "Tests";
+        style = filled; fillcolor = "#F5F5F5";
+        test        [fillcolor="#FFE4B5", label="test.zig"];
+        integration [fillcolor="#FFE4B5", label="integration_test.zig"];
+    }
+
+    // ── Internal edges ──
+
+    // Core triangular deps
+    trie -> "node";
+    trie -> pattern;
+    pattern -> "node";
+    "node" -> pattern;
+    "node" -> trie [style="dashed"];
+
+    // Interpreter internal
+    core -> pure;
+    core -> comments;
+    core -> string;
+    concat -> core;
+
+    // ── Cross-cluster edges ──
+
+    // Entry → Parser
+    main -> parser [ltail=cluster_entry, lhead=cluster_parser];
+    main -> ts [style="dashed", ltail=cluster_entry, lhead=cluster_parser];
+
+    // Entry → everything else
+    main -> trie     [ltail=cluster_entry, lhead=cluster_core];
+    main -> core     [ltail=cluster_entry, lhead=cluster_interp];
+    main -> streams  [ltail=cluster_entry, lhead=cluster_io];
+    main -> compiler [ltail=cluster_entry, lhead=cluster_compiler];
+    main -> cli      [ltail=cluster_entry, lhead=cluster_external];
+
+    wasm -> parser   [ltail=cluster_entry, lhead=cluster_parser];
+    wasm -> trie     [ltail=cluster_entry, lhead=cluster_core];
+    wasm -> core     [ltail=cluster_entry, lhead=cluster_interp];
+    wasm -> streams  [ltail=cluster_entry, lhead=cluster_io];
+
+    // Parser → Core / Interpreter
+    parser    -> trie   [lhead=cluster_core];
+    parser    -> comments [lhead=cluster_interp];
+
+    // tree-sitter parser → Core / External
+    ts        -> trie    [lhead=cluster_core];
+    ts        -> sifu_ts [lhead=cluster_external];
+
+    // Core ↔ Interpreter
+    trie -> core [ltail=cluster_core, lhead=cluster_interp];
+    core -> trie [ltail=cluster_interp, lhead=cluster_core];
+
+    // Compiler → everything
+    compiler -> parser [lhead=cluster_parser];
+    compiler -> trie   [lhead=cluster_core];
+    compiler -> core   [lhead=cluster_interp];
+
+    // Test → everything
+    test        -> parser [lhead=cluster_parser];
+    test        -> trie   [lhead=cluster_core];
+    test        -> core   [lhead=cluster_interp];
+    test        -> string [lhead=cluster_interp];
+    test        -> math   [lhead=cluster_interp];
+
+    integration -> parser [lhead=cluster_parser];
+    integration -> trie   [lhead=cluster_core];
+    integration -> ts     [lhead=cluster_parser];
 }
