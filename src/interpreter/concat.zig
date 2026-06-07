@@ -49,3 +49,46 @@ pub fn evaluateSlice(
     }
     return try pattern.copy(allocator);
 }
+
+
+    /// The first half of evaluation with backtracking. The variables in the node match
+    /// anything in the trie, and vars in the trie match anything in
+    /// the expression. Includes partial prefixes (ones that don't match all
+    /// pattern). This function returns any trie branches, even if their
+    /// value is null, unlike `match`. The position defines the index where
+    /// allowable matches begin. As a trie is matched, a hashmap for vars
+    /// is populated with each var's bound variable. These can the be used
+    /// by the caller for rewriting.
+    /// - Any node matches a var trie including a var (the var node is
+    ///   then stored in the var map like any other node)
+    /// - A var node doesn't match a non-var trie (var matching is one
+    ///   way)
+    /// - A literal node that matches a trie of both literals and vars
+    /// matches the literal part, not the var
+    /// Returns a nullable struct describing a successful match containing:
+    /// - the value for that match in the trie
+    /// - the minimum index a subsequent match should use, which is one
+    /// greater than the previous (except for structural recursion).
+    /// - null if no match
+    /// Time Complexity: O(mlogn) where m is the key len and n is the size of the trie.
+    /// Returns a trie of the subset of branches that matches `node`. Caller
+    /// owns the trie returned, but it is a shallow copy and thus cannot be
+    /// freed with destroy/deinit without freeing references in self.
+    // Add this struct near the top with other Match/Eval structs
+
+    /// Finds all possible branches that could match the given node at or after
+    /// bound.
+    /// Returns a queue of all candidate matches with their indices, branches,
+    /// and updated bindings.
+    fn matchAllTerms(
+        self: *const Trie,
+        // allocator: Allocator,
+        // bound: usize,
+        // bindings: VarBindings,
+        // node: Node,
+    ) Allocator.Error!MatchQueue {
+        _ = self;
+        @panic("unimplemented\n");
+    }
+
+    const MatchQueue = std.PriorityQueue(Trie.IndexBranchTrie);

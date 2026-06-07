@@ -23,6 +23,7 @@ const trie_module = @import("sifu/trie.zig");
 const Pattern = trie_module.Pattern;
 const Node = trie_module.Node;
 const Trie = trie_module.Trie;
+const comments = @import("interpreter/comments.zig");
 
 const Oom = Allocator.Error;
 
@@ -37,6 +38,7 @@ pub const Tag = enum {
     number,
     string,
     symbol,
+    comment,
     semicolon,
     newline,
     comma,
@@ -69,6 +71,9 @@ pub const Token = struct {
 source: []const u8,
 pos: usize = 0,
 current: Token = .{ .tag = .eof, .start = 0, .end = 0 },
+/// Nesting depth of `(`/`{`. Newlines only act as line-continuation when
+/// indented at the top level (depth 0); inside brackets they always separate.
+bracket_depth: usize = 0,
 
 pub fn init(source: []const u8) Self {
     var self = Self{ .source = source };
@@ -104,10 +109,23 @@ fn advance(self: *Self) Token {
 
     // Single-character delimiters
     switch (c) {
-        '(' => return self.single(.left_paren),
-        ')' => return self.single(.right_paren),
-        '{' => return self.single(.left_brace),
-        '}' => return self.single(.right_brace),
+        '#' => return self.lexComment(),
+        '(' => {
+            self.bracket_depth += 1;
+            return self.single(.left_paren);
+        },
+        ')' => {
+            self.bracket_depth -|= 1;
+            return self.single(.right_paren);
+        },
+        '{' => {
+            self.bracket_depth += 1;
+            return self.single(.left_brace);
+        },
+        '}' => {
+            self.bracket_depth -|= 1;
+            return self.single(.right_brace);
+        },
         '`' => return self.single(.backtick),
         ';' => return self.single(.semicolon),
         '\n' => {
@@ -146,6 +164,22 @@ fn advance(self: *Self) Token {
                 self.pos += 1;
                 return self.advance();
             }
+
+            // Line continuation: at the top level, a next line indented deeper
+            // than the current one continues the current expression rather than
+            // separating a new entry. `scan` and `check_pos` sit on the first
+            // code byte of the current and next code line respectively.
+            if (self.bracket_depth == 0) {
+                const current_indent = scan - line_start;
+                var next_line_start = check_pos;
+                while (next_line_start > 0 and self.source[next_line_start - 1] != '\n')
+                    next_line_start -= 1;
+                const next_indent = check_pos - next_line_start;
+                if (next_indent > current_indent) {
+                    self.pos += 1;
+                    return self.advance();
+                }
+            }
             return self.single(.newline);
         },
         ',' => return self.single(.comma),
@@ -160,6 +194,18 @@ fn advance(self: *Self) Token {
     if (isUpper(c)) return self.lexKey();
     if (isLower(c)) return self.lexVariable();
     if (isDigit(c)) return self.lexNumber();
+    // A run of dashes directly followed (no space) by an identifier letter is
+    // part of that identifier (e.g. `-Const`); otherwise it is an operator
+    // (subtraction, `->`, `-->`), which is why dash operators need spaces.
+    if (c == '-') {
+        var i = self.pos;
+        while (i < self.source.len and self.source[i] == '-') i += 1;
+        if (i < self.source.len) {
+            if (isUpper(self.source[i])) return self.lexKey();
+            if (isLower(self.source[i])) return self.lexVariable();
+        }
+        return self.lexOperator();
+    }
     if (isOpChar(c)) return self.lexOperator();
 
     // Skip unknown bytes
@@ -178,27 +224,41 @@ fn skipExtras(self: *Self) void {
         const c = self.source[self.pos];
         if (c == ' ' or c == '\t' or c == '\r') {
             self.pos += 1;
-        } else if (c == '#') {
-            // Comment: skip to end of line (but not the newline itself)
-            while (self.pos < self.source.len and self.source[self.pos] != '\n')
-                self.pos += 1;
         } else break;
+    }
+}
+
+/// Lex a comment token spanning `#` to the end of the line (the trailing
+/// `\n` is left for the newline handler). A trailing `\r` is excluded.
+fn lexComment(self: *Self) Token {
+    const start = self.pos;
+    while (self.pos < self.source.len and self.source[self.pos] != '\n')
+        self.pos += 1;
+    var end = self.pos;
+    if (end > start and self.source[end - 1] == '\r') end -= 1;
+    return .{ .tag = .comment, .start = start, .end = end };
+}
+
+/// Consume an identifier body: any run of identifier characters and dashes.
+/// Dashes are ordinary identifier characters here, so `I32-Const`, `-Const`,
+/// and `Const-` are all single identifiers. They are only told apart from the
+/// `-`/`->`/`-->` operators by spaces, since whitespace ends the token.
+fn scanIdentTail(self: *Self) void {
+    while (self.pos < self.source.len) : (self.pos += 1) {
+        const c = self.source[self.pos];
+        if (!isIdentTail(c) and c != '-') break;
     }
 }
 
 fn lexKey(self: *Self) Token {
     const start = self.pos;
-    self.pos += 1;
-    while (self.pos < self.source.len and isIdentTail(self.source[self.pos]))
-        self.pos += 1;
+    self.scanIdentTail();
     return .{ .tag = .key, .start = start, .end = self.pos };
 }
 
 fn lexVariable(self: *Self) Token {
     const start = self.pos;
-    self.pos += 1;
-    while (self.pos < self.source.len and isIdentTail(self.source[self.pos]))
-        self.pos += 1;
+    self.scanIdentTail();
     return .{ .tag = .variable, .start = start, .end = self.pos };
 }
 
@@ -206,8 +266,7 @@ fn lexVarPattern(self: *Self) Token {
     const start = self.pos;
     self.pos += 1; // skip *
     self.pos += 1; // skip first lowercase letter
-    while (self.pos < self.source.len and isIdentTail(self.source[self.pos]))
-        self.pos += 1;
+    self.scanIdentTail();
     return .{ .tag = .var_pattern, .start = start, .end = self.pos };
 }
 
@@ -412,8 +471,8 @@ fn parseOptionalPrec4(self: *Self, allocator: Allocator) Oom!Pattern {
 }
 
 /// Prec 4: infix (left-associative)
-///   User-defined symbol operators. The symbol is prepended to the RHS as
-///   a key inside an .infix node.
+///   User-defined symbol operators. The symbol is stored in the .infix node's
+///   `op` field, with the operands kept as its `rhs` pattern.
 fn parsePrec4(self: *Self, allocator: Allocator) Oom!Pattern {
     const lhs = try self.parsePrec5(allocator);
     if (self.peek() != .symbol) return lhs;
@@ -428,14 +487,10 @@ fn parsePrec4(self: *Self, allocator: Allocator) Oom!Pattern {
         const sym_text = sym_tok.text(self.source);
         const rhs = try self.parseOptionalPrec5(allocator);
 
-        // Build infix pattern: [op_key, rhs_nodes...]
-        var infix_nodes = std.ArrayList(Node).empty;
-        try infix_nodes.append(allocator, Node{ .key = sym_text });
-        try infix_nodes.appendSlice(allocator, rhs.root);
-        if (rhs.root.len > 0) allocator.free(rhs.root);
-        const infix_pattern = incrementHeight(patternOf(try infix_nodes.toOwnedSlice(allocator), rhs.height));
-        try nodes.append(allocator, Node{ .infix = infix_pattern });
-        max_child = @max(max_child, infix_pattern.height);
+        // Store the operator out-of-band, with the operands as the rhs pattern.
+        const infix_node = Node{ .infix = .{ .op = sym_text, .rhs = incrementHeight(rhs) } };
+        try nodes.append(allocator, infix_node);
+        max_child = @max(max_child, infix_node.height());
     }
     return patternOf(try nodes.toOwnedSlice(allocator), max_child);
 }
@@ -487,6 +542,7 @@ fn parseTerm(self: *Self, allocator: Allocator) Oom!Node {
         .key, .number, .string => Node{ .key = tok.text(self.source) },
         .variable => Node{ .variable = tok.text(self.source) },
         .var_pattern => Node{ .variable = tok.text(self.source) },
+        .comment => Node{ .comment = tok.text(self.source) },
         .left_paren => blk: {
             const inner = try self.parseInner(allocator, .right_paren);
             break :blk Node{ .pattern = incrementHeight(inner) };
@@ -522,6 +578,7 @@ fn canStartTerm(self: Self) bool {
         .var_pattern,
         .number,
         .string,
+        .comment,
         .left_paren,
         .left_brace,
         .backtick,
@@ -563,8 +620,12 @@ pub fn parseTrie(allocator: Allocator, source: []const u8) Oom!Trie {
     return patternToTrie(allocator, pattern);
 }
 
-fn patternToTrie(allocator: Allocator, pattern: Pattern) Oom!Trie {
+fn patternToTrie(allocator: Allocator, raw_pattern: Pattern) Oom!Trie {
     var result = Trie{};
+
+    // Comments carry no semantics; drop them so trie keys/values stay clean.
+    var pattern = try raw_pattern.evaluate(allocator, comments.step);
+    defer pattern.deinit(allocator);
 
     if (pattern.root.len == 0) return result;
 
@@ -666,7 +727,7 @@ pub fn parse(allocator: Allocator, source: []const u8) Oom!Pattern {
 
 const testing = std.testing;
 
-const NodeTag = enum { key, variable, var_pattern, pattern, infix, match, arrow, list, newline, trie };
+const NodeTag = enum { key, variable, var_pattern, comment, pattern, infix, match, arrow, list, newline, trie };
 
 fn expectNodes(pattern: Pattern, expected_tags: []const NodeTag) !void {
     try testing.expectEqual(expected_tags.len, pattern.root.len);
@@ -674,6 +735,7 @@ fn expectNodes(pattern: Pattern, expected_tags: []const NodeTag) !void {
         const actual_tag: NodeTag = switch (node) {
             .key => .key,
             .variable => |v| if (v.len > 0 and v[0] == '*') .var_pattern else .variable,
+            .comment => .comment,
             .pattern => .pattern,
             .infix => .infix,
             .match => .match,
@@ -859,23 +921,25 @@ test "infix: 1 + 2" {
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
     const p = try parse(arena.allocator(), "1 + 2");
-    // [1, infix([+, 2])]
+    // [1, infix(+, [2])]
     try expectNodes(p, &.{ .key, .infix });
     try testing.expectEqualStrings("1", p.root[0].key);
-    const infix_pat = p.root[1].infix;
-    try testing.expectEqual(@as(usize, 2), infix_pat.root.len);
-    try testing.expectEqualStrings("+", infix_pat.root[0].key);
-    try testing.expectEqualStrings("2", infix_pat.root[1].key);
+    const infix = p.root[1].infix;
+    try testing.expectEqualStrings("+", infix.op);
+    try testing.expectEqual(@as(usize, 1), infix.rhs.root.len);
+    try testing.expectEqualStrings("2", infix.rhs.root[0].key);
 }
 
-test "comment skipped" {
+test "comment preserved as node" {
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
-    // Newlines separate entries, "A # comment\nB" becomes "A\nB"
+    // Comments are kept as nodes; the newline still separates entries.
+    // "A # comment\nB" becomes [A, comment, list([B])].
     const p = try parse(arena.allocator(), "A # comment\nB");
-    try expectNodes(p, &.{ .key, .list });
+    try expectNodes(p, &.{ .key, .comment, .list });
     try testing.expectEqualStrings("A", p.root[0].key);
-    try testing.expectEqualStrings("B", p.root[1].list.root[0].key);
+    try testing.expectEqualStrings("# comment", p.root[1].comment);
+    try testing.expectEqualStrings("B", p.root[2].list.root[0].key);
 }
 
 test "empty trie: {}" {
@@ -1073,12 +1137,14 @@ test "multiline: trie with trailing arrow has empty value" {
 test "multiline: comment after trailing op" {
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
-    // Comment after trailing operator, B is separate entry
+    // Comment after a trailing operator is kept as the arrow's only (comment)
+    // child. The next line is not indented, so B remains a separate entry.
     const p = try parse(arena.allocator(), "A -> # value is B\nB");
-    // [A, arrow([]), list([B])]
+    // [A, arrow([comment]), list([B])]
     try expectNodes(p, &.{ .key, .arrow, .list });
     try testing.expectEqualStrings("A", p.root[0].key);
-    try testing.expectEqual(@as(usize, 0), p.root[1].arrow.root.len);
+    try testing.expectEqual(@as(usize, 1), p.root[1].arrow.root.len);
+    try testing.expect(p.root[1].arrow.root[0] == .comment);
     try testing.expectEqualStrings("B", p.root[2].list.root[0].key);
 }
 
