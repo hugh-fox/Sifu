@@ -32,7 +32,7 @@ const interpreter = @import("../interpreter/core.zig");
 ///
 /// Drive with an arena: `evaluateString` allocates the folded literal's bytes
 /// from `allocator` without freeing them on `deinit`, matching how the
-/// interpreter treats key text.
+/// interpreter treats constant text.
 pub fn compile(allocator: Allocator, trie: Trie, program: []const u8) ![]const u8 {
     var pattern = try Parser.parse(allocator, program);
     defer pattern.deinit(allocator);

@@ -19,25 +19,25 @@ pub const core = @import("../interpreter/core.zig");
 pub const HashMap = std.StringHashMapUnmanaged(Trie);
 pub const GetOrPutResult = HashMap.GetOrPutResult;
 
-/// A key node and its next term pointer for a trie, where only the
-/// length of slice types are stored for keys (instead of pointers).
-/// The term/next is a reference to a key/value in the HashMaps,
+/// A constant node and its next term pointer for a trie, where only the
+/// length of slice types are stored for constants (instead of pointers).
+/// The term/next is a reference to a constant/value in the HashMaps,
 /// which owns both.
 const Entry = HashMap.Entry;
 
 /// This maps to branches, but the type is Branch instead of just *Self to
-/// retrieve keys if necessary. The Self pointer references another field in
-/// this trie, such as `keys`. Stores any and all values, vars and their indices
+/// retrieve constants if necessary. The Self pointer references another field in
+/// this trie, such as `constants`. Stores any and all values, vars and their indices
 /// at each branch in the trie. Tracks the order of entries in the trie and
 /// references to next pointers. An index for an entry is saved at every branch
-/// in the trie for a given key. Branches may or may not contain values in their
+/// in the trie for a given constant. Branches may or may not contain values in their
 /// ValueMap, for example in `Foo Bar -> 123`, the branch at `Foo` would have an
-/// index to the key `Bar` and a leaf trie containing the value `123`.
+/// index to the constant `Bar` and a leaf trie containing the value `123`.
 const BranchNode = struct {
-    // The string key and child trie entry from the current map.
+    // The string constant and child trie entry from the current map.
     entry: Entry,
     // This points to the next branch in the entry's branch list. Necessary for
-    // efficient lookups by index. There is always a next branch for keys/vars
+    // efficient lookups by index. There is always a next branch for constants/vars
     // and never for values.
     next_index: usize,
 
@@ -47,17 +47,17 @@ const BranchNode = struct {
 };
 
 /// A single index and its next pointer in the trie. The union disambiguates
-/// between values and the next variables/key. Keys are borrowed from the trie's
-/// hashmap, but variables are owned (as they aren't stored as keys in the trie).
+/// between values and the next variables/constant. Constants are borrowed from the trie's
+/// hashmap, but variables are owned (as they aren't stored as constants in the trie).
 /// Variables starting with '*' have var_pattern behavior.
 const Branch = union(enum) {
-    key: BranchNode,
+    constant: BranchNode,
     variable: BranchNode,
     value: Pattern,
 
     pub fn node(branch: Branch) ?BranchNode {
         return switch (branch) {
-            .key, .variable => |branch_node| branch_node,
+            .constant, .variable => |branch_node| branch_node,
             .value => null,
         };
     }
@@ -81,7 +81,7 @@ const Branch = union(enum) {
         const branch_node = self.node() orelse return null;
         const trie = branch_node.entry.value_ptr.*;
         return switch (self) {
-            .key => Trie.findNextInBranches(trie.key_branches.items, bound),
+            .constant => Trie.findNextInBranches(trie.constant_branches.items, bound),
             .variable => Trie.findNextInBranches(trie.var_branches.items, bound),
             .value => null,
         };
@@ -105,9 +105,9 @@ pub const Bound = struct { lower: usize = 0, upper: usize };
 pub const VarBindings = std.StringHashMapUnmanaged(Node);
 
 /// Maps terms to the next trie, if there is one. These form the branches of the
-/// trie for a specific level of nesting. Each Key is in the map is unique, but
+/// trie for a specific level of nesting. Each Constant is in the map is unique, but
 /// they can be repeated in separate indices. Therefore this stores its own next
-/// Self pointer, and the indices for each key.
+/// Self pointer, and the indices for each constant.
 ///
 /// Keys must be efficiently iterable, but that is provided by the index map
 /// anyways so an array map isn't needed for the trie's hashmap.
@@ -119,7 +119,7 @@ pub const Trie = struct {
     pub const Self = @This();
 
     map: HashMap = .{},
-    key_branches: BranchList = .empty,
+    constant_branches: BranchList = .empty,
     var_branches: BranchList = .empty,
     value_branches: BranchList = .empty,
     depth: usize = 0, // TODO: implement depth caching
@@ -138,7 +138,7 @@ pub const Trie = struct {
             panic("Index {} doesn't exist\n", .{index});
     }
     /// Returns null if the index doesn't exist in the trie.
-    /// Note that this isn't O(m) where m is the key length of the index.
+    /// Note that this isn't O(m) where m is the constant length of the index.
     pub fn getIndexOrNull(self: Self, index: usize) ?Pattern {
         var current = &self;
         var branch: Branch = undefined;
@@ -151,9 +151,9 @@ pub const Trie = struct {
         return null;
     }
 
-    /// Rebuilds the key for a given index as a flat pattern of keys/variables.
-    /// Special delimiters like `(`, `)`, `,`, etc. appear as regular key nodes.
-    pub fn rebuildKey(
+    /// Rebuilds the constant for a given index as a flat pattern of constants/variables.
+    /// Special delimiters like `(`, `)`, `,`, etc. appear as regular constant nodes.
+    pub fn rebuildConstant(
         self: Self,
         allocator: Allocator,
         index: usize,
@@ -161,7 +161,7 @@ pub const Trie = struct {
         var nodes = ArrayList(Node).empty;
         errdefer nodes.deinit(allocator);
 
-        try self.rebuildKeyInner(allocator, index, &nodes);
+        try self.rebuildConstantInner(allocator, index, &nodes);
 
         const root = try nodes.toOwnedSlice(allocator);
         var max_child: usize = 0;
@@ -169,19 +169,19 @@ pub const Trie = struct {
         return Pattern{ .root = root, .height = max_child };
     }
 
-    fn rebuildKeyInner(
+    fn rebuildConstantInner(
         self: Self,
         allocator: Allocator,
         index: usize,
         nodes: *ArrayList(Node),
     ) Allocator.Error!void {
         const bound = Bound{ .lower = index, .upper = index + 1 };
-        // Check keys first
-        if (findNextInBranches(self.key_branches.items, bound)) |kb| {
+        // Check constants first
+        if (findNextInBranches(self.constant_branches.items, bound)) |kb| {
             const found_index, const branch = kb;
             if (found_index == index) {
-                try nodes.append(allocator, .{ .key = branch.key.entry.key_ptr.* });
-                return branch.key.entry.value_ptr.rebuildKeyInner(allocator, index, nodes);
+                try nodes.append(allocator, .{ .constant = branch.constant.entry.key_ptr.* });
+                return branch.constant.entry.value_ptr.rebuildConstantInner(allocator, index, nodes);
             }
         }
         // Then check vars
@@ -189,12 +189,12 @@ pub const Trie = struct {
             const found_index, const branch = vb;
             if (found_index == index) {
                 try nodes.append(allocator, .{ .variable = branch.variable.entry.key_ptr.* });
-                return branch.variable.entry.value_ptr.rebuildKeyInner(allocator, index, nodes);
+                return branch.variable.entry.value_ptr.rebuildConstantInner(allocator, index, nodes);
             }
         }
     }
 
-    /// Deep copy a trie by value, as well as Keys and Variables.
+    /// Deep copy a trie by value, as well as Constants and Variables.
     /// Use deinit to free.
     // TODO: optimize by allocating top level maps of same size and then
     // use putAssumeCapacity
@@ -212,7 +212,7 @@ pub const Trie = struct {
             );
 
         // Copy the branch lists
-        try result.key_branches.appendSlice(allocator, self.key_branches.items);
+        try result.constant_branches.appendSlice(allocator, self.constant_branches.items);
         try result.var_branches.appendSlice(allocator, self.var_branches.items);
 
         // Value branches contain Patterns that need deep copying
@@ -258,7 +258,7 @@ pub const Trie = struct {
             branch.value.deinit(allocator);
         }
 
-        self.key_branches.deinit(allocator);
+        self.constant_branches.deinit(allocator);
         self.var_branches.deinit(allocator);
         self.value_branches.deinit(allocator);
         self.* = .{};
@@ -290,23 +290,23 @@ pub const Trie = struct {
     fn getBranch(
         self: Trie,
         bound: Bound,
-        key: []const u8,
-        comptime tag: enum { key, variable },
+        constant: []const u8,
+        comptime tag: enum { constant, variable },
     ) ?IndexBranchTrie {
-        if (self.map.getEntry(key)) |entry| {
+        if (self.map.getEntry(constant)) |entry| {
             debug(
                 "Found string {s} in {*}",
-                .{ key, &self },
+                .{ constant, &self },
             );
             // Find the next index from bound in the child trie. We need to
-            // check all branch types (keys, vars, values) to find the minimum
+            // check all branch types (constants, vars, values) to find the minimum
             // index at or after bound.
             const child_trie = entry.value_ptr;
             if (child_trie.findNext(bound)) |index_branch| {
                 const index, _ = index_branch;
                 debug(
-                    "Found branch in {*} for key {s} at index: {} within bound {}",
-                    .{ child_trie, key, index, bound },
+                    "Found branch in {*} for constant {s} at index: {} within bound {}",
+                    .{ child_trie, constant, index, bound },
                 );
                 if (index < bound.lower) panic(
                     "Index {} is less than bound {}\n",
@@ -324,13 +324,13 @@ pub const Trie = struct {
                 };
             } else {
                 debug(
-                    "Key {s} found in trie, but no branches at or after bound {}",
-                    .{ key, bound },
+                    "Constant {s} found in trie, but no branches at or after bound {}",
+                    .{ constant, bound },
                 );
                 return null;
             }
         } else {
-            debug("Key '{s}' not found in map", .{key});
+            debug("Constant '{s}' not found in map", .{constant});
             return null;
         }
     }
@@ -349,7 +349,7 @@ pub const Trie = struct {
         node: Node,
     ) ?Self {
         return switch (node) {
-            .key => |key| trie.map.get(key),
+            .constant => |constant| trie.map.get(constant),
             .variable => |variable| trie.map.get(variable),
             .pattern => |sub_pattern| blk: {
                 var current = trie.map.get("(") orelse
@@ -392,21 +392,21 @@ pub const Trie = struct {
             null;
     }
 
-    fn getOrPutKey(
+    fn getOrPutConstant(
         trie: *Self,
         allocator: Allocator,
         index: usize,
-        key: []const u8,
+        constant: []const u8,
     ) !*Self {
         const entry = try trie.map
-            .getOrPutValue(allocator, key, Self{ .depth = trie.depth + 1 });
+            .getOrPutValue(allocator, constant, Self{ .depth = trie.depth + 1 });
         const next = entry.value_ptr;
-        try trie.key_branches.append(
+        try trie.constant_branches.append(
             allocator,
             IndexBranch{ index, .{
-                .key = .{
+                .constant = .{
                     .entry = entry,
-                    .next_index = next.key_branches.items.len,
+                    .next_index = next.constant_branches.items.len,
                 },
             } },
         );
@@ -443,9 +443,9 @@ pub const Trie = struct {
         term: Node,
     ) Allocator.Error!*Self {
         return switch (term) {
-            .key => |key| blk: {
-                debug("getOrPutKey: {*} put {s} at index {}", .{ trie, key, index });
-                const next = try trie.getOrPutKey(allocator, index, key);
+            .constant => |constant| blk: {
+                debug("getOrPutConstant: {*} put {s} at index {}", .{ trie, constant, index });
+                const next = try trie.getOrPutConstant(allocator, index, constant);
                 break :blk next;
             },
             .variable => |variable| try trie
@@ -455,76 +455,76 @@ pub const Trie = struct {
             .pattern => |sub_pat| blk: {
                 var next = trie;
                 debug("Processing pattern node at {*}", .{next});
-                next = try next.getOrPutKey(allocator, index, "(");
+                next = try next.getOrPutConstant(allocator, index, "(");
                 debug("Open paren address: {*}", .{next});
                 next = try next.ensurePath(allocator, index, sub_pat);
                 debug("Sub-pattern address: {*}", .{next});
-                next = try next.getOrPutKey(allocator, index, ")");
+                next = try next.getOrPutConstant(allocator, index, ")");
                 debug("Close paren address: {*}", .{next});
                 break :blk next;
             },
             .trie => |sub_trie| blk: {
-                var next = try trie.getOrPutKey(allocator, index, "{");
+                var next = try trie.getOrPutConstant(allocator, index, "{");
 
                 const indices = try sub_trie.valueIndices(allocator);
                 defer allocator.free(indices);
 
                 for (indices, 0..) |entry_idx, i| {
                     if (i > 0) {
-                        next = try next.getOrPutKey(allocator, index, ",");
+                        next = try next.getOrPutConstant(allocator, index, ",");
                     }
 
-                    const key = try sub_trie.rebuildKey(allocator, entry_idx);
-                    defer allocator.free(key.root);
+                    const constant_pat = try sub_trie.rebuildConstant(allocator, entry_idx);
+                    defer allocator.free(constant_pat.root);
 
                     const value = sub_trie.getIndexOrNull(entry_idx) orelse continue;
 
-                    next = try next.ensurePath(allocator, index, key);
-                    next = try next.getOrPutKey(allocator, index, "->");
+                    next = try next.ensurePath(allocator, index, constant_pat);
+                    next = try next.getOrPutConstant(allocator, index, "->");
                     next = try next.ensurePath(allocator, index, value);
                 }
 
-                next = try next.getOrPutKey(allocator, index, "}");
+                next = try next.getOrPutConstant(allocator, index, "}");
                 break :blk next;
             },
             .list => |comma| blk: {
                 var next = trie;
-                next = try next.getOrPutKey(allocator, index, ",");
+                next = try next.getOrPutConstant(allocator, index, ",");
                 next = try next.ensurePath(allocator, index, comma);
 
                 break :blk next;
             },
             .newline => |nl| blk: {
                 var next = trie;
-                next = try next.getOrPutKey(allocator, index, "\n");
+                next = try next.getOrPutConstant(allocator, index, "\n");
                 next = try next.ensurePath(allocator, index, nl);
 
                 break :blk next;
             },
             .infix => |inf| blk: {
                 var next = trie;
-                // The operator symbol becomes a key on the path, followed by
+                // The operator symbol becomes a constant on the path, followed by
                 // its operands, matching how lists/arrows are flattened.
-                next = try next.getOrPutKey(allocator, index, inf.op);
+                next = try next.getOrPutConstant(allocator, index, inf.op);
                 next = try next.ensurePath(allocator, index, inf.rhs);
                 break :blk next;
             },
             .match => |sub_pat| blk: {
                 var next = trie;
-                next = try next.getOrPutKey(allocator, index, ":");
+                next = try next.getOrPutConstant(allocator, index, ":");
                 next = try next.ensurePath(allocator, index, sub_pat);
                 break :blk next;
             },
             .arrow => |sub_pat| blk: {
                 var next = trie;
-                next = try next.getOrPutKey(allocator, index, "->");
+                next = try next.getOrPutConstant(allocator, index, "->");
                 next = try next.ensurePath(allocator, index, sub_pat);
                 break :blk next;
             },
         };
     }
 
-    /// Creates the necessary branches and key entries in the trie for
+    /// Creates the necessary branches and constant entries in the trie for
     /// pattern, and returns a pointer to the branch at the end of the path.
     /// While similar to a hashmap's getOrPut function, ensurePath always
     /// adds a new index, asserting that it did not already exist. There is
@@ -533,7 +533,7 @@ pub const Trie = struct {
     /// The index must not already be in the trie.
     /// Pattern are copied.
     /// Returns a pointer to the updated trie node. If the given pattern is
-    /// empty (0 len), the returned key and index are undefined.
+    /// empty (0 len), the returned constant and index are undefined.
     fn ensurePath(
         trie: *Self,
         allocator: Allocator,
@@ -547,22 +547,22 @@ pub const Trie = struct {
         return current;
     }
 
-    /// Add a node to the trie by following `keys`, wrapping them into an
+    /// Add a node to the trie by following `constants`, wrapping them into an
     /// Pattern of Nodes.
     /// Allocations:
     /// - The value, if given, is allocated and copied recursively
     /// Freeing should be done with `destroy` or `deinit`, depending on
     /// how `self` was allocated
-    pub fn appendKey(
+    pub fn appendConstant(
         self: *Self,
         allocator: Allocator,
-        key: []const []const u8,
+        constant: []const []const u8,
         value: Pattern,
     ) Allocator.Error!*Self {
-        const root = try allocator.alloc(Node, key.len);
+        const root = try allocator.alloc(Node, constant.len);
         defer allocator.free(root);
-        for (root, key) |*node, token|
-            node.* = Node.ofKey(token);
+        for (root, constant) |*node, token|
+            node.* = Node.ofConstant(token);
 
         return self.append(allocator, Pattern{ .root = root, .height = 0 }, value);
     }
@@ -595,7 +595,7 @@ pub const Trie = struct {
 
     /// A partial or complete match of a given pattern against a trie.
     const Match = struct {
-        key: Pattern = .{}, // The pattern that was attempted to match
+        constant: Pattern = .{}, // The pattern that was attempted to match
         value: ?Pattern = null,
         node_ptr: *const Trie,
         match_index: usize = 0,
@@ -604,7 +604,7 @@ pub const Trie = struct {
         /// Node entries are just references, so they aren't freed by this
         /// function.
         pub fn deinit(self: *Match, allocator: Allocator) void {
-            self.key.deinit(allocator);
+            self.constant.deinit(allocator);
         }
     };
 
@@ -649,9 +649,9 @@ pub const Trie = struct {
         } else null;
     }
 
-    /// Finds the next minimum key at this node by index.
-    fn findNextKey(self: Self, bound: Bound) ?IndexBranch {
-        return findNextInBranches(self.key_branches.items, bound);
+    /// Finds the next minimum constant at this node by index.
+    fn findNextConstant(self: Self, bound: Bound) ?IndexBranch {
+        return findNextInBranches(self.constant_branches.items, bound);
     }
 
     /// Finds the next minimum variable at this node by index.
@@ -664,16 +664,16 @@ pub const Trie = struct {
         return findNextInBranches(self.value_branches.items, bound);
     }
 
-    /// Finds the next minimum key, variable or value across all branch types.
+    /// Finds the next minimum constant, variable or value across all branch types.
     fn findNext(self: Self, bound: Bound) ?IndexBranch {
-        const key_branch = self.findNextKey(bound);
+        const constant_branch = self.findNextConstant(bound);
         const var_branch = self.findNextVar(bound);
         const value_branch = self.findNextValue(bound);
 
         var min_branch: ?IndexBranch = null;
         var min_index: usize = math.maxInt(usize);
 
-        if (key_branch) |kb| {
+        if (constant_branch) |kb| {
             const idx, _ = kb;
             if (idx < min_index) {
                 min_index = idx;
@@ -757,12 +757,12 @@ pub const Trie = struct {
 
         // Now check for exact matches based on node type
         switch (node) {
-            .key => |key| {
+            .constant => |constant| {
                 debug(
-                    "Checking {*} for key match {s} at bound {}",
-                    .{ self, key, bound },
+                    "Checking {*} for constant match {s} at bound {}",
+                    .{ self, constant, bound },
                 );
-                return self.getBranch(bound, key, .key);
+                return self.getBranch(bound, constant, .constant);
             },
 
             .variable => |variable| {
@@ -787,7 +787,7 @@ pub const Trie = struct {
 
                         // Bind the variable to what we're matching
                         const bound_value = switch (next_branch) {
-                            .key => |branch_node| Node.ofKey(
+                            .constant => |branch_node| Node.ofConstant(
                                 branch_node.entry.key_ptr.*,
                             ),
                             .variable => |branch_node| Node.ofVar(
@@ -803,7 +803,7 @@ pub const Trie = struct {
                         try term_bindings.put(allocator, variable, bound_value);
 
                         const next_trie = switch (next_branch) {
-                            .key => |b| b.entry.value_ptr,
+                            .constant => |b| b.entry.value_ptr,
                             .variable => |b| b.entry.value_ptr,
                             .value => @panic("value branch in variable matching"),
                         };
@@ -845,7 +845,7 @@ pub const Trie = struct {
                 index, const branch = close_trie.findNext(.{ .lower = index, .upper = bound.upper }) orelse
                     return null;
                 debug("Sub-pattern matched, returning trie: {*}", .{close_trie});
-                // As with key matching, don't return the next trie, but rather
+                // As with constant matching, don't return the next trie, but rather
                 // the current trie (which we got from looking up the closing paren)
                 return .{
                     .index = index,
@@ -906,10 +906,9 @@ pub const Trie = struct {
                     .trie = trie_match.node_ptr,
                 };
             },
-            // The parser/insertion path flattens an infix node just like a
-            // list: the operator symbol becomes a key on the trie path,
+            // list: the operator symbol becomes a constant on the trie path,
             // followed by its operands. Match it the same way: look up the
-            // operator key, then recursively match the operand pattern.
+            // operator constant, then recursively match the operand pattern.
             .infix => |inf| {
                 debug("Matching infix {s} with {} operand(s)", .{ inf.op, inf.rhs.root.len });
                 const open_entry = self.map.getEntry(inf.op) orelse
@@ -1013,14 +1012,14 @@ pub const Trie = struct {
             index = index_branch_trie.index;
             const branch = index_branch_trie.branch;
             switch (branch) {
-                .key => |key| {
+                .constant => |constant| {
                     debug(
-                        "Appending key branch at index {} of {s}",
-                        .{ index, key.entry.key_ptr.* },
+                        "Appending constant branch at index {} of {s}",
+                        .{ index, constant.entry.key_ptr.* },
                     );
                     try node_list.append(
                         allocator,
-                        Node{ .key = key.entry.key_ptr.* },
+                        Node{ .constant = constant.entry.key_ptr.* },
                     );
                 },
                 .variable => |variable| {
@@ -1110,11 +1109,11 @@ pub const Trie = struct {
             }
         }
 
-        const key_nodes = try node_list.toOwnedSlice(allocator);
+        const constant_nodes = try node_list.toOwnedSlice(allocator);
         var max_child: usize = 0;
-        for (key_nodes) |n| max_child = @max(max_child, n.height());
+        for (constant_nodes) |n| max_child = @max(max_child, n.height());
         return Match{
-            .key = Pattern{ .root = key_nodes, .height = max_child },
+            .constant = Pattern{ .root = constant_nodes, .height = max_child },
             .value = if (full_match) result else null,
             .node_ptr = current,
             .match_index = index,
@@ -1123,18 +1122,18 @@ pub const Trie = struct {
     }
 
     pub fn size(self: Self) usize {
-        return self.key_branches.items.len +
+        return self.constant_branches.items.len +
             self.var_branches.items.len +
             self.value_branches.items.len;
     }
 
-    /// Returns a slice of keys, where each key is concatenated into a string.
-    pub fn keys(self: Self, allocator: Allocator) ![][]const u8 {
+    /// Returns a slice of constants, where each constant is concatenated into a string.
+    pub fn constants(self: Self, allocator: Allocator) ![][]const u8 {
         const result = try allocator.alloc([][]const u8, self.count());
         for (result) |slice_ptr| {
-            var key = ArrayList([]const u8){};
-            try self.writeValues(allocator, key);
-            slice_ptr = key.toOwnedSlice(allocator);
+            var constant_list = ArrayList([]const u8){};
+            try self.writeValues(allocator, constant_list);
+            slice_ptr = constant_list.toOwnedSlice(allocator);
         }
         return result;
     }
@@ -1173,14 +1172,14 @@ pub const Trie = struct {
         var current = self;
         const index_bound = Bound{ .lower = index, .upper = index + 1 };
         while (true) {
-            // Check keys first
-            if (findNextInBranches(current.key_branches.items, index_bound)) |kb| {
+            // Check constants first
+            if (findNextInBranches(current.constant_branches.items, index_bound)) |kb| {
                 const found_index, const branch = kb;
                 if (found_index == index) {
-                    const key = branch.key.entry.key_ptr.*;
-                    try writer.writeAll(key);
+                    const constant_val = branch.constant.entry.key_ptr.*;
+                    try writer.writeAll(constant_val);
                     try writer.writeByte(' ');
-                    current = branch.key.entry.value_ptr;
+                    current = branch.constant.entry.value_ptr;
                     continue;
                 }
             }
@@ -1232,30 +1231,30 @@ pub const Trie = struct {
     }
 
     /// Converts a trie to its flattened pattern representation.
-    /// The trie is encoded as: { key1 -> val1, key2 -> val2, ... }
+    /// The trie is encoded as: { constant1 -> val1, constant2 -> val2, ... }
     /// Caller owns the returned pattern and should free it with `Pattern.deinit`.
     pub fn toPattern(self: *const Self, allocator: Allocator) Allocator.Error!Pattern {
         var nodes = ArrayList(Node).empty;
         errdefer nodes.deinit(allocator);
 
-        try nodes.append(allocator, .{ .key = "{" });
+        try nodes.append(allocator, .{ .constant = "{" });
 
         const indices = try self.valueIndices(allocator);
         defer allocator.free(indices);
 
         for (indices, 0..) |entry_idx, i| {
             if (i > 0) {
-                try nodes.append(allocator, .{ .key = "," });
+                try nodes.append(allocator, .{ .constant = "," });
             }
 
-            const key = try self.rebuildKey(allocator, entry_idx);
-            defer allocator.free(key.root);
+            const constant_pat = try self.rebuildConstant(allocator, entry_idx);
+            defer allocator.free(constant_pat.root);
 
-            for (key.root) |node| {
+            for (constant_pat.root) |node| {
                 try nodes.append(allocator, node);
             }
 
-            try nodes.append(allocator, .{ .key = "->" });
+            try nodes.append(allocator, .{ .constant = "->" });
 
             const value = self.getIndexOrNull(entry_idx) orelse continue;
             for (value.root) |node| {
@@ -1263,7 +1262,7 @@ pub const Trie = struct {
             }
         }
 
-        try nodes.append(allocator, .{ .key = "}" });
+        try nodes.append(allocator, .{ .constant = "}" });
 
         const root = try nodes.toOwnedSlice(allocator);
         return Pattern{ .root = root, .height = 0 };
@@ -1346,15 +1345,15 @@ test "Trie: eql" {
     var trie1 = Trie{};
     var trie2 = Trie{};
 
-    var key_root = [_]Node{
-        .{ .key = "Aa" },
-        .{ .key = "Bb" },
+    var constant_root = [_]Node{
+        .{ .constant = "Aa" },
+        .{ .constant = "Bb" },
     };
-    var val_root = [_]Node{.{ .key = "Value" }};
-    const key = Pattern{ .root = &key_root };
+    var val_root = [_]Node{.{ .constant = "Value" }};
+    const constant_pat = Pattern{ .root = &constant_root };
     const val = Pattern{ .root = &val_root };
-    const ptr1 = try trie1.append(allocator, key, val);
-    const ptr2 = try trie2.append(allocator, key, val);
+    const ptr1 = try trie1.append(allocator, constant_pat, val);
+    const ptr2 = try trie2.append(allocator, constant_pat, val);
 
     try testing.expect(trie1.getIndexOrNull(0) != null);
     try testing.expect(trie2.getIndexOrNull(0) != null);
@@ -1362,7 +1361,7 @@ test "Trie: eql" {
     // Compare leaves that share the same value
     try testing.expect(ptr1.eql(ptr2.*));
 
-    // Compare tries that have the same key and value
+    // Compare tries that have the same constant and value
     try testing.expect(trie1.eql(trie2));
     try testing.expect(trie2.eql(trie1));
 }
@@ -1370,20 +1369,20 @@ test "Trie: eql" {
 test "Structure: put single lit" {}
 
 test "Structure: put multiple lits" {
-    // Multiple keys
+    // Multiple constants
     var trie = Trie{};
     defer trie.deinit(testing.allocator);
 
-    var val_root = [_]Node{.{ .key = "Val" }};
-    var key_root = [_]Node{
-        .{ .key = "1" },
-        .{ .key = "2" },
-        .{ .key = "3" },
+    var val_root = [_]Node{.{ .constant = "Val" }};
+    var constant_root = [_]Node{
+        .{ .constant = "1" },
+        .{ .constant = "2" },
+        .{ .constant = "3" },
     };
     const val = Pattern{ .root = &val_root };
     _ = try trie.append(
         testing.allocator,
-        Pattern{ .root = &key_root },
+        Pattern{ .root = &constant_root },
         val,
     );
     try testing.expect(trie.map.contains("1"));
@@ -1396,11 +1395,11 @@ test "Memory: simple" {
     defer trie.deinit(testing.allocator);
 
     var empty_root = [_]Node{};
-    var val1_root = [_]Node{.{ .key = "123" }};
-    var key2_root = [_]Node{ .{ .key = "01" }, .{ .key = "12" } };
-    var val2_root = [_]Node{.{ .key = "123" }};
-    var key3_root = [_]Node{ .{ .key = "01" }, .{ .key = "12" } };
-    var val3_root = [_]Node{.{ .key = "234" }};
+    var val1_root = [_]Node{.{ .constant = "123" }};
+    var constant_pat2_root = [_]Node{ .{ .constant = "01" }, .{ .constant = "12" } };
+    var val2_root = [_]Node{.{ .constant = "123" }};
+    var constant_pat3_root = [_]Node{ .{ .constant = "01" }, .{ .constant = "12" } };
+    var val3_root = [_]Node{.{ .constant = "234" }};
 
     const ptr1 = try trie.append(
         testing.allocator,
@@ -1409,12 +1408,12 @@ test "Memory: simple" {
     );
     const ptr2 = try trie.append(
         testing.allocator,
-        Pattern{ .root = &key2_root },
+        Pattern{ .root = &constant_pat2_root },
         Pattern{ .root = &val2_root },
     );
     const ptr3 = try trie.append(
         testing.allocator,
-        Pattern{ .root = &key3_root },
+        Pattern{ .root = &constant_pat3_root },
         Pattern{ .root = &val3_root },
     );
 
@@ -1426,8 +1425,8 @@ test "Behavior: vars" {
     var nested_trie = try Trie.create(testing.allocator);
     defer nested_trie.destroy(testing.allocator);
 
-    var val_root = [_]Node{.{ .key = "Beautiful" }};
-    _ = try nested_trie.appendKey(
+    var val_root = [_]Node{.{ .constant = "Beautiful" }};
+    _ = try nested_trie.appendConstant(
         testing.allocator,
         &.{
             "cherry",
@@ -1442,14 +1441,14 @@ test "Behavior: nesting" {
     var trie = Trie{};
     defer trie.deinit(testing.allocator);
 
-    // Insert a key with a nested sub-pattern: (A B) -> Result
-    var inner_root = [_]Node{ .{ .key = "A" }, .{ .key = "B" } };
-    var key_root = [_]Node{.{ .pattern = .{ .root = &inner_root } }};
-    var val_root = [_]Node{.{ .key = "Result" }};
+    // Insert a constant with a nested sub-pattern: (A B) -> Result
+    var inner_root = [_]Node{ .{ .constant = "A" }, .{ .constant = "B" } };
+    var constant_root = [_]Node{.{ .pattern = .{ .root = &inner_root } }};
+    var val_root = [_]Node{.{ .constant = "Result" }};
 
-    const key = Pattern{ .root = &key_root };
+    const constant_pat = Pattern{ .root = &constant_root };
     const val = Pattern{ .root = &val_root };
-    _ = try trie.append(testing.allocator, key, val);
+    _ = try trie.append(testing.allocator, constant_pat, val);
 
     // The nested pattern should be encoded as "(" -> "A" -> "B" -> ")"
     try testing.expect(trie.map.contains("("));
@@ -1461,16 +1460,16 @@ test "Behavior: nesting" {
     try testing.expect(b_trie.map.contains(")"));
 
     // Should be retrievable via get
-    const result = trie.get(key);
+    const result = trie.get(constant_pat);
     try testing.expect(result != null);
 
     // Should retrieve the correct value at index 0
     try testing.expectEqualDeep(trie.getIndex(0), val);
 
     // A non-matching nested pattern should return null
-    var wrong_inner = [_]Node{ .{ .key = "A" }, .{ .key = "C" } };
-    var wrong_key_root = [_]Node{.{ .pattern = .{ .root = &wrong_inner } }};
-    const wrong_key = Pattern{ .root = &wrong_key_root };
+    var wrong_inner = [_]Node{ .{ .constant = "A" }, .{ .constant = "C" } };
+    var wrong_constant_root = [_]Node{.{ .pattern = .{ .root = &wrong_inner } }};
+    const wrong_key = Pattern{ .root = &wrong_constant_root };
     try testing.expect(trie.get(wrong_key) == null);
 }
 
@@ -1480,20 +1479,20 @@ test "Behavior: equal variables" {
     defer trie.deinit(testing.allocator);
 
     // Entry 0: x -> Val1
-    var key1_root = [_]Node{.{ .variable = "x" }};
-    var val1_root = [_]Node{.{ .key = "Val1" }};
+    var constant_pat1_root = [_]Node{.{ .variable = "x" }};
+    var val1_root = [_]Node{.{ .constant = "Val1" }};
     _ = try trie.append(
         testing.allocator,
-        Pattern{ .root = &key1_root },
+        Pattern{ .root = &constant_pat1_root },
         Pattern{ .root = &val1_root },
     );
 
     // Entry 1: x -> Val2 (same variable name, different value)
-    var key2_root = [_]Node{.{ .variable = "x" }};
-    var val2_root = [_]Node{.{ .key = "Val2" }};
+    var constant_pat2_root = [_]Node{.{ .variable = "x" }};
+    var val2_root = [_]Node{.{ .constant = "Val2" }};
     _ = try trie.append(
         testing.allocator,
-        Pattern{ .root = &key2_root },
+        Pattern{ .root = &constant_pat2_root },
         Pattern{ .root = &val2_root },
     );
 
@@ -1505,7 +1504,7 @@ test "Behavior: equal variables" {
     var term_bindings = VarBindings{};
     defer term_bindings.deinit(testing.allocator);
 
-    var query_root = [_]Node{.{ .key = "anything" }};
+    var query_root = [_]Node{.{ .constant = "anything" }};
     const query = Pattern{ .root = &query_root };
 
     var match1 = try trie.match(
@@ -1522,45 +1521,45 @@ test "Behavior: equal variables" {
         Pattern{ .root = &val1_root },
     );
 
-    // The variable "x" should now be bound to the key "anything"
+    // The variable "x" should now be bound to the constant "anything"
     const bound_val = term_bindings.get("x");
     try testing.expect(bound_val != null);
-    try testing.expect(std.meta.eql(bound_val.?, Node{ .key = "anything" }));
+    try testing.expect(std.meta.eql(bound_val.?, Node{ .constant = "anything" }));
 }
 
-test "Behavior: equal keys, different indices" {
+test "Behavior: equal constants, different indices" {
     // TODO
 }
 
-test "Behavior: equal keys, different structure" {
-    // Keys that share a prefix but diverge — they should coexist in the trie
+test "Behavior: equal constants, different structure" {
+    // Constants that share a prefix but diverge — they should coexist in the trie
     var trie = Trie{};
     defer trie.deinit(testing.allocator);
 
     // Entry 0: A B -> Val1
-    var key1_root = [_]Node{ .{ .key = "A" }, .{ .key = "B" } };
-    var val1_root = [_]Node{.{ .key = "Val1" }};
+    var constant_pat1_root = [_]Node{ .{ .constant = "A" }, .{ .constant = "B" } };
+    var val1_root = [_]Node{.{ .constant = "Val1" }};
     _ = try trie.append(
         testing.allocator,
-        Pattern{ .root = &key1_root },
+        Pattern{ .root = &constant_pat1_root },
         Pattern{ .root = &val1_root },
     );
 
     // Entry 1: A C -> Val2 (shares prefix "A", diverges at second node)
-    var key2_root = [_]Node{ .{ .key = "A" }, .{ .key = "C" } };
-    var val2_root = [_]Node{.{ .key = "Val2" }};
+    var constant_pat2_root = [_]Node{ .{ .constant = "A" }, .{ .constant = "C" } };
+    var val2_root = [_]Node{.{ .constant = "Val2" }};
     _ = try trie.append(
         testing.allocator,
-        Pattern{ .root = &key2_root },
+        Pattern{ .root = &constant_pat2_root },
         Pattern{ .root = &val2_root },
     );
 
-    // Entry 2: A B D -> Val3 (extends entry 0's key)
-    var key3_root = [_]Node{ .{ .key = "A" }, .{ .key = "B" }, .{ .key = "D" } };
-    var val3_root = [_]Node{.{ .key = "Val3" }};
+    // Entry 2: A B D -> Val3 (extends entry 0's constant)
+    var constant_pat3_root = [_]Node{ .{ .constant = "A" }, .{ .constant = "B" }, .{ .constant = "D" } };
+    var val3_root = [_]Node{.{ .constant = "Val3" }};
     _ = try trie.append(
         testing.allocator,
-        Pattern{ .root = &key3_root },
+        Pattern{ .root = &constant_pat3_root },
         Pattern{ .root = &val3_root },
     );
 
@@ -1591,18 +1590,18 @@ test "Behavior: equal keys, different structure" {
         Pattern{ .root = &val3_root },
     );
 
-    // get() with full key should find the right sub-trie
-    const ab_result = trie.get(Pattern{ .root = &key1_root });
+    // get() with full constant should find the right sub-trie
+    const ab_result = trie.get(Pattern{ .root = &constant_pat1_root });
     try testing.expect(ab_result != null);
 
-    const ac_result = trie.get(Pattern{ .root = &key2_root });
+    const ac_result = trie.get(Pattern{ .root = &constant_pat2_root });
     try testing.expect(ac_result != null);
 
-    const abd_result = trie.get(Pattern{ .root = &key3_root });
+    const abd_result = trie.get(Pattern{ .root = &constant_pat3_root });
     try testing.expect(abd_result != null);
 
     // A non-existent path should return null
-    var missing_root = [_]Node{ .{ .key = "A" }, .{ .key = "Z" } };
+    var missing_root = [_]Node{ .{ .constant = "A" }, .{ .constant = "Z" } };
     try testing.expect(trie.get(Pattern{ .root = &missing_root }) == null);
 }
 
@@ -1610,8 +1609,8 @@ test "Trie: equal to copy" {
     var nested_trie = try Trie.create(testing.allocator);
     defer nested_trie.destroy(testing.allocator);
 
-    var val_root = [_]Node{.{ .key = "Beautiful" }};
-    _ = try nested_trie.appendKey(
+    var val_root = [_]Node{.{ .constant = "Beautiful" }};
+    _ = try nested_trie.appendConstant(
         testing.allocator,
         &.{
             "cherry",
@@ -1631,19 +1630,19 @@ test "findNextValue" {
     var trie = Trie{};
     defer trie.deinit(testing.allocator);
 
-    var key_root = [_]Node{
-        .{ .key = "A" },
-        .{ .key = "B" },
+    var constant_root = [_]Node{
+        .{ .constant = "A" },
+        .{ .constant = "B" },
     };
-    var val_root_1 = [_]Node{.{ .key = "123" }};
-    var val_root_2 = [_]Node{.{ .key = "456" }};
-    const key = Pattern{ .root = &key_root };
+    var val_root_1 = [_]Node{.{ .constant = "123" }};
+    var val_root_2 = [_]Node{.{ .constant = "456" }};
+    const constant_pat = Pattern{ .root = &constant_root };
     const value1 = Pattern{ .root = &val_root_1 };
-    _ = try trie.append(testing.allocator, key, value1);
+    _ = try trie.append(testing.allocator, constant_pat, value1);
     const value2 = Pattern{ .root = &val_root_2 };
-    _ = try trie.append(testing.allocator, key, value2);
+    _ = try trie.append(testing.allocator, constant_pat, value2);
 
-    const value_trie = trie.get(key) orelse unreachable;
+    const value_trie = trie.get(constant_pat) orelse unreachable;
     var index_branch = value_trie.findNextValue(.{ .upper = value_trie.size() }) orelse unreachable;
     var value_index, var value_branch = index_branch;
     try testing.expect(value_index == 0);
@@ -1658,11 +1657,11 @@ test "findNextValue" {
 test "Trie: toString" {
     var trie = Trie{};
     defer trie.deinit(testing.allocator);
-    var key_root = [_]Node{ .{ .key = "A" }, .{ .key = "B" } };
-    var val_root = [_]Node{.{ .key = "Val" }};
+    var constant_root = [_]Node{ .{ .constant = "A" }, .{ .constant = "B" } };
+    var val_root = [_]Node{.{ .constant = "Val" }};
     _ = try trie.append(
         testing.allocator,
-        Pattern{ .root = &key_root },
+        Pattern{ .root = &constant_root },
         Pattern{ .root = &val_root },
     );
     {
@@ -1672,7 +1671,7 @@ test "Trie: toString" {
     }
     _ = try trie.append(
         testing.allocator,
-        Pattern{ .root = &key_root },
+        Pattern{ .root = &constant_root },
         Pattern{ .root = &val_root },
     );
     {
@@ -1687,27 +1686,27 @@ test "Roundtrip: A -> C -> B" {
     defer trie.deinit(testing.allocator);
 
     // A --> C (index 0)
-    var key1 = [_]Node{.{ .key = "A" }};
-    var val1 = [_]Node{.{ .key = "C" }};
-    _ = try trie.append(testing.allocator, Pattern{ .root = &key1 }, Pattern{ .root = &val1 });
+    var constant_pat1 = [_]Node{.{ .constant = "A" }};
+    var val1 = [_]Node{.{ .constant = "C" }};
+    _ = try trie.append(testing.allocator, Pattern{ .root = &constant_pat1 }, Pattern{ .root = &val1 });
 
     // C --> B (index 1)
-    var key2 = [_]Node{.{ .key = "C" }};
-    var val2 = [_]Node{.{ .key = "B" }};
-    _ = try trie.append(testing.allocator, Pattern{ .root = &key2 }, Pattern{ .root = &val2 });
+    var constant_pat2 = [_]Node{.{ .constant = "C" }};
+    var val2 = [_]Node{.{ .constant = "B" }};
+    _ = try trie.append(testing.allocator, Pattern{ .root = &constant_pat2 }, Pattern{ .root = &val2 });
 
     // B --> A (index 2)
-    var key3 = [_]Node{.{ .key = "B" }};
-    var val3 = [_]Node{.{ .key = "A" }};
-    _ = try trie.append(testing.allocator, Pattern{ .root = &key3 }, Pattern{ .root = &val3 });
+    var constant_pat3 = [_]Node{.{ .constant = "B" }};
+    var val3 = [_]Node{.{ .constant = "A" }};
+    _ = try trie.append(testing.allocator, Pattern{ .root = &constant_pat3 }, Pattern{ .root = &val3 });
 
     // A --> B (index 3)
-    var key4 = [_]Node{.{ .key = "A" }};
-    var val4 = [_]Node{.{ .key = "B" }};
-    _ = try trie.append(testing.allocator, Pattern{ .root = &key4 }, Pattern{ .root = &val4 });
+    var constant_pat4 = [_]Node{.{ .constant = "A" }};
+    var val4 = [_]Node{.{ .constant = "B" }};
+    _ = try trie.append(testing.allocator, Pattern{ .root = &constant_pat4 }, Pattern{ .root = &val4 });
 
     // Query A, should evaluate to B
-    var query = [_]Node{.{ .key = "A" }};
+    var query = [_]Node{.{ .constant = "A" }};
     const eval_result = try core.evaluateComplete(trie, testing.allocator, 0, Pattern{ .root = &query });
 
     if (eval_result.value) |value| {
@@ -1726,10 +1725,10 @@ test "List with variables: x, y --> y, x" {
     defer trie.deinit(testing.allocator);
 
     // Key: [x, list([y])] representing "x, y"
-    var key_list = [_]Node{.{ .variable = "y" }};
-    var key_root = [_]Node{
+    var constant_pat_list = [_]Node{.{ .variable = "y" }};
+    var constant_root = [_]Node{
         .{ .variable = "x" },
-        .{ .list = .{ .root = &key_list } },
+        .{ .list = .{ .root = &constant_pat_list } },
     };
 
     // Value: [y, list([x])] representing "y, x"
@@ -1741,7 +1740,7 @@ test "List with variables: x, y --> y, x" {
 
     _ = try trie.append(
         testing.allocator,
-        Pattern{ .root = &key_root },
+        Pattern{ .root = &constant_root },
         Pattern{ .root = &val_root },
     );
 
@@ -1758,9 +1757,9 @@ test "List with variables: x, y --> y, x" {
     try testing.expect(comma_trie.var_branches.items.len > 0);
 
     // Query: [A, list([B])] representing "A, B"
-    var query_list = [_]Node{.{ .key = "B" }};
+    var query_list = [_]Node{.{ .constant = "B" }};
     var query_root = [_]Node{
-        .{ .key = "A" },
+        .{ .constant = "A" },
         .{ .list = .{ .root = &query_list } },
     };
 
@@ -1788,29 +1787,29 @@ test "VarPattern in nested pattern" {
 
     // Key: (x, *x) - pattern containing [x, list(*x)]
     var inner_list = [_]Node{.{ .variable = "*x" }};
-    var key_inner = [_]Node{
+    var constant_pat_inner = [_]Node{
         .{ .variable = "x" },
         .{ .list = .{ .root = &inner_list } },
     };
-    var key_root = [_]Node{.{ .pattern = .{ .root = &key_inner } }};
+    var constant_root = [_]Node{.{ .pattern = .{ .root = &constant_pat_inner } }};
 
     // Value: x + *x
     var val_root = [_]Node{
         .{ .variable = "x" },
-        .{ .key = "+" },
+        .{ .constant = "+" },
         .{ .variable = "*x" },
     };
 
     _ = try trie.append(
         testing.allocator,
-        Pattern{ .root = &key_root },
+        Pattern{ .root = &constant_root },
         Pattern{ .root = &val_root },
     );
 
     // Query: (1, 2 3) - pattern containing [1, list([2, 3])]
-    var query_list_inner = [_]Node{ .{ .key = "2" }, .{ .key = "3" } };
+    var query_list_inner = [_]Node{ .{ .constant = "2" }, .{ .constant = "3" } };
     var query_inner = [_]Node{
-        .{ .key = "1" },
+        .{ .constant = "1" },
         .{ .list = .{ .root = &query_list_inner } },
     };
     var query_root = [_]Node{.{ .pattern = .{ .root = &query_inner } }};
@@ -1833,23 +1832,23 @@ test "VarPattern in nested pattern" {
     }
 }
 
-test "rebuildKey: multiple entries" {
+test "rebuildConstant: multiple entries" {
     var trie = Trie{};
     defer trie.deinit(testing.allocator);
 
-    var key0 = [_]Node{ .{ .key = "A" }, .{ .key = "B" }, .{ .variable = "x" } };
-    var key1 = [_]Node{ .{ .key = "A" }, .{ .key = "C" } };
-    var key2 = [_]Node{ .{ .key = "A" }, .{ .key = "B" }, .{ .variable = "y" } };
-    var val = [_]Node{.{ .key = "V" }};
-    _ = try trie.append(testing.allocator, .{ .root = &key0 }, .{ .root = &val });
-    _ = try trie.append(testing.allocator, .{ .root = &key1 }, .{ .root = &val });
-    _ = try trie.append(testing.allocator, .{ .root = &key2 }, .{ .root = &val });
+    var constant_pat0 = [_]Node{ .{ .constant = "A" }, .{ .constant = "B" }, .{ .variable = "x" } };
+    var constant_pat1 = [_]Node{ .{ .constant = "A" }, .{ .constant = "C" } };
+    var constant_pat2 = [_]Node{ .{ .constant = "A" }, .{ .constant = "B" }, .{ .variable = "y" } };
+    var val = [_]Node{.{ .constant = "V" }};
+    _ = try trie.append(testing.allocator, .{ .root = &constant_pat0 }, .{ .root = &val });
+    _ = try trie.append(testing.allocator, .{ .root = &constant_pat1 }, .{ .root = &val });
+    _ = try trie.append(testing.allocator, .{ .root = &constant_pat2 }, .{ .root = &val });
 
-    var r0 = try trie.rebuildKey(testing.allocator, 0);
+    var r0 = try trie.rebuildConstant(testing.allocator, 0);
     defer testing.allocator.free(r0.root);
-    var r1 = try trie.rebuildKey(testing.allocator, 1);
+    var r1 = try trie.rebuildConstant(testing.allocator, 1);
     defer testing.allocator.free(r1.root);
-    var r2 = try trie.rebuildKey(testing.allocator, 2);
+    var r2 = try trie.rebuildConstant(testing.allocator, 2);
     defer testing.allocator.free(r2.root);
 
     const s0 = try r0.toString(testing.allocator);
@@ -1864,71 +1863,71 @@ test "rebuildKey: multiple entries" {
     try testing.expectEqualStrings("A B y", s2);
 }
 
-test "rebuildKey: nested with list" {
+test "rebuildConstant: nested with list" {
     var trie = Trie{};
     defer trie.deinit(testing.allocator);
 
     var list_inner = [_]Node{.{ .variable = "y" }};
     var inner = [_]Node{ .{ .variable = "x" }, .{ .list = .{ .root = &list_inner } } };
-    var key = [_]Node{.{ .pattern = .{ .root = &inner } }};
-    var val = [_]Node{.{ .key = "V" }};
-    _ = try trie.append(testing.allocator, .{ .root = &key }, .{ .root = &val });
+    var constant_pat = [_]Node{.{ .pattern = .{ .root = &inner } }};
+    var val = [_]Node{.{ .constant = "V" }};
+    _ = try trie.append(testing.allocator, .{ .root = &constant_pat }, .{ .root = &val });
 
-    var rebuilt = try trie.rebuildKey(testing.allocator, 0);
+    var rebuilt = try trie.rebuildConstant(testing.allocator, 0);
     defer testing.allocator.free(rebuilt.root);
     const str = try rebuilt.toString(testing.allocator);
     defer testing.allocator.free(str);
     try testing.expectEqualStrings("( x, y )", str);
 }
 
-test "rebuildKey: embedded trie with multiple entries" {
+test "rebuildConstant: embedded trie with multiple entries" {
     var trie = Trie{};
     defer trie.deinit(testing.allocator);
 
     var inner_trie = Trie{};
     defer inner_trie.deinit(testing.allocator);
-    var inner_key0 = [_]Node{.{ .key = "A" }};
-    var inner_val0 = [_]Node{.{ .key = "B" }};
-    var inner_key1 = [_]Node{ .{ .key = "C" }, .{ .key = "D" } };
-    var inner_val1 = [_]Node{.{ .key = "E" }};
-    _ = try inner_trie.append(testing.allocator, .{ .root = &inner_key0 }, .{ .root = &inner_val0 });
-    _ = try inner_trie.append(testing.allocator, .{ .root = &inner_key1 }, .{ .root = &inner_val1 });
+    var inner_constant0 = [_]Node{.{ .constant = "A" }};
+    var inner_val0 = [_]Node{.{ .constant = "B" }};
+    var inner_constant1 = [_]Node{ .{ .constant = "C" }, .{ .constant = "D" } };
+    var inner_val1 = [_]Node{.{ .constant = "E" }};
+    _ = try inner_trie.append(testing.allocator, .{ .root = &inner_constant0 }, .{ .root = &inner_val0 });
+    _ = try inner_trie.append(testing.allocator, .{ .root = &inner_constant1 }, .{ .root = &inner_val1 });
 
-    var key = [_]Node{ .{ .key = "X" }, .{ .trie = inner_trie }, .{ .key = "Y" } };
-    var val = [_]Node{.{ .key = "V" }};
-    _ = try trie.append(testing.allocator, .{ .root = &key }, .{ .root = &val });
+    var constant_pat = [_]Node{ .{ .constant = "X" }, .{ .trie = inner_trie }, .{ .constant = "Y" } };
+    var val = [_]Node{.{ .constant = "V" }};
+    _ = try trie.append(testing.allocator, .{ .root = &constant_pat }, .{ .root = &val });
 
-    var rebuilt = try trie.rebuildKey(testing.allocator, 0);
+    var rebuilt = try trie.rebuildConstant(testing.allocator, 0);
     defer testing.allocator.free(rebuilt.root);
     const str = try rebuilt.toString(testing.allocator);
     defer testing.allocator.free(str);
     try testing.expectEqualStrings("X { A -> B, C D -> E } Y", str);
 }
 
-test "rebuildKey: multiple nested tries" {
+test "rebuildConstant: multiple nested tries" {
     var trie = Trie{};
     defer trie.deinit(testing.allocator);
 
     var inner1 = Trie{};
     defer inner1.deinit(testing.allocator);
-    var i1_key = [_]Node{.{ .key = "A" }};
-    var i1_val = [_]Node{.{ .key = "B" }};
+    var i1_key = [_]Node{.{ .constant = "A" }};
+    var i1_val = [_]Node{.{ .constant = "B" }};
     _ = try inner1.append(testing.allocator, .{ .root = &i1_key }, .{ .root = &i1_val });
 
     var inner2 = Trie{};
     defer inner2.deinit(testing.allocator);
-    var i2_key0 = [_]Node{.{ .key = "C" }};
-    var i2_val0 = [_]Node{.{ .key = "D" }};
-    var i2_key1 = [_]Node{.{ .key = "E" }};
-    var i2_val1 = [_]Node{.{ .key = "F" }};
+    var i2_key0 = [_]Node{.{ .constant = "C" }};
+    var i2_val0 = [_]Node{.{ .constant = "D" }};
+    var i2_key1 = [_]Node{.{ .constant = "E" }};
+    var i2_val1 = [_]Node{.{ .constant = "F" }};
     _ = try inner2.append(testing.allocator, .{ .root = &i2_key0 }, .{ .root = &i2_val0 });
     _ = try inner2.append(testing.allocator, .{ .root = &i2_key1 }, .{ .root = &i2_val1 });
 
-    var key = [_]Node{ .{ .trie = inner1 }, .{ .key = "X" }, .{ .trie = inner2 } };
-    var val = [_]Node{.{ .key = "V" }};
-    _ = try trie.append(testing.allocator, .{ .root = &key }, .{ .root = &val });
+    var constant_pat = [_]Node{ .{ .trie = inner1 }, .{ .constant = "X" }, .{ .trie = inner2 } };
+    var val = [_]Node{.{ .constant = "V" }};
+    _ = try trie.append(testing.allocator, .{ .root = &constant_pat }, .{ .root = &val });
 
-    var rebuilt = try trie.rebuildKey(testing.allocator, 0);
+    var rebuilt = try trie.rebuildConstant(testing.allocator, 0);
     defer testing.allocator.free(rebuilt.root);
     const str = try rebuilt.toString(testing.allocator);
     defer testing.allocator.free(str);
@@ -1938,7 +1937,7 @@ test "rebuildKey: multiple nested tries" {
 const Parser = @import("../Parser.zig");
 
 fn expectRebuildRoundtrip(trie: Trie, index: usize) !void {
-    var rebuilt = try trie.rebuildKey(testing.allocator, index);
+    var rebuilt = try trie.rebuildConstant(testing.allocator, index);
     defer testing.allocator.free(rebuilt.root);
     const str = try rebuilt.toString(testing.allocator);
     defer testing.allocator.free(str);
@@ -1954,91 +1953,91 @@ fn expectRebuildRoundtrip(trie: Trie, index: usize) !void {
     try testing.expect(match_result.value != null);
 }
 
-test "rebuildKey: multiple entries roundtrip" {
+test "rebuildConstant: multiple entries roundtrip" {
     var trie = Trie{};
     defer trie.deinit(testing.allocator);
 
-    var key0 = [_]Node{ .{ .key = "A" }, .{ .key = "B" }, .{ .variable = "x" } };
-    var key1 = [_]Node{ .{ .key = "A" }, .{ .key = "C" } };
-    var key2 = [_]Node{ .{ .key = "A" }, .{ .key = "B" }, .{ .variable = "y" } };
-    var val = [_]Node{.{ .key = "V" }};
-    _ = try trie.append(testing.allocator, .{ .root = &key0 }, .{ .root = &val });
-    _ = try trie.append(testing.allocator, .{ .root = &key1 }, .{ .root = &val });
-    _ = try trie.append(testing.allocator, .{ .root = &key2 }, .{ .root = &val });
+    var constant_pat0 = [_]Node{ .{ .constant = "A" }, .{ .constant = "B" }, .{ .variable = "x" } };
+    var constant_pat1 = [_]Node{ .{ .constant = "A" }, .{ .constant = "C" } };
+    var constant_pat2 = [_]Node{ .{ .constant = "A" }, .{ .constant = "B" }, .{ .variable = "y" } };
+    var val = [_]Node{.{ .constant = "V" }};
+    _ = try trie.append(testing.allocator, .{ .root = &constant_pat0 }, .{ .root = &val });
+    _ = try trie.append(testing.allocator, .{ .root = &constant_pat1 }, .{ .root = &val });
+    _ = try trie.append(testing.allocator, .{ .root = &constant_pat2 }, .{ .root = &val });
 
     try expectRebuildRoundtrip(trie, 0);
     try expectRebuildRoundtrip(trie, 1);
     try expectRebuildRoundtrip(trie, 2);
 }
 
-test "rebuildKey: nested with list roundtrip" {
+test "rebuildConstant: nested with list roundtrip" {
     var trie = Trie{};
     defer trie.deinit(testing.allocator);
 
     var list_inner = [_]Node{.{ .variable = "y" }};
     var inner = [_]Node{ .{ .variable = "x" }, .{ .list = .{ .root = &list_inner } } };
-    var key = [_]Node{.{ .pattern = .{ .root = &inner } }};
-    var val = [_]Node{.{ .key = "V" }};
-    _ = try trie.append(testing.allocator, .{ .root = &key }, .{ .root = &val });
+    var constant_pat = [_]Node{.{ .pattern = .{ .root = &inner } }};
+    var val = [_]Node{.{ .constant = "V" }};
+    _ = try trie.append(testing.allocator, .{ .root = &constant_pat }, .{ .root = &val });
 
     try expectRebuildRoundtrip(trie, 0);
 }
 
-test "rebuildKey: embedded trie roundtrip" {
+test "rebuildConstant: embedded trie roundtrip" {
     var trie = Trie{};
     defer trie.deinit(testing.allocator);
 
     var inner_trie = Trie{};
     defer inner_trie.deinit(testing.allocator);
-    var inner_key0 = [_]Node{.{ .key = "A" }};
-    var inner_val0 = [_]Node{.{ .key = "B" }};
-    var inner_key1 = [_]Node{ .{ .key = "C" }, .{ .key = "D" } };
-    var inner_val1 = [_]Node{.{ .key = "E" }};
-    _ = try inner_trie.append(testing.allocator, .{ .root = &inner_key0 }, .{ .root = &inner_val0 });
-    _ = try inner_trie.append(testing.allocator, .{ .root = &inner_key1 }, .{ .root = &inner_val1 });
+    var inner_constant0 = [_]Node{.{ .constant = "A" }};
+    var inner_val0 = [_]Node{.{ .constant = "B" }};
+    var inner_constant1 = [_]Node{ .{ .constant = "C" }, .{ .constant = "D" } };
+    var inner_val1 = [_]Node{.{ .constant = "E" }};
+    _ = try inner_trie.append(testing.allocator, .{ .root = &inner_constant0 }, .{ .root = &inner_val0 });
+    _ = try inner_trie.append(testing.allocator, .{ .root = &inner_constant1 }, .{ .root = &inner_val1 });
 
-    var key = [_]Node{ .{ .key = "X" }, .{ .trie = inner_trie }, .{ .key = "Y" } };
-    var val = [_]Node{.{ .key = "V" }};
-    _ = try trie.append(testing.allocator, .{ .root = &key }, .{ .root = &val });
+    var constant_pat = [_]Node{ .{ .constant = "X" }, .{ .trie = inner_trie }, .{ .constant = "Y" } };
+    var val = [_]Node{.{ .constant = "V" }};
+    _ = try trie.append(testing.allocator, .{ .root = &constant_pat }, .{ .root = &val });
 
     try expectRebuildRoundtrip(trie, 0);
 }
 
-test "rebuildKey: multiple nested tries roundtrip" {
+test "rebuildConstant: multiple nested tries roundtrip" {
     var trie = Trie{};
     defer trie.deinit(testing.allocator);
 
     var inner1 = Trie{};
     defer inner1.deinit(testing.allocator);
-    var i1_key = [_]Node{.{ .key = "A" }};
-    var i1_val = [_]Node{.{ .key = "B" }};
+    var i1_key = [_]Node{.{ .constant = "A" }};
+    var i1_val = [_]Node{.{ .constant = "B" }};
     _ = try inner1.append(testing.allocator, .{ .root = &i1_key }, .{ .root = &i1_val });
 
     var inner2 = Trie{};
     defer inner2.deinit(testing.allocator);
-    var i2_key0 = [_]Node{.{ .key = "C" }};
-    var i2_val0 = [_]Node{.{ .key = "D" }};
-    var i2_key1 = [_]Node{.{ .key = "E" }};
-    var i2_val1 = [_]Node{.{ .key = "F" }};
+    var i2_key0 = [_]Node{.{ .constant = "C" }};
+    var i2_val0 = [_]Node{.{ .constant = "D" }};
+    var i2_key1 = [_]Node{.{ .constant = "E" }};
+    var i2_val1 = [_]Node{.{ .constant = "F" }};
     _ = try inner2.append(testing.allocator, .{ .root = &i2_key0 }, .{ .root = &i2_val0 });
     _ = try inner2.append(testing.allocator, .{ .root = &i2_key1 }, .{ .root = &i2_val1 });
 
-    var key = [_]Node{ .{ .trie = inner1 }, .{ .key = "X" }, .{ .trie = inner2 } };
-    var val = [_]Node{.{ .key = "V" }};
-    _ = try trie.append(testing.allocator, .{ .root = &key }, .{ .root = &val });
+    var constant_pat = [_]Node{ .{ .trie = inner1 }, .{ .constant = "X" }, .{ .trie = inner2 } };
+    var val = [_]Node{.{ .constant = "V" }};
+    _ = try trie.append(testing.allocator, .{ .root = &constant_pat }, .{ .root = &val });
 
     try expectRebuildRoundtrip(trie, 0);
 }
 
-test "rebuildKey: height preserved" {
+test "rebuildConstant: height preserved" {
     var trie = Trie{};
     defer trie.deinit(testing.allocator);
 
-    var key = [_]Node{ .{ .key = "A" }, .{ .variable = "x" } };
-    var val = [_]Node{.{ .key = "V" }};
-    _ = try trie.append(testing.allocator, .{ .root = &key }, .{ .root = &val });
+    var constant_pat = [_]Node{ .{ .constant = "A" }, .{ .variable = "x" } };
+    var val = [_]Node{.{ .constant = "V" }};
+    _ = try trie.append(testing.allocator, .{ .root = &constant_pat }, .{ .root = &val });
 
-    const rebuilt = try trie.rebuildKey(testing.allocator, 0);
+    const rebuilt = try trie.rebuildConstant(testing.allocator, 0);
     defer testing.allocator.free(rebuilt.root);
     try testing.expectEqual(@as(usize, 0), rebuilt.height);
 }

@@ -27,13 +27,13 @@ pub const Node = union(enum) {
     /// A unique constant, literal values. Uniqueness when in a pattern
     /// arises from NodeMap referencing the same value multiple times
     /// (based on Literal.eql).
-    key: []const u8,
-    /// A Var matches and stores a locally-unique key. During rewriting,
-    /// whenever the key is encountered again, it is rewritten to this
+    constant: []const u8,
+    /// A Var matches and stores a locally-unique constant. During rewriting,
+    /// whenever the constant is encountered again, it is rewritten to this
     /// pattern's value. A Var pattern matches anything, including nested
     /// patterns. It only makes sense to match anything after trying to
     /// match something specific, so Vars always successfully match (if
-    /// there is a Var) after a Key or Subpat match fails.
+    /// there is a Var) after a Constant or Subpat match fails.
     /// If the variable starts with '*', it matches patterns as a term
     /// (var_pattern behavior), needed for matching patterns with ops
     /// where the nested pattern is implicit.
@@ -44,7 +44,7 @@ pub const Node = union(enum) {
     /// A non-builtin (user-defined symbol) infix operation. `op` is the
     /// operator symbol and `rhs` is the pattern of operands that follow it.
     /// Unlike the builtin operators, the symbol is kept out-of-band here
-    /// rather than flattened into the operand pattern as a leading key.
+    /// rather than flattened into the operand pattern as a leading constant.
     infix: Infix,
     /// A postfix encoded match pattern, i.e. `x : Int -> x * 2` where
     /// some node (`x`) must match some subpattern (`Int`) in order for
@@ -77,7 +77,7 @@ pub const Node = union(enum) {
         allocator: Allocator,
     ) Allocator.Error!Node {
         return switch (self) {
-            inline .key, .variable, .comment => self,
+            inline .constant, .variable, .comment => self,
             .pattern => |p| Node.ofPattern(try p.copy(allocator)),
             .infix => |inf| Node{ .infix = .{ .op = inf.op, .rhs = try inf.rhs.copy(allocator) } },
             inline else => |pattern, tag| @unionInit(
@@ -102,7 +102,7 @@ pub const Node = union(enum) {
 
     pub fn deinit(self: Node, allocator: Allocator) void {
         switch (self) {
-            .key, .variable, .comment => {},
+            .constant, .variable, .comment => {},
             .trie => |*trie| @constCast(trie).deinit(allocator),
             .infix => |*inf| @constCast(&inf.rhs).deinit(allocator),
             inline else => |*pattern| @constCast(pattern).deinit(allocator),
@@ -113,7 +113,7 @@ pub const Node = union(enum) {
         return if (@intFromEnum(node) != @intFromEnum(other))
             false
         else switch (node) {
-            .key => |key| mem.eql(u8, key, other.key),
+            .constant => |constant| mem.eql(u8, constant, other.constant),
             .variable => |variable| mem.eql(u8, variable, other.variable),
             .comment => |comment| mem.eql(u8, comment, other.comment),
             .trie => |trie| trie.eql(other.trie),
@@ -123,8 +123,8 @@ pub const Node = union(enum) {
                 .eql(@field(other, @tagName(tag))),
         };
     }
-    pub fn ofKey(key: []const u8) Node {
-        return .{ .key = key };
+    pub fn ofConstant(constant: []const u8) Node {
+        return .{ .constant = constant };
     }
     pub fn ofVar(variable: []const u8) Node {
         return .{ .variable = variable };
@@ -140,12 +140,12 @@ pub const Node = union(enum) {
         return .{ .comment = comment };
     }
 
-    pub fn createKey(
+    pub fn createConstant(
         allocator: Allocator,
-        key: []const u8,
+        constant: []const u8,
     ) Allocator.Error!*Node {
         const node = try allocator.create(Node);
-        node.* = Node{ .key = key };
+        node.* = Node{ .constant = constant };
         return node;
     }
 
@@ -161,13 +161,13 @@ pub const Node = union(enum) {
 
     pub fn isOp(self: Node) bool {
         return switch (self) {
-            .key, .variable, .comment, .pattern, .trie => false,
+            .constant, .variable, .comment, .pattern, .trie => false,
             else => true,
         };
     }
 
-    pub fn isCommaKey(self: Node) bool {
-        return self == .key and mem.eql(u8, self.key, ",");
+    pub fn isCommaConstant(self: Node) bool {
+        return self == .constant and mem.eql(u8, self.constant, ",");
     }
 
     pub fn height(self: Node) usize {
@@ -197,7 +197,7 @@ pub const Node = union(enum) {
         for (0..optional_indent orelse 0) |_|
             try writer.writeByte(' ');
         switch (self.*) {
-            .key => |key| _ = try writer.writeAll(key),
+            .constant => |constant| _ = try writer.writeAll(constant),
             .variable => |variable| try writer.writeAll(variable),
             .comment => |comment| try writer.writeAll(comment),
             .trie => |*trie| try trie.writeIndent(

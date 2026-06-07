@@ -26,12 +26,12 @@ pub const Pattern = struct {
             return;
         } else for (slice[1 .. slice.len - 1]) |*node| {
             // Don't add space before list/newline nodes or comma keys
-            if (node.* != .list and node.* != .newline and !node.isCommaKey())
+            if (node.* != .list and node.* != .newline and !node.isCommaConstant())
                 try writer.writeByte(' ');
             try node.writeSExp(writer, optional_indent);
         }
         // Don't add space before list/newline nodes or comma keys
-        if (slice[slice.len - 1] != .list and slice[slice.len - 1] != .newline and !slice[slice.len - 1].isCommaKey())
+        if (slice[slice.len - 1] != .list and slice[slice.len - 1] != .newline and !slice[slice.len - 1].isCommaConstant())
             try writer.writeByte(' ');
         try slice[slice.len - 1]
             .writeSExp(writer, optional_indent);
@@ -151,9 +151,9 @@ const testing = std.testing;
 
 test "Pattern: equal to copy" {
     var root = [_]Node{
-        .{ .key = "cherry" },
-        .{ .key = "blossom" },
-        .{ .key = "tree" },
+        .{ .constant = "cherry" },
+        .{ .constant = "blossom" },
+        .{ .constant = "tree" },
     };
     const pattern = Pattern{ .root = &root };
     var copy = try pattern.copy(testing.allocator);
@@ -163,10 +163,10 @@ test "Pattern: equal to copy" {
 }
 
 test "Pattern: equal to clone" {
-    var list_root = [_]Node{.{ .key = "tree" }};
+    var list_root = [_]Node{.{ .constant = "tree" }};
     var root = [_]Node{
-        .{ .key = "cherry" },
-        .{ .key = "blossom" },
+        .{ .constant = "cherry" },
+        .{ .constant = "blossom" },
         .{ .list = .{ .root = &list_root } },
     };
     const pattern = Pattern{ .root = &root };
@@ -178,8 +178,8 @@ test "Pattern: equal to clone" {
 
 test "Pattern: toString" {
     var root = [_]Node{
-        .{ .key = "Bb" },
-        .{ .key = "Cc" },
+        .{ .constant = "Bb" },
+        .{ .constant = "Cc" },
     };
     const pattern = Pattern{ .root = &root };
     const str = try pattern.toString(testing.allocator);

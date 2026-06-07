@@ -70,7 +70,7 @@ pub fn evaluateSlice(
     /// - the minimum index a subsequent match should use, which is one
     /// greater than the previous (except for structural recursion).
     /// - null if no match
-    /// Time Complexity: O(mlogn) where m is the key len and n is the size of the trie.
+    /// Time Complexity: O(mlogn) where m is the constant len and n is the size of the trie.
     /// Returns a trie of the subset of branches that matches `node`. Caller
     /// owns the trie returned, but it is a shallow copy and thus cannot be
     /// freed with destroy/deinit without freeing references in self.

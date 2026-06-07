@@ -222,11 +222,11 @@ fn replStep(allocator: Allocator, streams: Streams, trie: *Trie) !?void {
     );
 
     if (root.len > 0 and root[root.len - 1] == .arrow) {
-        const key = root[0 .. root.len - 1];
+        const constant = root[0 .. root.len - 1];
         const val = root[root.len - 1].arrow;
         _ = try trie.append(
             allocator,
-            .{ .root = key, .height = pattern.height },
+            .{ .root = constant, .height = pattern.height },
             val,
         );
     } else {

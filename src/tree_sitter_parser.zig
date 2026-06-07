@@ -209,7 +209,7 @@ fn parseTermNode(
     if (!node.isNamed()) return null;
 
     const NodeKind = enum {
-        key,
+        constant,
         variable,
         var_pattern,
         number,
@@ -226,7 +226,7 @@ fn parseTermNode(
     };
 
     return switch (kind) {
-        .key, .number, .string, .symbol => Node{ .key = text },
+        .constant, .number, .string, .symbol => Node{ .constant = text },
         .variable => Node{ .variable = text },
         .var_pattern => Node{ .variable = text },
         .nested_pattern => Node{ .pattern = try astToPattern(allocator, source, node) },

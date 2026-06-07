@@ -13,7 +13,7 @@
 //!
 //! Always returns an owned pattern; free it with `deinit`. The bytes of any
 //! computed literal are allocated from `allocator` and outlive the call (they
-//! are not freed by `deinit`, matching how the interpreter treats key text), so
+//! are not freed by `deinit`, matching how the interpreter treats constant text), so
 //! drive this with an arena or otherwise own those bytes.
 
 const std = @import("std");
@@ -35,7 +35,7 @@ pub fn step(pattern: Pattern, allocator: Allocator) Allocator.Error!Pattern {
         if (foldRoot(pattern.root)) |value| {
             const literal = try std.fmt.allocPrint(allocator, "{d}", .{value});
             const root = try allocator.alloc(Node, 1);
-            root[0] = .{ .key = literal };
+            root[0] = .{ .constant = literal };
             return .{ .root = root, .height = 0 };
         }
         // Not all operands were foldable (e.g. an unbound variable, or a
@@ -86,7 +86,7 @@ fn foldRoot(root: []const Node) ?i64 {
 /// operand is itself an arithmetic sub-expression, folded via `foldRoot`.
 fn operandValue(node: Node) ?i64 {
     return switch (node) {
-        .key => |key| std.fmt.parseInt(i64, key, 10) catch null,
+        .constant => |constant| std.fmt.parseInt(i64, constant, 10) catch null,
         .pattern => |sub| foldRoot(sub.root),
         else => null,
     };

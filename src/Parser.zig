@@ -32,7 +32,7 @@ const Oom = Allocator.Error;
 // ---------------------------------------------------------------------------
 
 pub const Tag = enum {
-    key,
+    constant,
     variable,
     var_pattern,
     number,
@@ -191,7 +191,7 @@ fn advance(self: *Self) Token {
     if (c == '*' and self.pos + 1 < self.source.len and isLower(self.source[self.pos + 1]))
         return self.lexVarPattern();
 
-    if (isUpper(c)) return self.lexKey();
+    if (isUpper(c)) return self.lexConstant();
     if (isLower(c)) return self.lexVariable();
     if (isDigit(c)) return self.lexNumber();
     // A run of dashes directly followed (no space) by an identifier letter is
@@ -201,7 +201,7 @@ fn advance(self: *Self) Token {
         var i = self.pos;
         while (i < self.source.len and self.source[i] == '-') i += 1;
         if (i < self.source.len) {
-            if (isUpper(self.source[i])) return self.lexKey();
+            if (isUpper(self.source[i])) return self.lexConstant();
             if (isLower(self.source[i])) return self.lexVariable();
         }
         return self.lexOperator();
@@ -250,10 +250,10 @@ fn scanIdentTail(self: *Self) void {
     }
 }
 
-fn lexKey(self: *Self) Token {
+fn lexConstant(self: *Self) Token {
     const start = self.pos;
     self.scanIdentTail();
-    return .{ .tag = .key, .start = start, .end = self.pos };
+    return .{ .tag = .constant, .start = start, .end = self.pos };
 }
 
 fn lexVariable(self: *Self) Token {
@@ -539,7 +539,7 @@ fn parseTerms(self: *Self, allocator: Allocator) Oom!Pattern {
 fn parseTerm(self: *Self, allocator: Allocator) Oom!Node {
     const tok = self.eat();
     return switch (tok.tag) {
-        .key, .number, .string => Node{ .key = tok.text(self.source) },
+        .constant, .number, .string => Node{ .constant = tok.text(self.source) },
         .variable => Node{ .variable = tok.text(self.source) },
         .var_pattern => Node{ .variable = tok.text(self.source) },
         .comment => Node{ .comment = tok.text(self.source) },
@@ -557,7 +557,7 @@ fn parseTerm(self: *Self, allocator: Allocator) Oom!Node {
             const inner = try self.parseInner(allocator, .backtick);
             break :blk Node{ .pattern = incrementHeight(inner) };
         },
-        else => Node{ .key = tok.text(self.source) },
+        else => Node{ .constant = tok.text(self.source) },
     };
 }
 
@@ -573,7 +573,7 @@ fn parseInner(self: *Self, allocator: Allocator, close: Tag) Oom!Pattern {
 
 fn canStartTerm(self: Self) bool {
     return switch (self.current.tag) {
-        .key,
+        .constant,
         .variable,
         .var_pattern,
         .number,
@@ -611,7 +611,7 @@ fn wrapOp(tag: Tag, rhs: Pattern) Node {
 
 /// Parse the inner content of a trie (without braces) into a Trie structure.
 /// The source is expected to be semicolon-separated entries where each entry
-/// is a key-value pair (with arrow) or just a key (value = key).
+/// is a constant-value pair (with arrow) or just a constant (value = constant).
 /// For example: `A -> B; C D -> E` becomes a trie with two entries.
 pub fn parseTrie(allocator: Allocator, source: []const u8) Oom!Trie {
     var parser = Self.init(source);
@@ -674,11 +674,11 @@ fn appendEntryRecursive(result: *Trie, allocator: Allocator, pattern: Pattern) O
 }
 
 /// Appends a single entry to the trie. The entry_pattern may contain an arrow
-/// indicating key -> value, or just be a pattern (which becomes key = value).
+/// indicating constant -> value, or just be a pattern (which becomes constant = value).
 fn appendEntry(result: *Trie, allocator: Allocator, entry_pattern: Pattern) Oom!void {
     if (entry_pattern.root.len == 0) return;
 
-    // Look for an arrow node to split key and value
+    // Look for an arrow node to split constant and value
     var arrow_index: ?usize = null;
     for (entry_pattern.root, 0..) |node, i| {
         if (node == .arrow) {
@@ -688,14 +688,14 @@ fn appendEntry(result: *Trie, allocator: Allocator, entry_pattern: Pattern) Oom!
     }
 
     if (arrow_index) |ai| {
-        // Split at arrow: nodes before arrow are key, arrow's pattern is value
+        // Split at arrow: nodes before arrow are constant, arrow's pattern is value
         // Decrement height since arrow wrapper added 1
-        const key = patternFromSlice(entry_pattern.root[0..ai]);
+        const constant = patternFromSlice(entry_pattern.root[0..ai]);
         const arrow_pattern = entry_pattern.root[ai].arrow;
         const value = Pattern{ .root = arrow_pattern.root, .height = arrow_pattern.height -| 1 };
-        _ = try result.append(allocator, key, value);
+        _ = try result.append(allocator, constant, value);
     } else {
-        // No arrow - pattern is both key and value
+        // No arrow - pattern is both constant and value
         _ = try result.append(allocator, entry_pattern, entry_pattern);
     }
 }
@@ -727,13 +727,13 @@ pub fn parse(allocator: Allocator, source: []const u8) Oom!Pattern {
 
 const testing = std.testing;
 
-const NodeTag = enum { key, variable, var_pattern, comment, pattern, infix, match, arrow, list, newline, trie };
+const NodeTag = enum { constant, variable, var_pattern, comment, pattern, infix, match, arrow, list, newline, trie };
 
 fn expectNodes(pattern: Pattern, expected_tags: []const NodeTag) !void {
     try testing.expectEqual(expected_tags.len, pattern.root.len);
     for (pattern.root, expected_tags) |node, expected_tag| {
         const actual_tag: NodeTag = switch (node) {
-            .key => .key,
+            .constant => .constant,
             .variable => |v| if (v.len > 0 and v[0] == '*') .var_pattern else .variable,
             .comment => .comment,
             .pattern => .pattern,
@@ -753,22 +753,22 @@ test "empty" {
     try testing.expectEqual(@as(usize, 0), p.root.len);
 }
 
-test "single key" {
+test "single constant" {
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
     const p = try parse(arena.allocator(), "Foo");
     try testing.expectEqual(@as(usize, 1), p.root.len);
-    try testing.expectEqualStrings("Foo", p.root[0].key);
+    try testing.expectEqualStrings("Foo", p.root[0].constant);
 }
 
 test "juxtaposition" {
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
     const p = try parse(arena.allocator(), "A B C");
-    try expectNodes(p, &.{ .key, .key, .key });
-    try testing.expectEqualStrings("A", p.root[0].key);
-    try testing.expectEqualStrings("B", p.root[1].key);
-    try testing.expectEqualStrings("C", p.root[2].key);
+    try expectNodes(p, &.{ .constant, .constant, .constant });
+    try testing.expectEqualStrings("A", p.root[0].constant);
+    try testing.expectEqualStrings("B", p.root[1].constant);
+    try testing.expectEqualStrings("C", p.root[2].constant);
 }
 
 test "variable" {
@@ -791,24 +791,24 @@ test "number" {
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
     const p = try parse(arena.allocator(), "42");
-    try expectNodes(p, &.{.key});
-    try testing.expectEqualStrings("42", p.root[0].key);
+    try expectNodes(p, &.{.constant});
+    try testing.expectEqualStrings("42", p.root[0].constant);
 }
 
 test "decimal number" {
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
     const p = try parse(arena.allocator(), "3.14");
-    try expectNodes(p, &.{.key});
-    try testing.expectEqualStrings("3.14", p.root[0].key);
+    try expectNodes(p, &.{.constant});
+    try testing.expectEqualStrings("3.14", p.root[0].constant);
 }
 
 test "string" {
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
     const p = try parse(arena.allocator(), "\"hello\"");
-    try expectNodes(p, &.{.key});
-    try testing.expectEqualStrings("\"hello\"", p.root[0].key);
+    try expectNodes(p, &.{.constant});
+    try testing.expectEqualStrings("\"hello\"", p.root[0].constant);
 }
 
 test "arrow: A -> B" {
@@ -816,9 +816,9 @@ test "arrow: A -> B" {
     defer arena.deinit();
     const p = try parse(arena.allocator(), "A -> B");
     // LHS flattened [A], then arrow([B])
-    try expectNodes(p, &.{ .key, .arrow });
-    try testing.expectEqualStrings("A", p.root[0].key);
-    try testing.expectEqualStrings("B", p.root[1].arrow.root[0].key);
+    try expectNodes(p, &.{ .constant, .arrow });
+    try testing.expectEqualStrings("A", p.root[0].constant);
+    try testing.expectEqualStrings("B", p.root[1].arrow.root[0].constant);
 }
 
 test "match: x : Int" {
@@ -827,7 +827,7 @@ test "match: x : Int" {
     const p = try parse(arena.allocator(), "x : Int");
     try expectNodes(p, &.{ .variable, .match });
     try testing.expectEqualStrings("x", p.root[0].variable);
-    try testing.expectEqualStrings("Int", p.root[1].match.root[0].key);
+    try testing.expectEqualStrings("Int", p.root[1].match.root[0].constant);
 }
 
 test "match and arrow: x : Int -> x" {
@@ -838,7 +838,7 @@ test "match and arrow: x : Int -> x" {
     try expectNodes(p, &.{ .variable, .match });
     const match_pat = p.root[1].match;
     try testing.expectEqual(@as(usize, 2), match_pat.root.len);
-    try testing.expectEqualStrings("Int", match_pat.root[0].key);
+    try testing.expectEqualStrings("Int", match_pat.root[0].constant);
     try testing.expectEqualStrings("x", match_pat.root[1].arrow.root[0].variable);
 }
 
@@ -846,16 +846,16 @@ test "long arrow: A --> B" {
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
     const p = try parse(arena.allocator(), "A --> B");
-    try expectNodes(p, &.{ .key, .arrow });
-    try testing.expectEqualStrings("B", p.root[1].arrow.root[0].key);
+    try expectNodes(p, &.{ .constant, .arrow });
+    try testing.expectEqualStrings("B", p.root[1].arrow.root[0].constant);
 }
 
 test "long match: A :: B" {
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
     const p = try parse(arena.allocator(), "A :: B");
-    try expectNodes(p, &.{ .key, .match });
-    try testing.expectEqualStrings("B", p.root[1].match.root[0].key);
+    try expectNodes(p, &.{ .constant, .match });
+    try testing.expectEqualStrings("B", p.root[1].match.root[0].constant);
 }
 
 test "comma: A , B , C" {
@@ -863,11 +863,11 @@ test "comma: A , B , C" {
     defer arena.deinit();
     const p = try parse(arena.allocator(), "A , B , C");
     // Right-assoc: [A, list([B, list([C])])]
-    try expectNodes(p, &.{ .key, .list });
-    try testing.expectEqualStrings("A", p.root[0].key);
-    try testing.expectEqualStrings("B", p.root[1].list.root[0].key);
-    try expectNodes(p.root[1].list, &.{ .key, .list });
-    try testing.expectEqualStrings("C", p.root[1].list.root[1].list.root[0].key);
+    try expectNodes(p, &.{ .constant, .list });
+    try testing.expectEqualStrings("A", p.root[0].constant);
+    try testing.expectEqualStrings("B", p.root[1].list.root[0].constant);
+    try expectNodes(p.root[1].list, &.{ .constant, .list });
+    try testing.expectEqualStrings("C", p.root[1].list.root[1].list.root[0].constant);
 }
 
 test "semicolon: A ; B ; C" {
@@ -875,11 +875,11 @@ test "semicolon: A ; B ; C" {
     defer arena.deinit();
     const p = try parse(arena.allocator(), "A ; B ; C");
     // Right-assoc: [A, list([B, list([C])])]
-    try expectNodes(p, &.{ .key, .list });
-    try testing.expectEqualStrings("A", p.root[0].key);
-    try testing.expectEqualStrings("B", p.root[1].list.root[0].key);
-    try expectNodes(p.root[1].list, &.{ .key, .list });
-    try testing.expectEqualStrings("C", p.root[1].list.root[1].list.root[0].key);
+    try expectNodes(p, &.{ .constant, .list });
+    try testing.expectEqualStrings("A", p.root[0].constant);
+    try testing.expectEqualStrings("B", p.root[1].list.root[0].constant);
+    try expectNodes(p.root[1].list, &.{ .constant, .list });
+    try testing.expectEqualStrings("C", p.root[1].list.root[1].list.root[0].constant);
 }
 
 test "incrementHeight pattern: (A B)" {
@@ -889,8 +889,8 @@ test "incrementHeight pattern: (A B)" {
     try expectNodes(p, &.{.pattern});
     const inner = p.root[0].pattern;
     try testing.expectEqual(@as(usize, 2), inner.root.len);
-    try testing.expectEqualStrings("A", inner.root[0].key);
-    try testing.expectEqualStrings("B", inner.root[1].key);
+    try testing.expectEqualStrings("A", inner.root[0].constant);
+    try testing.expectEqualStrings("B", inner.root[1].constant);
 }
 
 test "incrementHeight empty: ()" {
@@ -906,15 +906,15 @@ test "mixed precedence: A B : C D -> E F" {
     defer arena.deinit();
     const p = try parse(arena.allocator(), "A B : C D -> E F");
     // [A, B, match([C, D, arrow([E, F])])]
-    try expectNodes(p, &.{ .key, .key, .match });
+    try expectNodes(p, &.{ .constant, .constant, .match });
     const match_pat = p.root[2].match;
     try testing.expectEqual(@as(usize, 3), match_pat.root.len);
-    try testing.expectEqualStrings("C", match_pat.root[0].key);
-    try testing.expectEqualStrings("D", match_pat.root[1].key);
+    try testing.expectEqualStrings("C", match_pat.root[0].constant);
+    try testing.expectEqualStrings("D", match_pat.root[1].constant);
     const arrow_pat = match_pat.root[2].arrow;
     try testing.expectEqual(@as(usize, 2), arrow_pat.root.len);
-    try testing.expectEqualStrings("E", arrow_pat.root[0].key);
-    try testing.expectEqualStrings("F", arrow_pat.root[1].key);
+    try testing.expectEqualStrings("E", arrow_pat.root[0].constant);
+    try testing.expectEqualStrings("F", arrow_pat.root[1].constant);
 }
 
 test "infix: 1 + 2" {
@@ -922,12 +922,12 @@ test "infix: 1 + 2" {
     defer arena.deinit();
     const p = try parse(arena.allocator(), "1 + 2");
     // [1, infix(+, [2])]
-    try expectNodes(p, &.{ .key, .infix });
-    try testing.expectEqualStrings("1", p.root[0].key);
+    try expectNodes(p, &.{ .constant, .infix });
+    try testing.expectEqualStrings("1", p.root[0].constant);
     const infix = p.root[1].infix;
     try testing.expectEqualStrings("+", infix.op);
     try testing.expectEqual(@as(usize, 1), infix.rhs.root.len);
-    try testing.expectEqualStrings("2", infix.rhs.root[0].key);
+    try testing.expectEqualStrings("2", infix.rhs.root[0].constant);
 }
 
 test "comment preserved as node" {
@@ -936,10 +936,10 @@ test "comment preserved as node" {
     // Comments are kept as nodes; the newline still separates entries.
     // "A # comment\nB" becomes [A, comment, list([B])].
     const p = try parse(arena.allocator(), "A # comment\nB");
-    try expectNodes(p, &.{ .key, .comment, .list });
-    try testing.expectEqualStrings("A", p.root[0].key);
+    try expectNodes(p, &.{ .constant, .comment, .list });
+    try testing.expectEqualStrings("A", p.root[0].constant);
     try testing.expectEqualStrings("# comment", p.root[1].comment);
-    try testing.expectEqualStrings("B", p.root[2].list.root[0].key);
+    try testing.expectEqualStrings("B", p.root[2].list.root[0].constant);
 }
 
 test "empty trie: {}" {
@@ -961,7 +961,7 @@ test "single entry trie: { A -> B }" {
     try testing.expect(t.map.contains("A"));
 }
 
-test "multi-key entry trie: { A B -> C }" {
+test "multi-constant entry trie: { A B -> C }" {
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
     const p = try parse(arena.allocator(), "{ A B -> C }");
@@ -995,7 +995,7 @@ test "trie with variable: { x -> x }" {
     try testing.expect(t.map.contains("x"));
 }
 
-test "trie key-only entry: { A }" {
+test "trie constant-only entry: { A }" {
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
     const p = try parse(arena.allocator(), "{ A }");
@@ -1009,9 +1009,9 @@ test "trie in expression: X { A -> B } Y" {
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
     const p = try parse(arena.allocator(), "X { A -> B } Y");
-    try expectNodes(p, &.{ .key, .trie, .key });
-    try testing.expectEqualStrings("X", p.root[0].key);
-    try testing.expectEqualStrings("Y", p.root[2].key);
+    try expectNodes(p, &.{ .constant, .trie, .constant });
+    try testing.expectEqualStrings("X", p.root[0].constant);
+    try testing.expectEqualStrings("Y", p.root[2].constant);
     const t = p.root[1].trie;
     try testing.expectEqual(@as(usize, 1), t.size());
 }
@@ -1059,11 +1059,11 @@ test "multiline: newlines separate entries" {
     // Newlines work like semicolons and produce .list nodes
     const p = try parse(arena.allocator(), "A\nB\nC");
     // [A, list([B, list([C])])]
-    try expectNodes(p, &.{ .key, .list });
-    try testing.expectEqualStrings("A", p.root[0].key);
-    try testing.expectEqualStrings("B", p.root[1].list.root[0].key);
-    try expectNodes(p.root[1].list, &.{ .key, .list });
-    try testing.expectEqualStrings("C", p.root[1].list.root[1].list.root[0].key);
+    try expectNodes(p, &.{ .constant, .list });
+    try testing.expectEqualStrings("A", p.root[0].constant);
+    try testing.expectEqualStrings("B", p.root[1].list.root[0].constant);
+    try expectNodes(p.root[1].list, &.{ .constant, .list });
+    try testing.expectEqualStrings("C", p.root[1].list.root[1].list.root[0].constant);
 }
 
 test "multiline: trailing arrow is empty" {
@@ -1072,10 +1072,10 @@ test "multiline: trailing arrow is empty" {
     // Arrow at end of line has empty RHS, newline separates
     const p = try parse(arena.allocator(), "A ->\nB");
     // [A, arrow([]), list([B])]
-    try expectNodes(p, &.{ .key, .arrow, .list });
-    try testing.expectEqualStrings("A", p.root[0].key);
+    try expectNodes(p, &.{ .constant, .arrow, .list });
+    try testing.expectEqualStrings("A", p.root[0].constant);
     try testing.expectEqual(@as(usize, 0), p.root[1].arrow.root.len);
-    try testing.expectEqualStrings("B", p.root[2].list.root[0].key);
+    try testing.expectEqualStrings("B", p.root[2].list.root[0].constant);
 }
 
 test "multiline: trailing comma separates" {
@@ -1084,10 +1084,10 @@ test "multiline: trailing comma separates" {
     // Comma (prec 3) has empty RHS, newline (prec 1) separates B
     const p = try parse(arena.allocator(), "A,\nB");
     // [A, list([]), list([B])] - comma with empty, then newline with B
-    try expectNodes(p, &.{ .key, .list, .list });
-    try testing.expectEqualStrings("A", p.root[0].key);
+    try expectNodes(p, &.{ .constant, .list, .list });
+    try testing.expectEqualStrings("A", p.root[0].constant);
     try testing.expectEqual(@as(usize, 0), p.root[1].list.root.len);
-    try testing.expectEqualStrings("B", p.root[2].list.root[0].key);
+    try testing.expectEqualStrings("B", p.root[2].list.root[0].constant);
 }
 
 test "multiline: trailing long arrow is empty" {
@@ -1095,10 +1095,10 @@ test "multiline: trailing long arrow is empty" {
     defer arena.deinit();
     const p = try parse(arena.allocator(), "A -->\nB");
     // [A, arrow([]), list([B])]
-    try expectNodes(p, &.{ .key, .arrow, .list });
-    try testing.expectEqualStrings("A", p.root[0].key);
+    try expectNodes(p, &.{ .constant, .arrow, .list });
+    try testing.expectEqualStrings("A", p.root[0].constant);
     try testing.expectEqual(@as(usize, 0), p.root[1].arrow.root.len);
-    try testing.expectEqualStrings("B", p.root[2].list.root[0].key);
+    try testing.expectEqualStrings("B", p.root[2].list.root[0].constant);
 }
 
 test "multiline: trailing match is empty" {
@@ -1109,7 +1109,7 @@ test "multiline: trailing match is empty" {
     try expectNodes(p, &.{ .variable, .match, .list });
     try testing.expectEqualStrings("x", p.root[0].variable);
     try testing.expectEqual(@as(usize, 0), p.root[1].match.root.len);
-    try testing.expectEqualStrings("Int", p.root[2].list.root[0].key);
+    try testing.expectEqualStrings("Int", p.root[2].list.root[0].constant);
 }
 
 test "multiline: trie with newline entries" {
@@ -1141,11 +1141,11 @@ test "multiline: comment after trailing op" {
     // child. The next line is not indented, so B remains a separate entry.
     const p = try parse(arena.allocator(), "A -> # value is B\nB");
     // [A, arrow([comment]), list([B])]
-    try expectNodes(p, &.{ .key, .arrow, .list });
-    try testing.expectEqualStrings("A", p.root[0].key);
+    try expectNodes(p, &.{ .constant, .arrow, .list });
+    try testing.expectEqualStrings("A", p.root[0].constant);
     try testing.expectEqual(@as(usize, 1), p.root[1].arrow.root.len);
     try testing.expect(p.root[1].arrow.root[0] == .comment);
-    try testing.expectEqualStrings("B", p.root[2].list.root[0].key);
+    try testing.expectEqualStrings("B", p.root[2].list.root[0].constant);
 }
 
 test "multiline: multiple newlines are separate entries" {
@@ -1154,7 +1154,7 @@ test "multiline: multiple newlines are separate entries" {
     // Two newlines = two separations (one entry per line)
     const p = try parse(arena.allocator(), "A\n\nB");
     // A, then list([list([B])]) - empty line is empty entry
-    try expectNodes(p, &.{ .key, .list });
+    try expectNodes(p, &.{ .constant, .list });
 }
 
 test "multiline: multi-line pattern without continuation" {
@@ -1178,12 +1178,12 @@ test "multiline: newlines and semicolons produce same structure" {
     const with_semicolon = try parse(arena.allocator(), "A; B");
 
     // Both should produce: [A, list([B])]
-    try expectNodes(with_newline, &.{ .key, .list });
-    try expectNodes(with_semicolon, &.{ .key, .list });
-    try testing.expectEqualStrings("A", with_newline.root[0].key);
-    try testing.expectEqualStrings("A", with_semicolon.root[0].key);
-    try testing.expectEqualStrings("B", with_newline.root[1].list.root[0].key);
-    try testing.expectEqualStrings("B", with_semicolon.root[1].list.root[0].key);
+    try expectNodes(with_newline, &.{ .constant, .list });
+    try expectNodes(with_semicolon, &.{ .constant, .list });
+    try testing.expectEqualStrings("A", with_newline.root[0].constant);
+    try testing.expectEqualStrings("A", with_semicolon.root[0].constant);
+    try testing.expectEqualStrings("B", with_newline.root[1].list.root[0].constant);
+    try testing.expectEqualStrings("B", with_semicolon.root[1].list.root[0].constant);
 }
 
 test "multiline: trailing operators do not continue" {
@@ -1194,13 +1194,13 @@ test "multiline: trailing operators do not continue" {
     const with_newline = try parse(arena.allocator(), "A ->\nB");
 
     // Single line: [A, arrow([B])]
-    try expectNodes(single_line, &.{ .key, .arrow });
-    try testing.expectEqualStrings("B", single_line.root[1].arrow.root[0].key);
+    try expectNodes(single_line, &.{ .constant, .arrow });
+    try testing.expectEqualStrings("B", single_line.root[1].arrow.root[0].constant);
 
     // Multiline: [A, arrow([]), list([B])]
-    try expectNodes(with_newline, &.{ .key, .arrow, .list });
+    try expectNodes(with_newline, &.{ .constant, .arrow, .list });
     try testing.expectEqual(@as(usize, 0), with_newline.root[1].arrow.root.len);
-    try testing.expectEqualStrings("B", with_newline.root[2].list.root[0].key);
+    try testing.expectEqualStrings("B", with_newline.root[2].list.root[0].constant);
 }
 
 fn parseAndMatch(allocator: std.mem.Allocator, trie: Trie, query_str: []const u8) !?Pattern {
@@ -1247,7 +1247,7 @@ test "parseTrie and match: simple vals" {
     try expectMatch(testing.allocator, trie1, "Aa Bb Cc", "123");
 }
 
-test "parseTrie and match: single key-value pair" {
+test "parseTrie and match: single constant-value pair" {
     var trie = try parseTrie(testing.allocator, "A -> B");
     defer trie.deinit(testing.allocator);
     try expectMatch(testing.allocator, trie, "A", "B");
@@ -1260,7 +1260,7 @@ test "parseTrie and match: multiple entries with semicolon" {
     try expectMatch(testing.allocator, trie, "C", "D");
 }
 
-test "parseTrie and match: multi-token key" {
+test "parseTrie and match: multi-token constant" {
     var trie = try parseTrie(testing.allocator, "A B C -> X");
     defer trie.deinit(testing.allocator);
     try expectMatch(testing.allocator, trie, "A B C", "X");
@@ -1301,9 +1301,9 @@ test "Parser structure: A, B" {
     var zig_pattern = try parse(testing.allocator, "A, B");
     defer zig_pattern.deinit(testing.allocator);
 
-    // Zig parser should produce: [key(A), list([key(B)])]
+    // Zig parser should produce: [constant(A), list([constant(B)])]
     try testing.expectEqual(@as(usize, 2), zig_pattern.root.len);
-    try testing.expect(zig_pattern.root[0] == .key);
+    try testing.expect(zig_pattern.root[0] == .constant);
     try testing.expect(zig_pattern.root[1] == .list);
     try testing.expectEqual(@as(usize, 1), zig_pattern.root[1].list.root.len);
 }
@@ -1316,24 +1316,24 @@ test "Parse structure: comma lists" {
     // A, B, C should be: [A, list([B, list([C])])]
     const abc = try parse(allocator, "A, B, C");
     try testing.expectEqual(@as(usize, 2), abc.root.len);
-    try testing.expect(abc.root[0] == .key);
-    try testing.expectEqualStrings("A", abc.root[0].key);
+    try testing.expect(abc.root[0] == .constant);
+    try testing.expectEqualStrings("A", abc.root[0].constant);
     try testing.expect(abc.root[1] == .list);
     const bc_list = abc.root[1].list;
     try testing.expectEqual(@as(usize, 2), bc_list.root.len);
-    try testing.expect(bc_list.root[0] == .key);
-    try testing.expectEqualStrings("B", bc_list.root[0].key);
+    try testing.expect(bc_list.root[0] == .constant);
+    try testing.expectEqualStrings("B", bc_list.root[0].constant);
     try testing.expect(bc_list.root[1] == .list);
     const c_list = bc_list.root[1].list;
     try testing.expectEqual(@as(usize, 1), c_list.root.len);
-    try testing.expect(c_list.root[0] == .key);
-    try testing.expectEqualStrings("C", c_list.root[0].key);
+    try testing.expect(c_list.root[0] == .constant);
+    try testing.expectEqualStrings("C", c_list.root[0].constant);
 
     // B, C should be: [B, list([C])]
     const bc = try parse(allocator, "B, C");
     try testing.expectEqual(@as(usize, 2), bc.root.len);
-    try testing.expect(bc.root[0] == .key);
-    try testing.expectEqualStrings("B", bc.root[0].key);
+    try testing.expect(bc.root[0] == .constant);
+    try testing.expectEqualStrings("B", bc.root[0].constant);
     try testing.expect(bc.root[1] == .list);
     const c_inner = bc.root[1].list;
     try testing.expectEqual(@as(usize, 1), bc.height);

@@ -20,7 +20,7 @@ pub const concat_op = "++";
 ///
 /// Always returns an owned pattern; free it with `deinit`. The bytes of any
 /// computed literal are allocated from `allocator` and outlive the call (they
-/// are not freed by `deinit`, matching how the interpreter treats key text), so
+/// are not freed by `deinit`, matching how the interpreter treats constant text), so
 /// drive this with an arena or otherwise own those bytes.
 pub fn step(pattern: Pattern, allocator: Allocator) Allocator.Error!Pattern {
     // A top-level concatenation looks like `operand (+ operand)*`, i.e. the
@@ -32,7 +32,7 @@ pub fn step(pattern: Pattern, allocator: Allocator) Allocator.Error!Pattern {
             const literal = try quote(allocator, acc.items);
             acc.deinit(allocator);
             const root = try allocator.alloc(Node, 1);
-            root[0] = .{ .key = literal };
+            root[0] = .{ .constant = literal };
             return .{ .root = root, .height = 0 };
         }
         // Not all operands were foldable (e.g. an unbound variable); leave the
@@ -68,8 +68,8 @@ fn appendRoot(acc: *ArrayList(u8), root: []const Node, allocator: Allocator) All
 /// operand is not foldable (e.g. an unbound variable or an operator node).
 fn appendOperand(acc: *ArrayList(u8), node: Node, allocator: Allocator) Allocator.Error!bool {
     switch (node) {
-        .key => |key| {
-            try acc.appendSlice(allocator, unquote(key));
+        .constant => |constant| {
+            try acc.appendSlice(allocator, unquote(constant));
             return true;
         },
         .pattern => |sub| return appendRoot(acc, sub.root, allocator),

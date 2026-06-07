@@ -33,7 +33,7 @@ pub fn rewrite(
     var max_child: usize = 0;
 
     for (pattern.root) |node| switch (node) {
-        .key => |key| try result.append(allocator, Node.ofKey(key)),
+        .constant => |constant| try result.append(allocator, Node.ofConstant(constant)),
         .variable => |variable| {
             const is_var_pattern = variable.len > 0 and variable[0] == '*';
             if (is_var_pattern) {
@@ -365,7 +365,7 @@ test "evaluateComplete: nested pattern" {
     var query = try Parser.parse(testing.allocator, "A, B");
     defer query.deinit(testing.allocator);
     try testing.expectEqual(@as(usize, 2), query.root.len);
-    try testing.expect(query.root[0] == .key);
+    try testing.expect(query.root[0] == .constant);
     try testing.expect(query.root[1] == .list);
 
     var term_bindings = VarBindings{};
@@ -399,15 +399,15 @@ test "rewrite: simple variable substitution" {
     // Set up bindings: x = A
     var bindings = VarBindings{};
     defer bindings.deinit(testing.allocator);
-    try bindings.put(testing.allocator, "x", Node{ .key = "A" });
+    try bindings.put(testing.allocator, "x", Node{ .constant = "A" });
 
     // Rewrite should replace x with A
     var result = try rewrite(testing.allocator, value_pattern, &bindings);
     defer result.deinit(testing.allocator);
 
     try testing.expectEqual(@as(usize, 1), result.root.len);
-    try testing.expect(result.root[0] == .key);
-    try testing.expectEqualStrings("A", result.root[0].key);
+    try testing.expect(result.root[0] == .constant);
+    try testing.expectEqualStrings("A", result.root[0].constant);
 }
 
 test "rewrite: nested list with variables" {
@@ -423,20 +423,20 @@ test "rewrite: nested list with variables" {
     // Set up bindings: x = A, y = B
     var bindings = VarBindings{};
     defer bindings.deinit(testing.allocator);
-    try bindings.put(testing.allocator, "x", Node{ .key = "A" });
-    try bindings.put(testing.allocator, "y", Node{ .key = "B" });
+    try bindings.put(testing.allocator, "x", Node{ .constant = "A" });
+    try bindings.put(testing.allocator, "y", Node{ .constant = "B" });
 
     // Rewrite should produce [B, list([A])]
     var result = try rewrite(testing.allocator, value_pattern, &bindings);
     defer result.deinit(testing.allocator);
 
     try testing.expectEqual(@as(usize, 2), result.root.len);
-    try testing.expect(result.root[0] == .key);
-    try testing.expectEqualStrings("B", result.root[0].key);
+    try testing.expect(result.root[0] == .constant);
+    try testing.expectEqualStrings("B", result.root[0].constant);
     try testing.expect(result.root[1] == .list);
     try testing.expectEqual(@as(usize, 1), result.root[1].list.root.len);
-    try testing.expect(result.root[1].list.root[0] == .key);
-    try testing.expectEqualStrings("A", result.root[1].list.root[0].key);
+    try testing.expect(result.root[1].list.root[0] == .constant);
+    try testing.expectEqualStrings("A", result.root[1].list.root[0].constant);
 }
 
 test "evaluateComplete: step by step x, y --> y, x" {
@@ -452,12 +452,12 @@ test "evaluateComplete: step by step x, y --> y, x" {
 
     // Result should be [B, list([A])]
     try testing.expectEqual(@as(usize, 2), result.root.len);
-    try testing.expect(result.root[0] == .key);
-    try testing.expectEqualStrings("B", result.root[0].key);
+    try testing.expect(result.root[0] == .constant);
+    try testing.expectEqualStrings("B", result.root[0].constant);
     try testing.expect(result.root[1] == .list);
     try testing.expectEqual(@as(usize, 1), result.root[1].list.root.len);
-    try testing.expect(result.root[1].list.root[0] == .key);
-    try testing.expectEqualStrings("A", result.root[1].list.root[0].key);
+    try testing.expect(result.root[1].list.root[0] == .constant);
+    try testing.expectEqualStrings("A", result.root[1].list.root[0].constant);
 }
 
 test "evaluateComplete: simple var_pattern unwrap" {
