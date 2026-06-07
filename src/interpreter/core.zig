@@ -11,6 +11,8 @@ const Trie = trie_module.Trie;
 const Bound = trie_module.Bound;
 const VarBindings = trie_module.VarBindings;
 const pure = @import("pure.zig");
+const comments = @import("comments.zig");
+const string = @import("string.zig");
 
 pub const Eval = struct {
     value: ?Pattern = null,
@@ -55,11 +57,17 @@ pub fn rewrite(
                 }
             }
         },
-        inline .pattern, .arrow, .match, .list, .infix => |nested, tag| {
+        inline .pattern, .arrow, .match, .list => |nested, tag| {
             const rewritten = try rewrite(allocator, nested, term_bindings);
             const wrapped = Pattern{ .root = rewritten.root, .height = rewritten.height + 1 };
             max_child = @max(max_child, wrapped.height);
             try result.append(allocator, @unionInit(Node, @tagName(tag), wrapped));
+        },
+        .infix => |inf| {
+            const rewritten = try rewrite(allocator, inf.rhs, term_bindings);
+            const wrapped = Pattern{ .root = rewritten.root, .height = rewritten.height + 1 };
+            max_child = @max(max_child, wrapped.height);
+            try result.append(allocator, Node{ .infix = .{ .op = inf.op, .rhs = wrapped } });
         },
         else => panic("unimplemented", .{}),
     };
@@ -68,13 +76,31 @@ pub fn rewrite(
     return Pattern{ .root = nodes, .height = max_child };
 }
 
+/// Run the full evaluation pipeline. Each stage is one evaluator driven over
+/// the pattern: comments are stripped, the trie's match/rewrite evaluator runs,
+/// then string concatenations are folded. Each pure-pattern stage is a single
+/// `step` driven by `Pattern.evaluate`, which owns recursion and height.
 pub fn evaluateComplete(
     trie: Trie,
     allocator: Allocator,
     lower_bound: usize,
     pattern: Pattern,
 ) Allocator.Error!Eval {
-    return evaluateBounded(trie, allocator, .{ .lower = lower_bound, .upper = trie.size() }, pattern);
+    // Strip comments from the query so they never reach matching or output.
+    var stripped = try pattern.evaluate(allocator, comments.step);
+    defer stripped.deinit(allocator);
+
+    // Trie-driven match/rewrite evaluation.
+    var eval = try evaluateBounded(trie, allocator, .{ .lower = lower_bound, .upper = trie.size() }, stripped);
+
+    // Fold any string concatenations in the result.
+    if (eval.value) |value| {
+        var produced = value;
+        const folded = try produced.evaluate(allocator, string.step);
+        produced.deinit(allocator);
+        eval.value = folded;
+    }
+    return eval;
 }
 
 pub fn evaluateMatch(
@@ -547,14 +573,14 @@ test "Structural recursion with var_pattern: (x, *xs) --> x, (*xs)" {
 /// reduces to `G 1`. Returns `current` unchanged if there is no reducible
 /// head; otherwise the old root is freed and a new one is returned.
 ///
-/// Also evaluates match operators (`:`) via pure.evaluatePure.
+/// Also evaluates match operators (`:`) via the pure step.
 fn evaluateLHS(
     trie: Trie,
     allocator: Allocator,
     bound: Bound,
     current: Pattern,
 ) Allocator.Error!Pattern {
-    var result = try pure.evaluatePure(current, allocator);
+    var result = try current.evaluate(allocator, pure.step);
     @constCast(&current).deinit(allocator);
 
     var list_pos: usize = result.root.len;

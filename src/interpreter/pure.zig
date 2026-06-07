@@ -4,12 +4,16 @@ const Allocator = std.mem.Allocator;
 const Node = @import("../sifu/node.zig").Node;
 const Pattern = @import("../sifu/pattern.zig").Pattern;
 
-/// Evaluate match operators (`:`) without requiring a trie context.
-/// The `:` operator is right-associative, so `A : {B}` parses as [A, match({B})].
-/// LHS is prefix before the match node, RHS is inside the match node.
-/// Returns empty pattern when match fails.
-/// Always returns a pattern. Caller owns the returned pattern and should free with deinit.
-pub fn evaluatePure(pattern: Pattern, allocator: Allocator) Allocator.Error!Pattern {
+/// One match-evaluation step on a single pattern level. Evaluates match
+/// operators (`:`) without requiring a trie context. The `:` operator is
+/// right-associative, so `A : {B}` parses as [A, match({B})]: the LHS is the
+/// prefix before the match node and the RHS is inside it. Returns the empty
+/// pattern when the match fails, and an unchanged copy when there is no
+/// top-level match. Recursion into nested patterns is the driver's job
+/// (`Pattern.evaluate`).
+///
+/// Caller owns the returned pattern and should free it with `deinit`.
+pub fn step(pattern: Pattern, allocator: Allocator) Allocator.Error!Pattern {
     // Find the last .match node (`:` is right-associative so it's always last if present)
     if (pattern.root.len > 0 and pattern.root[pattern.root.len - 1] == .match) {
         const match_idx = pattern.root.len - 1;
@@ -34,28 +38,8 @@ pub fn evaluatePure(pattern: Pattern, allocator: Allocator) Allocator.Error!Patt
         }
     }
 
-    // No match operator at top level - recurse into nested patterns
-    var result_nodes = std.ArrayList(Node).empty;
-    errdefer result_nodes.deinit(allocator);
-
-    for (pattern.root) |node| {
-        switch (node) {
-            inline .pattern, .arrow, .list, .infix, .newline => |sub_pattern, tag| {
-                const evaluated = try evaluatePure(sub_pattern, allocator);
-                var new_pattern = evaluated;
-                new_pattern.height += 1;
-                try result_nodes.append(allocator, @unionInit(Node, @tagName(tag), new_pattern));
-            },
-            else => {
-                try result_nodes.append(allocator, try node.copy(allocator));
-            },
-        }
-    }
-
-    const root = try result_nodes.toOwnedSlice(allocator);
-    var max_height: usize = 0;
-    for (root) |n| max_height = @max(max_height, n.height());
-    return Pattern{ .root = root, .height = max_height };
+    // No match operator at this level; leave it unchanged.
+    return pattern.copy(allocator);
 }
 
 /// Evaluate a single match operation: lhs : rhs

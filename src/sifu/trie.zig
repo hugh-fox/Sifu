@@ -450,6 +450,8 @@ pub const Trie = struct {
             },
             .variable => |variable| try trie
                 .getOrPutVar(allocator, index, variable),
+            // Comments are stripped before trie construction; skip defensively.
+            .comment => trie,
             .pattern => |sub_pat| blk: {
                 var next = trie;
                 debug("Processing pattern node at {*}", .{next});
@@ -499,9 +501,12 @@ pub const Trie = struct {
 
                 break :blk next;
             },
-            .infix => |sub_pat| blk: {
+            .infix => |inf| blk: {
                 var next = trie;
-                next = try next.ensurePath(allocator, index, sub_pat);
+                // The operator symbol becomes a key on the path, followed by
+                // its operands, matching how lists/arrows are flattened.
+                next = try next.getOrPutKey(allocator, index, inf.op);
+                next = try next.ensurePath(allocator, index, inf.rhs);
                 break :blk next;
             },
             .match => |sub_pat| blk: {
@@ -616,9 +621,6 @@ pub const Trie = struct {
         }
     };
 
-    // TODO: convert to PriorityQueue
-    const MatchQueue = ArrayList(IndexBranchTrie);
-
     pub const Eval = core.Eval;
 
     /// Find the first branch at or after bound in the given branch list.
@@ -693,49 +695,6 @@ pub const Trie = struct {
         }
 
         return min_branch;
-    }
-
-    // If the index is unchanged, its trivially the minimum match. If the
-    // next index is a variable or value its always the next branch.
-
-    /// The first half of evaluation with backtracking. The variables in the node match
-    /// anything in the trie, and vars in the trie match anything in
-    /// the expression. Includes partial prefixes (ones that don't match all
-    /// pattern). This function returns any trie branches, even if their
-    /// value is null, unlike `match`. The position defines the index where
-    /// allowable matches begin. As a trie is matched, a hashmap for vars
-    /// is populated with each var's bound variable. These can the be used
-    /// by the caller for rewriting.
-    /// - Any node matches a var trie including a var (the var node is
-    ///   then stored in the var map like any other node)
-    /// - A var node doesn't match a non-var trie (var matching is one
-    ///   way)
-    /// - A literal node that matches a trie of both literals and vars
-    /// matches the literal part, not the var
-    /// Returns a nullable struct describing a successful match containing:
-    /// - the value for that match in the trie
-    /// - the minimum index a subsequent match should use, which is one
-    /// greater than the previous (except for structural recursion).
-    /// - null if no match
-    /// Time Complexity: O(mlogn) where m is the key len and n is the size of the trie.
-    /// Returns a trie of the subset of branches that matches `node`. Caller
-    /// owns the trie returned, but it is a shallow copy and thus cannot be
-    /// freed with destroy/deinit without freeing references in self.
-    // Add this struct near the top with other Match/Eval structs
-
-    /// Finds all possible branches that could match the given node at or after
-    /// bound.
-    /// Returns a queue of all candidate matches with their indices, branches,
-    /// and updated bindings.
-    fn matchAllTerms(
-        self: *const Self,
-        // allocator: Allocator,
-        // bound: usize,
-        // bindings: VarBindings,
-        // node: Node,
-    ) Allocator.Error!MatchQueue {
-        _ = self;
-        @panic("unimplemented\n");
     }
 
     /// Find the first term at or after bound
@@ -947,7 +906,42 @@ pub const Trie = struct {
                     .trie = trie_match.node_ptr,
                 };
             },
-            inline .arrow, .match, .infix => |_, tag| {
+            // The parser/insertion path flattens an infix node just like a
+            // list: the operator symbol becomes a key on the trie path,
+            // followed by its operands. Match it the same way: look up the
+            // operator key, then recursively match the operand pattern.
+            .infix => |inf| {
+                debug("Matching infix {s} with {} operand(s)", .{ inf.op, inf.rhs.root.len });
+                const open_entry = self.map.getEntry(inf.op) orelse
+                    return null;
+                const open_trie = open_entry.value_ptr;
+                var index, _ = open_trie.findNext(bound) orelse
+                    return null;
+
+                var operand_match = try open_trie
+                    .match(allocator, .{ .lower = index, .upper = bound.upper }, term_bindings, inf.rhs);
+                defer operand_match.deinit(allocator);
+                index = operand_match.match_index;
+                if (operand_match.len != inf.rhs.root.len) {
+                    debug("Infix match failed: only matched {} of {} operands", .{
+                        operand_match.len,
+                        inf.rhs.root.len,
+                    });
+                    return null;
+                }
+
+                const final_branch = operand_match.node_ptr.findNext(.{ .lower = index, .upper = bound.upper }) orelse
+                    return null;
+                _, const branch = final_branch;
+                return .{
+                    .index = index,
+                    .branch = branch,
+                    .trie = operand_match.node_ptr,
+                };
+            },
+            // Comments are stripped before matching; never matches a branch.
+            .comment => return null,
+            inline .arrow, .match => |_, tag| {
                 std.debug.panic(
                     "unimplemented node type {s} in matchTerm",
                     .{@tagName(tag)},

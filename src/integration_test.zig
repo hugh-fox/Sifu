@@ -46,10 +46,7 @@ fn runParsableTest(allocator: Allocator, comptime name: []const u8) !void {
     defer ts_pattern.deinit(allocator);
     const ts_str = try ts_pattern.toString(allocator);
 
-    // TODO
-    _ = ts_str;
-    _ = zig_str;
-    // try testing.expectEqualStrings(zig_str, ts_str);
+    try testing.expectEqualStrings(zig_str, ts_str);
 }
 
 const TestCase = struct {

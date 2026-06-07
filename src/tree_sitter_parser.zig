@@ -241,6 +241,7 @@ fn convertRHS(
     op_symbol: ?[]const u8,
     rhs_pattern: *Pattern,
 ) !Node {
+    _ = allocator;
     // For most operators, we consume the pattern by moving it into the Node.
     // For infix, we copy the contents and must free the original.
     if (mem.eql(u8, node_kind, "terms")) {
@@ -262,23 +263,10 @@ fn convertRHS(
         defer rhs_pattern.* = .{};
         return Node{ .arrow = rhs_pattern.* };
     } else if (mem.eql(u8, node_kind, "infix")) {
-        // For infix, we copy children and free the original pattern
-        // Key has height 0, so max_child = rhs.height - 1
-        const max_child = rhs_pattern.height -| 1;
-        defer rhs_pattern.deinit(allocator);
-        var infix_nodes = std.ArrayList(Node).empty;
-        errdefer {
-            for (infix_nodes.items) |n| n.deinit(allocator);
-            infix_nodes.deinit(allocator);
-        }
-        if (op_symbol) |sym| {
-            try infix_nodes.append(allocator, Node{ .key = sym });
-        }
-        for (rhs_pattern.root) |rhs_child| {
-            try infix_nodes.append(allocator, try rhs_child.copy(allocator));
-        }
-        const infix_slice = try infix_nodes.toOwnedSlice(allocator);
-        return Node{ .infix = .{ .root = infix_slice, .height = if (infix_slice.len > 0) max_child + 1 else 0 } };
+        // The operator symbol is stored out-of-band; the operands move into
+        // the node's rhs pattern (consumed like the other operators above).
+        defer rhs_pattern.* = .{};
+        return Node{ .infix = .{ .op = op_symbol orelse "", .rhs = rhs_pattern.* } };
     } else {
         defer rhs_pattern.* = .{};
         return Node{ .pattern = .{ .root = &[_]Node{}, .height = 0 } };

@@ -17,6 +17,13 @@ const Trie = @import("trie.zig").Trie;
 /// is used during parsing.
 /// A pattern (a list of nodes) Node.
 pub const Node = union(enum) {
+    /// Payload of an `infix` node: a user-defined operator symbol together
+    /// with the pattern of operands following it.
+    pub const Infix = struct {
+        op: []const u8,
+        rhs: Pattern,
+    };
+
     /// A unique constant, literal values. Uniqueness when in a pattern
     /// arises from NodeMap referencing the same value multiple times
     /// (based on Literal.eql).
@@ -34,8 +41,11 @@ pub const Node = union(enum) {
     /// Spaces separated juxtaposition, or lists/parens for nested patterns.
     /// Infix operators add their rhs as a nested patterns after themselves.
     pattern: Pattern,
-    /// The list following a non-builtin operator.
-    infix: Pattern,
+    /// A non-builtin (user-defined symbol) infix operation. `op` is the
+    /// operator symbol and `rhs` is the pattern of operands that follow it.
+    /// Unlike the builtin operators, the symbol is kept out-of-band here
+    /// rather than flattened into the operand pattern as a leading key.
+    infix: Infix,
     /// A postfix encoded match pattern, i.e. `x : Int -> x * 2` where
     /// some node (`x`) must match some subpattern (`Int`) in order for
     /// the rest of the match to continue. Like infixes, the patterns to
@@ -54,6 +64,10 @@ pub const Node = union(enum) {
     newline: Pattern,
     /// An expression in braces.
     trie: Trie,
+    /// A source comment (`# ...` up to end of line, `#` included). Comments
+    /// are preserved as nodes so the parse is layout-faithful; they carry no
+    /// semantics and are removed before matching by interpreter comments.step.
+    comment: []const u8,
 
     /// Performs a deep copy, resulting in a Node the same size as the
     /// original. Does not deep copy keys or vars.
@@ -63,8 +77,9 @@ pub const Node = union(enum) {
         allocator: Allocator,
     ) Allocator.Error!Node {
         return switch (self) {
-            inline .key, .variable => self,
+            inline .key, .variable, .comment => self,
             .pattern => |p| Node.ofPattern(try p.copy(allocator)),
+            .infix => |inf| Node{ .infix = .{ .op = inf.op, .rhs = try inf.rhs.copy(allocator) } },
             inline else => |pattern, tag| @unionInit(
                 Node,
                 @tagName(tag),
@@ -87,8 +102,9 @@ pub const Node = union(enum) {
 
     pub fn deinit(self: Node, allocator: Allocator) void {
         switch (self) {
-            .key, .variable => {},
+            .key, .variable, .comment => {},
             .trie => |*trie| @constCast(trie).deinit(allocator),
+            .infix => |*inf| @constCast(&inf.rhs).deinit(allocator),
             inline else => |*pattern| @constCast(pattern).deinit(allocator),
         }
     }
@@ -99,7 +115,10 @@ pub const Node = union(enum) {
         else switch (node) {
             .key => |key| mem.eql(u8, key, other.key),
             .variable => |variable| mem.eql(u8, variable, other.variable),
+            .comment => |comment| mem.eql(u8, comment, other.comment),
             .trie => |trie| trie.eql(other.trie),
+            .infix => |inf| mem.eql(u8, inf.op, other.infix.op) and
+                inf.rhs.eql(other.infix.rhs),
             inline else => |pattern, tag| pattern
                 .eql(@field(other, @tagName(tag))),
         };
@@ -116,6 +135,9 @@ pub const Node = union(enum) {
 
     pub fn ofPattern(pattern: Pattern) Node {
         return .{ .pattern = pattern };
+    }
+    pub fn ofComment(comment: []const u8) Node {
+        return .{ .comment = comment };
     }
 
     pub fn createKey(
@@ -139,7 +161,7 @@ pub const Node = union(enum) {
 
     pub fn isOp(self: Node) bool {
         return switch (self) {
-            .key, .variable, .pattern, .trie => false,
+            .key, .variable, .comment, .pattern, .trie => false,
             else => true,
         };
     }
@@ -150,7 +172,8 @@ pub const Node = union(enum) {
 
     pub fn height(self: Node) usize {
         return switch (self) {
-            .pattern, .infix, .match, .arrow, .list, .newline => |p| p.height,
+            .pattern, .match, .arrow, .list, .newline => |p| p.height,
+            .infix => |inf| inf.rhs.height,
             else => 0,
         };
     }
@@ -176,6 +199,7 @@ pub const Node = union(enum) {
         switch (self.*) {
             .key => |key| _ = try writer.writeAll(key),
             .variable => |variable| try writer.writeAll(variable),
+            .comment => |comment| try writer.writeAll(comment),
             .trie => |*trie| try trie.writeIndent(
                 writer,
                 optional_indent,
@@ -184,6 +208,15 @@ pub const Node = union(enum) {
                 try writer.writeByte('(');
                 try pattern.writeIndent(writer, optional_indent);
                 try writer.writeByte(')');
+            },
+            // Write the operator symbol followed by its operands (if any),
+            // mirroring how infixes appear in source (`a + b`).
+            .infix => |inf| {
+                try writer.writeAll(inf.op);
+                if (inf.rhs.root.len > 0) {
+                    try writer.writeByte(' ');
+                    try inf.rhs.writeIndent(writer, optional_indent);
+                }
             },
             // Don't write an s-exp as its redundant for ops
             inline else => |pattern, tag| {

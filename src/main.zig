@@ -29,8 +29,10 @@ const Parser = @import("Parser.zig");
 const ts = if (use_tree_sitter) @import("tree_sitter_parser.zig") else struct {};
 const debug = std.log.debug;
 const cli = @import("cli");
+const compiler = @import("compiler/core.zig");
 var config = struct {
     interactive: bool = false,
+    compile: bool = false,
     expression: []const u8 = "",
 }{};
 
@@ -68,6 +70,12 @@ pub fn main(init: std.process.Init) !void {
                     .help = "start interactive REPL",
                     .value_ref = r.mkRef(&config.interactive),
                 },
+                .{
+                    .long_name = "compile",
+                    .short_alias = 'c',
+                    .help = "compile the expression to WAT using wat.sifu",
+                    .value_ref = r.mkRef(&config.compile),
+                },
             }),
             .target = cli.CommandTarget{
                 .action = cli.CommandAction{
@@ -95,6 +103,20 @@ pub fn main(init: std.process.Init) !void {
 
     if (stdin_is_piped)
         try loadTrie(allocator, streams, &trie);
+
+    // Compile mode: evaluate the expression against the piped `wat.sifu` rules
+    // and render the result as WAT text via the string interpreter.
+    if (config.compile) {
+        if (!has_expr) {
+            try streams.err.print("error: -c/--compile needs an expression to compile\n", .{});
+            try streams.err.flush();
+            return;
+        }
+        const wat = try compiler.compile(allocator, trie, config.expression);
+        try streams.out.print("{s}\n", .{wat});
+        try streams.out.flush();
+        return;
+    }
 
     if (config.interactive) {
         if (stdin_is_piped) {

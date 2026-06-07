@@ -84,6 +84,59 @@ pub const Pattern = struct {
         allocator.destroy(self);
     }
 
+    /// A single evaluation step over one pattern level. A step transforms the
+    /// nodes of the pattern it is given and returns a freshly-owned pattern; it
+    /// must not recurse into nested sub-patterns nor adjust nesting heights —
+    /// `evaluate` drives both of those.
+    pub const Step = *const fn (Pattern, Allocator) Allocator.Error!Pattern;
+
+    /// Evaluate `self` with `step`, bottom-up. Each nested sub-pattern is
+    /// evaluated first (recursion), the per-level nesting heights are
+    /// recomputed, and then `step` is applied once at this level. This is the
+    /// shared driver for the pure-pattern evaluators (`string.step`,
+    /// `comments.step`, `pure.step`); they only implement the one-level
+    /// transformation and leave recursion and height tracking here.
+    ///
+    /// Caller owns the returned pattern and should free it with `deinit`.
+    pub fn evaluate(self: Pattern, allocator: Allocator, step: Step) Allocator.Error!Pattern {
+        var result = std.ArrayList(Node).empty;
+        errdefer {
+            for (result.items) |*node| node.deinit(allocator);
+            result.deinit(allocator);
+        }
+
+        var max_height: usize = 0;
+        for (self.root) |node| {
+            switch (node) {
+                // Infix keeps its operator out-of-band; recurse into operands.
+                .infix => |inf| {
+                    var rhs = try inf.rhs.evaluate(allocator, step);
+                    rhs.height += 1;
+                    max_height = @max(max_height, rhs.height);
+                    try result.append(allocator, Node{ .infix = .{ .op = inf.op, .rhs = rhs } });
+                },
+                // Recurse into the nested pattern of the other compound nodes.
+                inline .pattern, .match, .arrow, .list, .newline => |sub, tag| {
+                    var evaluated = try sub.evaluate(allocator, step);
+                    evaluated.height += 1;
+                    max_height = @max(max_height, evaluated.height);
+                    try result.append(allocator, @unionInit(Node, @tagName(tag), evaluated));
+                },
+                // Leaves (and tries, evaluated at their own construction) are
+                // copied as-is; `step` decides what to do with them.
+                else => {
+                    const copied = try node.copy(allocator);
+                    max_height = @max(max_height, copied.height());
+                    try result.append(allocator, copied);
+                },
+            }
+        }
+
+        var recursed = Pattern{ .root = try result.toOwnedSlice(allocator), .height = max_height };
+        defer recursed.deinit(allocator);
+        return step(recursed, allocator);
+    }
+
     pub fn eql(self: Pattern, other: Pattern) bool {
         return self.height == other.height and
             self.root.len == other.root.len and
