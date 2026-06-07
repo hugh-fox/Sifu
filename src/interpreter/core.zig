@@ -123,135 +123,144 @@ pub fn evaluateMatch(
     return Eval{ .value = rewritten, .index = matched.match_index, .len = matched.len };
 }
 
-/// Recurse into nested expressions. Two cases must be distinguished:
+/// The mutable state an evaluator (`Step`) threads through one level of
+/// evaluation. Each step owns its bound bookkeeping here and is responsible for
+/// advancing it so it eventually returns null (signalling "no more matches"),
+/// which is how the driver terminates.
 ///
-///  - Structural recursion (form 2), e.g. `(x, *xs) -> x, (*xs)`: the
-///    nested expression is strictly *smaller* than the pattern that was
-///    matched, so progress is guaranteed and the producing rule may fire
-///    again. The recursive call may match up to and including the current
-///    index, so its upper bound is `structural_upper`.
+/// Two distinct axes meet in this struct, and keeping them apart is the whole
+/// point:
 ///
-///  - Nested recursion (form 3), e.g. `A -> (A)`: the nested expression
-///    is the *same* size, just wrapped one level deeper. Reusing the
-///    producing rule would loop forever, so the recursive call must match
-///    strictly before the current index, giving an upper bound of `nested_upper`.
+///   - The trie's `Bound` is a half-open range of *trie indices*. Evaluation
+///     starts at `{ .lower = 0, .upper = trie.size() }` — 0 up to the trie's
+///     height — and a `match` against the trie returns an *index* within that
+///     range (`index` below).
 ///
-/// The two are told apart by comparing the nested node's height (which
-/// includes its own nesting level) against the matched pattern's height,
-/// measured the same way.
-pub fn evaluateNested(
+///   - A *pattern* is measured along a different axis. `len` is how far a match
+///     progressed *through the pattern*; `height` is the pattern's level of
+///     nesting. Pattern height — not the trie index — is what governs
+///     structural recursion (see `child`).
+pub const Context = struct {
     trie: Trie,
+    bound: Bound,
     allocator: Allocator,
-    pattern_height: usize,
-    structural_upper: usize,
-    nested_upper: usize,
-    current: Pattern,
-) Allocator.Error!Eval {
-    const result = current;
-    for (result.root, 0..) |*nested, i| switch (nested.*) {
+    /// The lower bound at the start of this level, restored on a structural
+    /// rewrite so the smaller result is rescanned from the beginning.
+    start_lower: usize = 0,
+    /// Trie index of the last successful top-level match at this level (a
+    /// position within `bound`). This is what bounds child matches on recursion.
+    index: usize = 0,
+    /// How far that match progressed through the pattern. Reported out as
+    /// `Eval.len`; it is pattern progress, not a trie index, so it never bounds.
+    len: usize = 0,
+    matched: bool = false,
+
+    /// Derive the context for a nested child whose pattern height (nesting
+    /// level) is `content_height`, inside a level of pattern height
+    /// `pattern_height`. Structural recursion keys off pattern *height*: when
+    /// the child is strictly less nested than its parent (`(x, *xs) -> x,
+    /// (*xs)`) the term is shrinking, so the producing rule may fire again and
+    /// the child may rematch at the same trie index (`index + 1`). When the
+    /// child is the same height, just wrapped a level deeper (`A -> (A)`),
+    /// reusing the rule would loop forever, so the child must match strictly
+    /// before that index (`index`). This index/height interplay is the only
+    /// trie-specific knowledge the generic driver needs, so it lives on the
+    /// context the caller supplies.
+    pub fn child(self: Context, content_height: usize, pattern_height: usize) Context {
+        const structural_upper = if (self.matched) self.index + 1 else self.bound.upper;
+        const nested_upper = if (self.matched) self.index else self.bound.upper;
+        const recurse_upper = if (content_height < pattern_height) structural_upper else nested_upper;
+        return .{
+            .trie = self.trie,
+            .bound = .{ .lower = 0, .upper = recurse_upper },
+            .allocator = self.allocator,
+        };
+    }
+};
+
+/// A step is any `fn (Pattern, ctx: anytype) Allocator.Error!?Pattern`. It
+/// transforms one pattern level, returning the rewritten pattern when it
+/// changed something (the driver then repeats) or null when it did nothing.
+/// `ctx` is a pointer to whatever context type the caller chose; the step and
+/// the context agree on its shape. Recursion into nested sub-patterns and the
+/// repeat loop are the driver's (`evaluate`) job.
+///
+/// The trie evaluator's ordered step list: match/rewrite against the trie, then
+/// reduce a list/op head prefix (and `:` match operators).
+const trie_steps = .{ matchStep, lhsStep };
+
+/// The unified evaluation driver, generic over the caller's context type. At
+/// each level it applies the steps in order, repeating from the first whenever
+/// one fires, until every step returns null. It then recurses once into the
+/// nested children — whose context is derived via `ctx.child(...)` — and
+/// returns. Steps own their bounds and termination; the driver owns recursion
+/// and height tracking.
+///
+/// `ctx` is a pointer to the caller's context (it must expose `allocator`,
+/// `bound`, `start_lower`, and a `child(content_height, pattern_height)`
+/// method). `steps` is a comptime tuple of step functions.
+///
+/// Caller owns the returned pattern and should free it with `deinit`.
+fn evaluate(pattern: Pattern, ctx: anytype, comptime steps: anytype) Allocator.Error!Pattern {
+    const pattern_height = pattern.height;
+    ctx.start_lower = ctx.bound.lower;
+    var current = try pattern.copy(ctx.allocator);
+
+    // Apply the steps in order, restarting from the first whenever one fires,
+    // until they all report "no change". Steps advance their own bound.
+    outer: while (true) {
+        inline for (steps) |step| {
+            if (try step(current, ctx)) |next| {
+                current.deinit(ctx.allocator);
+                current = next;
+                continue :outer;
+            }
+        }
+        break;
+    }
+
+    // Recurse once into the nested children with contexts derived from the
+    // settled top-level match outcome.
+    for (current.root) |*nested| switch (nested.*) {
         inline else => |sub_pattern, tag| if (@TypeOf(sub_pattern) == Pattern) {
             var content_height: usize = 0;
             for (sub_pattern.root) |node|
                 content_height = @max(content_height, node.height());
             const inner = Pattern{ .root = sub_pattern.root, .height = content_height };
-            const is_smaller = content_height < pattern_height;
-            const recurse_upper = if (is_smaller) structural_upper else nested_upper;
-            debug("Nested recurse [{d}] tag={s} content_h={d} pat_h={d} upper={d}", .{
-                i, @tagName(tag), content_height, pattern_height, recurse_upper,
-            });
-            const nested_eval = try evaluateBounded(
-                trie,
-                allocator,
-                .{ .lower = 0, .upper = recurse_upper },
-                inner,
-            );
-            var new_value = nested_eval.value orelse try inner.copy(allocator);
+            var child_ctx = ctx.child(content_height, pattern_height);
+            var new_value = try evaluate(inner, &child_ctx, steps);
             new_value.height += 1;
-            @constCast(&sub_pattern).deinit(allocator);
+            @constCast(&sub_pattern).deinit(ctx.allocator);
             nested.* = @unionInit(Node, @tagName(tag), new_value);
         },
     };
-    return Eval{ .value = result };
+    return current;
 }
 
-/// Main match loop with structural recursion. Iterates through rules
-/// bottom-up by index, applying rewrites. When height decreases
-/// (structural recursion), recursively evaluates with the same rule set.
-/// Otherwise continues with increasing index to prevent infinite loops.
-fn evaluateBottomUp(
-    trie: Trie,
-    allocator: Allocator,
-    bound: Bound,
-    pattern: Pattern,
-) Allocator.Error!Eval {
-    var index: usize = bound.lower;
-    const upper = bound.upper;
-    var current: Pattern = try pattern.copy(allocator);
-    var last_index: usize = upper;
-    var last_len: usize = 0;
+/// Trie match/rewrite as a single step. Performs one top-level match within
+/// `ctx.bound`; on success it rewrites, records the match's trie `index` and
+/// pattern `len` in `ctx`, and advances the bound. A structural rewrite — one
+/// whose result is strictly less nested (lower pattern height) — rescans the
+/// shrinking term from `start_lower` up to the matched index; a rewrite that
+/// keeps the same height advances the lower bound past the matched rule so it
+/// can't re-fire. Returns null when no rule matches in range.
+fn matchStep(pattern: Pattern, ctx: *Context) Allocator.Error!?Pattern {
+    if (ctx.bound.lower >= ctx.bound.upper) return null;
+    const m = try evaluateMatch(ctx.trie, ctx.allocator, ctx.bound, pattern);
+    const rewritten = m.value orelse return null;
 
-    while (index < upper) {
-        const step = try evaluateMatch(trie, allocator, .{ .lower = index, .upper = upper }, current);
-        if (step.index < index)
-            panic("Match index bug: step.index {} < index {}", .{ step.index, index });
+    ctx.index = m.index;
+    ctx.len = m.len;
+    ctx.matched = true;
 
-        index = step.index + 1;
+    const is_structural = pattern.height > rewritten.height;
+    debug("matchStep: structural={} ({} > {})", .{ is_structural, pattern.height, rewritten.height });
+    ctx.bound = if (is_structural)
+        .{ .lower = ctx.start_lower, .upper = m.index + 1 }
+    else
+        .{ .lower = m.index + 1, .upper = ctx.bound.upper };
 
-        const rewritten = step.value orelse {
-            debug("Eval, no match", .{});
-            index = upper;
-            break;
-        };
-
-        last_index = step.index;
-        last_len = step.len;
-
-        var old_current = current;
-        defer old_current.deinit(allocator);
-
-        const is_structural = pattern.height > rewritten.height;
-        debug(
-            "is_structural: current {} > rewritten {}",
-            .{ current.height, rewritten.height },
-        );
-
-        if (is_structural) {
-            const rewritten_eval = try evaluateBounded(
-                trie,
-                allocator,
-                .{ .lower = bound.lower, .upper = step.index + 1 },
-                rewritten,
-            );
-            if (rewritten_eval.value) |val| {
-                var rewritten_mut = rewritten;
-                rewritten_mut.deinit(allocator);
-                return Eval{
-                    .value = val,
-                    .index = step.index,
-                    .len = step.len,
-                };
-            } else {
-                current = rewritten;
-            }
-        } else {
-            current = rewritten;
-        }
-
-        debug("Next eval index: {}\n", .{index});
-    }
-
-    return if (last_index < upper) .{
-        .value = current,
-        .index = last_index,
-        .len = last_len,
-    } else blk: {
-        current.deinit(allocator);
-        break :blk .{
-            .value = null,
-            .index = upper,
-            .len = 0,
-        };
-    };
+    return rewritten;
 }
 
 pub fn evaluateBounded(
@@ -260,22 +269,12 @@ pub fn evaluateBounded(
     bound: Bound,
     pattern: Pattern,
 ) Allocator.Error!Eval {
-    const bottom_up = try evaluateBottomUp(trie, allocator, bound, pattern);
-    var current = bottom_up.value orelse try pattern.copy(allocator);
-    const last_index = bottom_up.index;
-    const last_len = bottom_up.len;
-
-    current = try evaluateLHS(trie, allocator, bound, current);
-
-    const structural_upper = if (bottom_up.value) |_| last_index + 1 else bound.upper;
-    const nested_upper = if (bottom_up.value) |_| last_index else bound.upper;
-    const nested_eval = try evaluateNested(trie, allocator, pattern.height, structural_upper, nested_upper, current);
-    current = nested_eval.value orelse current;
-
+    var ctx = Context{ .trie = trie, .bound = bound, .allocator = allocator };
+    const value = try evaluate(pattern, &ctx, trie_steps);
     const eval = Eval{
-        .value = current,
-        .index = last_index,
-        .len = last_len,
+        .value = value,
+        .index = if (ctx.matched) ctx.index else bound.upper,
+        .len = ctx.len,
     };
     debug("Evaluated {} nodes at index {}\n", .{ eval.len, eval.index });
     return eval;
@@ -574,14 +573,12 @@ test "Structural recursion with var_pattern: (x, *xs) --> x, (*xs)" {
 /// head; otherwise the old root is freed and a new one is returned.
 ///
 /// Also evaluates match operators (`:`) via the pure step.
-fn evaluateLHS(
-    trie: Trie,
-    allocator: Allocator,
-    bound: Bound,
-    current: Pattern,
-) Allocator.Error!Pattern {
-    var result = try current.evaluate(allocator, pure.step);
-    @constCast(&current).deinit(allocator);
+///
+/// As a `Step`: does not free its input (the driver owns it) and returns null
+/// when nothing changed, so the driver's repeat loop terminates.
+fn lhsStep(pattern: Pattern, ctx: *Context) Allocator.Error!?Pattern {
+    const allocator = ctx.allocator;
+    var result = try pattern.evaluate(allocator, pure.step);
 
     var list_pos: usize = result.root.len;
     for (result.root, 0..) |node, i| {
@@ -595,9 +592,9 @@ fn evaluateLHS(
         for (result.root[0..list_pos]) |node|
             head_height = @max(head_height, node.height());
         var head_eval = try evaluateBounded(
-            trie,
+            ctx.trie,
             allocator,
-            .{ .lower = 0, .upper = bound.upper },
+            .{ .lower = 0, .upper = ctx.bound.upper },
             .{ .root = result.root[0..list_pos], .height = head_height },
         );
         if (head_eval.value) |*head_val| {
@@ -614,6 +611,12 @@ fn evaluateLHS(
             for (new_root) |node| new_height = @max(new_height, node.height());
             result = .{ .root = new_root, .height = new_height };
         }
+    }
+    // The driver owns the input; only hand back an owned result when something
+    // actually changed, otherwise free our copy and report "no change".
+    if (result.eql(pattern)) {
+        result.deinit(allocator);
+        return null;
     }
     return result;
 }

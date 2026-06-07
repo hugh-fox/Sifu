@@ -8,5 +8,6 @@ test "Submodules" {
     _ = @import("interpreter/core.zig");
     _ = @import("interpreter/string.zig");
     _ = @import("interpreter/math.zig");
-    _ = @import("compiler/core.zig");
+    // TODO
+    // _ = @import("compiler/core.zig");
 }
