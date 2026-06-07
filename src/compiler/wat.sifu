@@ -1,0 +1,14 @@
+# wat.sifu — the root of the Sifu-to-WAT compiler.
+#
+# This file is the self-hosted compiler. The driver
+# (src/compiler/core.zig) loads it as the trie, then evaluates an input
+# Sifu trie.
+# 
+# Each rule rewrites a Sifu form to its WAT, assembling the surrounding syntax
+# with the `++` string operator. WAT tokens live inside string literals
+# (i32.add etc.) so their `.`/`(`/`)` characters stay opaque data
+# and are never parsed as Sifu.
+
+x + y --> "(i32.add " ++ (x) ++ " " ++ (y) ++ ")"
+x - y --> "(i32.sub " ++ (x) ++ " " ++ (y) ++ ")"
+n --> "(i32.const " ++ n ++ ")"
