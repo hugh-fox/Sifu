@@ -14,11 +14,23 @@ const Pattern = @import("../sifu/pattern.zig").Pattern;
 
 /// One comment-stripping step on a single pattern level: drop every
 /// `.comment` node at this level, copying the rest. Nested patterns are
-/// handled by the driver (`Pattern.evaluate`), which applies this step at
+/// handled by the driver (`core.evaluate`), which applies this step at
 /// every level, so comments are removed throughout.
 ///
-/// Caller owns the returned pattern and should free it with `deinit`.
-pub fn step(pattern: Pattern, allocator: Allocator) Allocator.Error!Pattern {
+/// As a unified `Step`: returns null when this level has no comment to drop
+/// (so the driver's fixpoint loop terminates), otherwise an owned pattern.
+/// `ctx` only needs to supply the allocator.
+pub fn step(pattern: Pattern, ctx: anytype) Allocator.Error!?Pattern {
+    const allocator = ctx.allocator;
+    var dropped = false;
+    for (pattern.root) |node| {
+        if (node == .comment) {
+            dropped = true;
+            break;
+        }
+    }
+    if (!dropped) return null;
+
     var result = std.ArrayList(Node).empty;
     errdefer {
         for (result.items) |*n| n.deinit(allocator);
@@ -37,13 +49,14 @@ pub fn step(pattern: Pattern, allocator: Allocator) Allocator.Error!Pattern {
 
 const testing = std.testing;
 const Parser = @import("../Parser.zig");
+const core = @import("../interpreter.zig");
 
 fn expectStripped(src: []const u8, expected: []const u8) !void {
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
     const allocator = arena.allocator();
     const parsed = try Parser.parse(allocator, src);
-    const stripped = try parsed.evaluate(allocator, step);
+    const stripped = try core.evaluatePure(allocator, parsed, step);
     const str = try stripped.toString(allocator);
     try testing.expectEqualStrings(expected, str);
 }

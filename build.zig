@@ -154,11 +154,16 @@ pub fn build(b: *std.Build) void {
         run_cmd.addArgs(args);
         run_unit_tests.addArgs(args);
     }
-    const test_step = b.step("test", "Run unit tests");
+    const test_step = b.step("test", "Run all tests (unit + integration)");
     test_step.dependOn(&run_unit_tests.step);
 
     // Integration tests for test/ folder
     const integration_tests = b.addTest(.{
+        .name = "integration",
+        // Importing the source modules drags in their unit `test` blocks too
+        // (some of which are also named "Behavior:"); restrict this binary to
+        // the tests generated in integration_test.zig by their module prefix.
+        .filters = &.{"integration_test.comptime"},
         .root_module = b.createModule(.{
             .root_source_file = b.path("src/integration_test.zig"),
             .target = target,
@@ -190,6 +195,11 @@ pub fn build(b: *std.Build) void {
     }
     build_options.addOption([]const []const u8, "behavior_files", behavior_list.items);
 
+    // Names passed after `--` (e.g. `zig build integration -- In Math`) restrict
+    // which test files run; empty means run everything.
+    const test_filters: []const []const u8 = if (b.args) |args| args else &.{};
+    build_options.addOption([]const []const u8, "test_filters", test_filters);
+
     integration_tests.root_module.addOptions("build_options", build_options);
     const integration_options = b.addOptions();
     integration_options.addOptionPath("sifu_exe", exe.getEmittedBin());
@@ -197,6 +207,9 @@ pub fn build(b: *std.Build) void {
     const run_integration_tests = b.addRunArtifact(integration_tests);
     const integration_test_step = b.step("integration", "Run integration tests on test/ folder");
     integration_test_step.dependOn(&run_integration_tests.step);
+
+    // `zig build test` runs the unit tests above plus the integration tests.
+    test_step.dependOn(&run_integration_tests.step);
 
     unit_tests.root_module.addOptions("build_options", build_options);
     wasm_lib.root_module.addOptions("build_options", build_options);

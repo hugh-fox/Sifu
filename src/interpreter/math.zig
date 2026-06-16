@@ -3,7 +3,7 @@
 //! Folds a top-level arithmetic infix chain of integer literals into a single
 //! integer literal. Non-Trie-specific: it operates purely on patterns, mirroring
 //! the other single-level `step` evaluators (`string.zig`, `comments.zig`,
-//! `pure.zig`) driven by `Pattern.evaluate`.
+//! `pure.zig`) driven by `core.evaluate`.
 //!
 //! Operators: `+ - * /`. The parser emits arithmetic as a single flat,
 //! left-associative infix chain at one precedence level (`[operand, infix, ...]`,
@@ -11,8 +11,8 @@
 //! there is *no* operator precedence: `1 + 2 * 3` folds as `(1 + 2) * 3 = 9`.
 //! This is a known limitation of this MVP.
 //!
-//! Always returns an owned pattern; free it with `deinit`. The bytes of any
-//! computed literal are allocated from `allocator` and outlive the call (they
+//! Returns null when nothing folded; otherwise an owned single-literal pattern.
+//! The bytes of any computed literal are allocated from `ctx.allocator` and outlive the call (they
 //! are not freed by `deinit`, matching how the interpreter treats constant text), so
 //! drive this with an arena or otherwise own those bytes.
 
@@ -26,9 +26,10 @@ const Pattern = @import("../sifu/pattern.zig").Pattern;
 /// top-level arithmetic chain (`operand (op operand)*`) of foldable integer
 /// operands, fold it into a single integer literal; otherwise return the level
 /// unchanged. Recursion into nested patterns is the driver's job
-/// (`Pattern.evaluate`), so nested expressions are already folded by the time
+/// (`core.evaluate`), so nested expressions are already folded by the time
 /// this runs at a level.
-pub fn step(pattern: Pattern, allocator: Allocator) Allocator.Error!Pattern {
+pub fn step(pattern: Pattern, ctx: anytype) Allocator.Error!?Pattern {
+    const allocator = ctx.allocator;
     // A top-level arithmetic chain looks like `operand (op operand)*`, i.e. the
     // second node is a math infix. Fold the whole root into one literal.
     if (pattern.root.len >= 2 and isMathOp(pattern.root[1])) {
@@ -42,7 +43,7 @@ pub fn step(pattern: Pattern, allocator: Allocator) Allocator.Error!Pattern {
         // division by zero); leave the expression intact.
     }
 
-    return pattern.copy(allocator);
+    return null;
 }
 
 /// True if `node` is one of the `+ - * /` infix operations.
@@ -97,12 +98,13 @@ fn operandValue(node: Node) ?i64 {
 const testing = std.testing;
 const ArenaAllocator = std.heap.ArenaAllocator;
 const Parser = @import("../Parser.zig");
+const core = @import("../interpreter.zig");
 
 /// Parses `source`, folds arithmetic, and returns the printed result. Uses the
 /// caller's arena so computed literals are reclaimed in bulk.
 fn evalToString(allocator: Allocator, source: []const u8) ![]const u8 {
     const pattern = try Parser.parse(allocator, source);
-    const folded = try pattern.evaluate(allocator, step);
+    const folded = try core.evaluatePure(allocator, pattern, step);
     return folded.toString(allocator);
 }
 

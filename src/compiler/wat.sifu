@@ -9,18 +9,18 @@
 # (i32.add etc.) so their `.`/`(`/`)` characters stay opaque data
 # and are never parsed as Sifu.
 
-x + y --> "(i32.add " ++ (x) ++ " " ++ (y) ++ ")"
-x - y --> "(i32.sub " ++ (x) ++ " " ++ (y) ++ ")"
+x + y --> "(i32.add " + (x) + " " + (y) + ")"
+x - y --> "(i32.sub " + (x) + " " + (y) + ")"
 
 # Comparisons. Each yields an i32 boolean (0 or 1), as WAT has no bool type.
-x == y --> "(i32.eq " ++ (x) ++ " " ++ (y) ++ ")"
-x < y --> "(i32.lt_s " ++ (x) ++ " " ++ (y) ++ ")"
-x > y --> "(i32.gt_s " ++ (x) ++ " " ++ (y) ++ ")"
+x == y --> "(i32.eq " + (x) + " " + (y) + ")"
+x < y --> "(i32.lt_s " + (x) + " " + (y) + ")"
+x > y --> "(i32.gt_s " + (x) + " " + (y) + ")"
 
 # Conditional. Folded `if` form: the condition is nested as a child, so no
 # explicit stack ordering is needed. Result type is i32 (the only type so far).
-If c Then a Else b --> "(if (result i32) " ++ (c) ++ " (then " ++ (a) ++ ") (else " ++ (b) ++ "))"
+If c Then a Else b --> "(if (result i32) " + (c) + " (then " + (a) + ") (else " + (b) + "))"
 
 # Catch-all: a bare term is an i32 constant. Defined last so the multi-term and
 # infix rules above are matched first.
-n --> "(i32.const " ++ n ++ ")"
+n --> "(i32.const " + n + ")"

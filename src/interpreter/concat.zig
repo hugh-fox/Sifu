@@ -26,7 +26,7 @@ pub fn evaluateSlice(
     result: *ArrayList(Node),
 ) Allocator.Error!Pattern {
     _ = result;
-    var bound: Bound = .{ .upper = trie.size() };
+    var bound: Bound = .{ .upper = trie.length() };
     var total_matched: usize = 0;
     var matched: Trie.Match = .{ .index = 0 };
     var term_bindings = VarBindings{};

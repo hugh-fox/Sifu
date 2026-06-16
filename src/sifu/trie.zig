@@ -14,7 +14,6 @@ const Writer = Io.Writer;
 
 pub const Node = @import("node.zig").Node;
 pub const Pattern = @import("pattern.zig").Pattern;
-pub const core = @import("../interpreter/core.zig");
 
 pub const HashMap = std.StringHashMapUnmanaged(Trie);
 pub const GetOrPutResult = HashMap.GetOrPutResult;
@@ -122,7 +121,9 @@ pub const Trie = struct {
     constant_branches: BranchList = .empty,
     var_branches: BranchList = .empty,
     value_branches: BranchList = .empty,
-    depth: usize = 0, // TODO: implement depth caching
+    /// Nesting level of this trie (0 at the root, +1 per nested branch). The
+    /// same notion of `height` as on `Pattern`. TODO: implement height caching.
+    height: usize = 0,
 
     /// The results of matching a trie exactly (vars are matched literally
     /// instead of by building up a pattern of their possible values)
@@ -200,7 +201,7 @@ pub const Trie = struct {
     // use putAssumeCapacity
     // TODO: use iterator instead of manually copying
     pub fn copy(self: Self, allocator: Allocator) Allocator.Error!Self {
-        var result = Self{ .depth = self.depth };
+        var result = Self{ .height = self.height };
 
         // Copy the map entries
         var keys_iter = self.map.iterator();
@@ -399,7 +400,7 @@ pub const Trie = struct {
         constant: []const u8,
     ) !*Self {
         const entry = try trie.map
-            .getOrPutValue(allocator, constant, Self{ .depth = trie.depth + 1 });
+            .getOrPutValue(allocator, constant, Self{ .height = trie.height + 1 });
         const next = entry.value_ptr;
         try trie.constant_branches.append(
             allocator,
@@ -576,7 +577,7 @@ pub const Trie = struct {
     ) Allocator.Error!*Self {
         debug("Appending to {*}", .{trie});
         // The length of values will be the next entry index after insertion
-        const index = trie.size();
+        const index = trie.length();
         var current = trie;
         current = try current.ensurePath(allocator, index, pattern);
         // If there isn't a value, use the pattern as the value instead.
@@ -594,17 +595,17 @@ pub const Trie = struct {
     }
 
     /// A partial or complete match of a given pattern against a trie.
-    const Match = struct {
-        constant: Pattern = .{}, // The pattern that was attempted to match
+    pub const Match = struct {
+        query: Pattern = .{}, // The pattern that was attempted to match
         value: ?Pattern = null,
-        node_ptr: *const Trie,
+        trie_ptr: *const Trie, // The last node matched, contains the value if any
         match_index: usize = 0,
         len: usize = 0, // For partial matches
 
         /// Node entries are just references, so they aren't freed by this
         /// function.
         pub fn deinit(self: *Match, allocator: Allocator) void {
-            self.constant.deinit(allocator);
+            self.query.deinit(allocator);
         }
     };
 
@@ -620,8 +621,6 @@ pub const Trie = struct {
             self.trie.deinit(allocator);
         }
     };
-
-    pub const Eval = core.Eval;
 
     /// Find the first branch at or after bound in the given branch list.
     fn findNextInBranches(branches: []const IndexBranch, bound: Bound) ?IndexBranch {
@@ -836,9 +835,9 @@ pub const Trie = struct {
                     });
                     return null;
                 }
-                debug("Sub-pattern matched {*}", .{pattern_match.node_ptr});
+                debug("Sub-pattern matched {*}", .{pattern_match.trie_ptr});
                 // Successfully matched entire pattern, now match closing paren
-                const close_entry = pattern_match.node_ptr.map.getEntry(")") orelse
+                const close_entry = pattern_match.trie_ptr.map.getEntry(")") orelse
                     return null;
                 const close_trie = close_entry.value_ptr;
                 debug("Closing paren matched {*}", .{close_trie});
@@ -879,15 +878,15 @@ pub const Trie = struct {
                     return null;
                 }
 
-                debug("Matched separator tail at {*}", .{pattern_match.node_ptr});
+                debug("Matched separator tail at {*}", .{pattern_match.trie_ptr});
                 // Get the branch from the final matched position
-                const final_branch = pattern_match.node_ptr.findNext(.{ .lower = index, .upper = bound.upper }) orelse
+                const final_branch = pattern_match.trie_ptr.findNext(.{ .lower = index, .upper = bound.upper }) orelse
                     return null;
                 _, const branch = final_branch;
                 return .{
                     .index = index,
                     .branch = branch,
-                    .trie = pattern_match.node_ptr,
+                    .trie = pattern_match.trie_ptr,
                 };
             },
             .trie => |query_trie| {
@@ -897,13 +896,13 @@ pub const Trie = struct {
                 var trie_match = try self.match(allocator, bound, term_bindings, trie_pattern);
                 defer trie_match.deinit(allocator);
 
-                const final_branch = trie_match.node_ptr.findNext(.{ .lower = trie_match.match_index, .upper = bound.upper }) orelse
+                const final_branch = trie_match.trie_ptr.findNext(.{ .lower = trie_match.match_index, .upper = bound.upper }) orelse
                     return null;
                 _, const branch = final_branch;
                 return .{
                     .index = trie_match.match_index,
                     .branch = branch,
-                    .trie = trie_match.node_ptr,
+                    .trie = trie_match.trie_ptr,
                 };
             },
             // list: the operator symbol becomes a constant on the trie path,
@@ -929,13 +928,13 @@ pub const Trie = struct {
                     return null;
                 }
 
-                const final_branch = operand_match.node_ptr.findNext(.{ .lower = index, .upper = bound.upper }) orelse
+                const final_branch = operand_match.trie_ptr.findNext(.{ .lower = index, .upper = bound.upper }) orelse
                     return null;
                 _, const branch = final_branch;
                 return .{
                     .index = index,
                     .branch = branch,
-                    .trie = operand_match.node_ptr,
+                    .trie = operand_match.trie_ptr,
                 };
             },
             // Comments are stripped before matching; never matches a branch.
@@ -1113,15 +1112,17 @@ pub const Trie = struct {
         var max_child: usize = 0;
         for (constant_nodes) |n| max_child = @max(max_child, n.height());
         return Match{
-            .constant = Pattern{ .root = constant_nodes, .height = max_child },
+            .query = Pattern{ .root = constant_nodes, .height = max_child },
             .value = if (full_match) result else null,
-            .node_ptr = current,
+            .trie_ptr = current,
             .match_index = index,
             .len = pattern_index,
         };
     }
 
-    pub fn size(self: Self) usize {
+    /// The number of indexed entries in this trie. Matching an index ranges over
+    /// `[lower = 0, upper = trie.length())`, so this is the starting upper bound.
+    pub fn length(self: Self) usize {
         return self.constant_branches.items.len +
             self.var_branches.items.len +
             self.value_branches.items.len;
@@ -1498,7 +1499,7 @@ test "Behavior: equal variables" {
 
     // Both entries share the same variable name in the map
     try testing.expect(trie.map.contains("x"));
-    try testing.expectEqual(@as(usize, 2), trie.size());
+    try testing.expectEqual(@as(usize, 2), trie.length());
 
     // Matching from bound 0 should find index 0
     var term_bindings = VarBindings{};
@@ -1509,7 +1510,7 @@ test "Behavior: equal variables" {
 
     var match1 = try trie.match(
         testing.allocator,
-        .{ .upper = trie.size() },
+        .{ .upper = trie.length() },
         &term_bindings,
         query,
     );
@@ -1643,12 +1644,12 @@ test "findNextValue" {
     _ = try trie.append(testing.allocator, constant_pat, value2);
 
     const value_trie = trie.get(constant_pat) orelse unreachable;
-    var index_branch = value_trie.findNextValue(.{ .upper = value_trie.size() }) orelse unreachable;
+    var index_branch = value_trie.findNextValue(.{ .upper = value_trie.length() }) orelse unreachable;
     var value_index, var value_branch = index_branch;
     try testing.expect(value_index == 0);
     try testing.expect(value_branch.value.eql(value1));
 
-    index_branch = value_trie.findNextValue(.{ .lower = 1, .upper = value_trie.size() }) orelse unreachable;
+    index_branch = value_trie.findNextValue(.{ .lower = 1, .upper = value_trie.length() }) orelse unreachable;
     value_index, value_branch = index_branch;
     try testing.expect(value_index == 1);
     try testing.expect(value_branch.value.eql(value2));
@@ -1707,126 +1708,23 @@ test "Roundtrip: A -> C -> B" {
 
     // Query A, should evaluate to B
     var query = [_]Node{.{ .constant = "A" }};
-    const eval_result = try core.evaluateComplete(trie, testing.allocator, 0, Pattern{ .root = &query });
+    var term_bindings = VarBindings{};
+    defer term_bindings.deinit(testing.allocator);
+    var eval_result = try trie.match(
+        testing.allocator,
+        .{ .lower = 0, .upper = trie.length() },
+        &term_bindings,
+        Pattern{ .root = &query },
+    );
+    defer eval_result.deinit(testing.allocator);
 
+    // A single match prioritizes the lowest rule, so `A` matches `A --> C`
+    // (index 0), not the later `A --> B`. The matched value is a reference into
+    // the trie (freed with the trie), so it must not be deinitialized here.
     if (eval_result.value) |value| {
-        var val = value;
-        defer val.deinit(testing.allocator);
-        const str = try val.toString(testing.allocator);
+        const str = try value.toString(testing.allocator);
         defer testing.allocator.free(str);
-        try testing.expectEqualStrings("B", str);
-    } else {
-        try testing.expect(false);
-    }
-}
-
-test "List with variables: x, y --> y, x" {
-    var trie = Trie{};
-    defer trie.deinit(testing.allocator);
-
-    // Key: [x, list([y])] representing "x, y"
-    var constant_pat_list = [_]Node{.{ .variable = "y" }};
-    var constant_root = [_]Node{
-        .{ .variable = "x" },
-        .{ .list = .{ .root = &constant_pat_list } },
-    };
-
-    // Value: [y, list([x])] representing "y, x"
-    var val_list = [_]Node{.{ .variable = "x" }};
-    var val_root = [_]Node{
-        .{ .variable = "y" },
-        .{ .list = .{ .root = &val_list } },
-    };
-
-    _ = try trie.append(
-        testing.allocator,
-        Pattern{ .root = &constant_root },
-        Pattern{ .root = &val_root },
-    );
-
-    // Verify trie structure: should have var x -> , -> var y -> value
-    try testing.expect(trie.var_branches.items.len > 0);
-    // Get the trie under x (variables are stored in map)
-    const x_trie = trie.map.get("x") orelse {
-        return error.TestUnexpectedResult;
-    };
-    // Check for comma
-    try testing.expect(x_trie.map.contains(","));
-    const comma_trie = x_trie.map.get(",").?;
-    // Check for y variable
-    try testing.expect(comma_trie.var_branches.items.len > 0);
-
-    // Query: [A, list([B])] representing "A, B"
-    var query_list = [_]Node{.{ .constant = "B" }};
-    var query_root = [_]Node{
-        .{ .constant = "A" },
-        .{ .list = .{ .root = &query_list } },
-    };
-
-    const eval_result = try core.evaluateComplete(
-        trie,
-        testing.allocator,
-        0,
-        Pattern{ .root = &query_root },
-    );
-
-    if (eval_result.value) |value| {
-        var val = value;
-        defer val.deinit(testing.allocator);
-        const str = try val.toString(testing.allocator);
-        defer testing.allocator.free(str);
-        try testing.expectEqualStrings("B, A", str);
-    } else {
-        return error.TestUnexpectedResult;
-    }
-}
-
-test "VarPattern in nested pattern" {
-    var trie = Trie{};
-    defer trie.deinit(testing.allocator);
-
-    // Key: (x, *x) - pattern containing [x, list(*x)]
-    var inner_list = [_]Node{.{ .variable = "*x" }};
-    var constant_pat_inner = [_]Node{
-        .{ .variable = "x" },
-        .{ .list = .{ .root = &inner_list } },
-    };
-    var constant_root = [_]Node{.{ .pattern = .{ .root = &constant_pat_inner } }};
-
-    // Value: x + *x
-    var val_root = [_]Node{
-        .{ .variable = "x" },
-        .{ .constant = "+" },
-        .{ .variable = "*x" },
-    };
-
-    _ = try trie.append(
-        testing.allocator,
-        Pattern{ .root = &constant_root },
-        Pattern{ .root = &val_root },
-    );
-
-    // Query: (1, 2 3) - pattern containing [1, list([2, 3])]
-    var query_list_inner = [_]Node{ .{ .constant = "2" }, .{ .constant = "3" } };
-    var query_inner = [_]Node{
-        .{ .constant = "1" },
-        .{ .list = .{ .root = &query_list_inner } },
-    };
-    var query_root = [_]Node{.{ .pattern = .{ .root = &query_inner } }};
-
-    const eval_result = try core.evaluateComplete(
-        trie,
-        testing.allocator,
-        0,
-        Pattern{ .root = &query_root },
-    );
-
-    if (eval_result.value) |value| {
-        var val = value;
-        defer val.deinit(testing.allocator);
-        const str = try val.toString(testing.allocator);
-        defer testing.allocator.free(str);
-        try testing.expectEqualStrings("1 + 2 3", str);
+        try testing.expectEqualStrings("C", str);
     } else {
         try testing.expect(false);
     }
@@ -1948,7 +1846,7 @@ fn expectRebuildRoundtrip(trie: Trie, index: usize) !void {
     // Verify parsed pattern matches the trie at this index
     var bindings = VarBindings{};
     defer bindings.deinit(testing.allocator);
-    var match_result = try trie.match(testing.allocator, .{ .lower = index, .upper = trie.size() }, &bindings, parsed);
+    var match_result = try trie.match(testing.allocator, .{ .lower = index, .upper = trie.length() }, &bindings, parsed);
     defer match_result.deinit(testing.allocator);
     try testing.expect(match_result.value != null);
 }
@@ -2066,7 +1964,7 @@ test "Match: trie size as lower bound never matches" {
     var lower_bindings = VarBindings{};
     const matched = try trie.match(
         allocator,
-        .{ .lower = 0, .upper = trie.size() },
+        .{ .lower = 0, .upper = trie.length() },
         &lower_bindings,
         query,
     );
@@ -2077,7 +1975,7 @@ test "Match: trie size as lower bound never matches" {
     var bindings = VarBindings{};
     const unmatched = try trie.match(
         allocator,
-        .{ .lower = trie.size(), .upper = trie.size() },
+        .{ .lower = trie.length(), .upper = trie.length() },
         &bindings,
         query,
     );

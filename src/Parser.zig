@@ -400,12 +400,10 @@ fn parsePrec1(self: *Self, allocator: Allocator) Oom!Pattern {
 }
 
 fn parseOptionalPrec1(self: *Self, allocator: Allocator) Oom!Pattern {
-    if (!self.canStartExpr()) return .{};
     return self.parsePrec1(allocator);
 }
 
 fn parseOptionalPrec2(self: *Self, allocator: Allocator) Oom!Pattern {
-    if (!self.canStartExpr()) return .{};
     return self.parsePrec2(allocator);
 }
 
@@ -461,12 +459,10 @@ fn parsePrec3(self: *Self, allocator: Allocator) Oom!Pattern {
 }
 
 fn parseOptionalPrec3(self: *Self, allocator: Allocator) Oom!Pattern {
-    if (!self.canStartExpr()) return .{};
     return self.parsePrec3(allocator);
 }
 
 fn parseOptionalPrec4(self: *Self, allocator: Allocator) Oom!Pattern {
-    if (!self.canStartExpr()) return .{};
     return self.parsePrec4(allocator);
 }
 
@@ -496,7 +492,6 @@ fn parsePrec4(self: *Self, allocator: Allocator) Oom!Pattern {
 }
 
 fn parseOptionalPrec5(self: *Self, allocator: Allocator) Oom!Pattern {
-    if (!self.canStartExpr()) return .{};
     return self.parsePrec5(allocator);
 }
 
@@ -587,15 +582,6 @@ fn canStartTerm(self: Self) bool {
     };
 }
 
-fn canStartExpr(self: Self) bool {
-    return self.canStartTerm() or
-        self.current.tag == .match or
-        self.current.tag == .arrow or
-        self.current.tag == .long_match or
-        self.current.tag == .long_arrow or
-        self.current.tag == .symbol;
-}
-
 fn incrementHeight(p: Pattern) Pattern {
     return .{ .root = p.root, .height = p.height + 1 };
 }
@@ -620,27 +606,8 @@ pub fn parseTrie(allocator: Allocator, source: []const u8) Oom!Trie {
     return patternToTrie(allocator, pattern);
 }
 
-fn patternToTrie(allocator: Allocator, raw_pattern: Pattern) Oom!Trie {
+fn patternToTrie(allocator: Allocator, pattern: Pattern) Oom!Trie {
     var result = Trie{};
-
-    // Comments carry no semantics; drop them so trie keys/values stay clean.
-    var pattern = try raw_pattern.evaluate(allocator, comments.step);
-    defer pattern.deinit(allocator);
-
-    if (pattern.root.len == 0) return result;
-
-    // With right-associative parsing, multiple entries are structured as:
-    // "A -> 1; B -> 2" = [A, arrow([1]), list([B, arrow([2])])]
-    // We need to recursively process the .list nodes that represent semicolons/newlines.
-    //
-    // Semicolons/newlines vs commas:
-    // - Semicolons/newlines at prec 1 separate trie entries
-    // - Commas at prec 3 are part of pattern structure within entries
-    //
-    // Heuristic: A .list at the END of the root pattern is an entry separator.
-    // Commas within entries create .list nodes but they appear nested inside
-    // arrow/infix patterns, not at the end of the root.
-
     try appendEntryRecursive(&result, allocator, pattern);
     return result;
 }
@@ -947,7 +914,7 @@ test "empty trie: {}" {
     defer arena.deinit();
     const p = try parse(arena.allocator(), "{}");
     try expectNodes(p, &.{.trie});
-    try testing.expectEqual(@as(usize, 0), p.root[0].trie.size());
+    try testing.expectEqual(@as(usize, 0), p.root[0].trie.length());
 }
 
 test "single entry trie: { A -> B }" {
@@ -956,7 +923,7 @@ test "single entry trie: { A -> B }" {
     const p = try parse(arena.allocator(), "{ A -> B }");
     try expectNodes(p, &.{.trie});
     const t = p.root[0].trie;
-    try testing.expectEqual(@as(usize, 1), t.size());
+    try testing.expectEqual(@as(usize, 1), t.length());
     // Trie should have entry: A -> B
     try testing.expect(t.map.contains("A"));
 }
@@ -967,7 +934,7 @@ test "multi-constant entry trie: { A B -> C }" {
     const p = try parse(arena.allocator(), "{ A B -> C }");
     try expectNodes(p, &.{.trie});
     const t = p.root[0].trie;
-    try testing.expectEqual(@as(usize, 1), t.size());
+    try testing.expectEqual(@as(usize, 1), t.length());
     // Trie should have incrementHeight entry: A -> B -> value(C)
     try testing.expect(t.map.contains("A"));
     const a_trie = t.map.get("A").?;
@@ -980,7 +947,7 @@ test "multi-entry trie: { A -> B; C -> D }" {
     const p = try parse(arena.allocator(), "{ A -> B; C -> D }");
     try expectNodes(p, &.{.trie});
     const t = p.root[0].trie;
-    try testing.expectEqual(@as(usize, 2), t.size());
+    try testing.expectEqual(@as(usize, 2), t.length());
     try testing.expect(t.map.contains("A"));
     try testing.expect(t.map.contains("C"));
 }
@@ -991,7 +958,7 @@ test "trie with variable: { x -> x }" {
     const p = try parse(arena.allocator(), "{ x -> x }");
     try expectNodes(p, &.{.trie});
     const t = p.root[0].trie;
-    try testing.expectEqual(@as(usize, 1), t.size());
+    try testing.expectEqual(@as(usize, 1), t.length());
     try testing.expect(t.map.contains("x"));
 }
 
@@ -1001,7 +968,7 @@ test "trie constant-only entry: { A }" {
     const p = try parse(arena.allocator(), "{ A }");
     try expectNodes(p, &.{.trie});
     const t = p.root[0].trie;
-    try testing.expectEqual(@as(usize, 1), t.size());
+    try testing.expectEqual(@as(usize, 1), t.length());
     try testing.expect(t.map.contains("A"));
 }
 
@@ -1013,7 +980,7 @@ test "trie in expression: X { A -> B } Y" {
     try testing.expectEqualStrings("X", p.root[0].constant);
     try testing.expectEqualStrings("Y", p.root[2].constant);
     const t = p.root[1].trie;
-    try testing.expectEqual(@as(usize, 1), t.size());
+    try testing.expectEqual(@as(usize, 1), t.length());
 }
 
 test "trie with 3 entries: { A -> 1; B -> 2; C -> 3 }" {
@@ -1022,7 +989,7 @@ test "trie with 3 entries: { A -> 1; B -> 2; C -> 3 }" {
     const p = try parse(arena.allocator(), "{ A -> 1; B -> 2; C -> 3 }");
     try expectNodes(p, &.{.trie});
     const t = p.root[0].trie;
-    try testing.expectEqual(@as(usize, 3), t.size());
+    try testing.expectEqual(@as(usize, 3), t.length());
     try testing.expect(t.map.contains("A"));
     try testing.expect(t.map.contains("B"));
     try testing.expect(t.map.contains("C"));
@@ -1033,7 +1000,7 @@ test "parseTrie: comma with varpattern - A, *x --> *x" {
     defer arena.deinit();
     var trie = try parseTrie(arena.allocator(), "A, *x --> *x");
     // Trie structure: A -> , -> *x (var) -> value(*x)
-    try testing.expectEqual(@as(usize, 1), trie.size());
+    try testing.expectEqual(@as(usize, 1), trie.length());
     try testing.expect(trie.map.contains("A"));
     const a_trie = trie.map.get("A").?;
     try testing.expect(a_trie.map.contains(","));
@@ -1048,7 +1015,7 @@ test "parseTrie: mixed operators" {
     // Entry 1: list of 3 (A, B->C, D) --> E
     // Entry 2: F --> G
     const trie = try parseTrie(arena.allocator(), "A, B -> C, D --> E; F --> G");
-    try testing.expectEqual(@as(usize, 2), trie.size());
+    try testing.expectEqual(@as(usize, 2), trie.length());
     try testing.expect(trie.map.contains("A"));
     try testing.expect(trie.map.contains("F"));
 }
@@ -1116,7 +1083,7 @@ test "multiline: trie with newline entries" {
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
     const trie = try parseTrie(arena.allocator(), "A -> 1\nB -> 2");
-    try testing.expectEqual(@as(usize, 2), trie.size());
+    try testing.expectEqual(@as(usize, 2), trie.length());
     try testing.expect(trie.map.contains("A"));
     try testing.expect(trie.map.contains("B"));
 }
@@ -1126,7 +1093,7 @@ test "multiline: trie with trailing arrow has empty value" {
     defer arena.deinit();
     // Arrow at end of line has empty value, B is separate entry
     const trie = try parseTrie(arena.allocator(), "A ->\nB");
-    try testing.expectEqual(@as(usize, 2), trie.size());
+    try testing.expectEqual(@as(usize, 2), trie.length());
     try testing.expect(trie.map.contains("A"));
     try testing.expect(trie.map.contains("B"));
     // A's value should be empty
@@ -1166,7 +1133,7 @@ test "multiline: multi-line pattern without continuation" {
         \\Map fn (x, *xs) --> fn x, Map fn (*xs)
     ;
     const trie = try parseTrie(arena.allocator(), src);
-    try testing.expectEqual(@as(usize, 2), trie.size());
+    try testing.expectEqual(@as(usize, 2), trie.length());
     try testing.expect(trie.map.contains("Map"));
 }
 
@@ -1208,7 +1175,7 @@ fn parseAndMatch(allocator: std.mem.Allocator, trie: Trie, query_str: []const u8
     defer query.deinit(allocator);
     var term_bindings = trie_module.VarBindings{};
     defer term_bindings.deinit(allocator);
-    var result = try trie.match(allocator, .{ .upper = trie.size() }, &term_bindings, query);
+    var result = try trie.match(allocator, .{ .upper = trie.length() }, &term_bindings, query);
     defer result.deinit(allocator);
     if (result.value) |val| {
         return try val.copy(allocator);

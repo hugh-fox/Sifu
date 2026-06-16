@@ -17,9 +17,9 @@
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 
-const Parser = @import("../Parser.zig");
-const Trie = @import("../sifu/trie.zig").Trie;
-const interpreter = @import("../interpreter/core.zig");
+const Parser = @import("Parser.zig");
+const Trie = @import("sifu/trie.zig").Trie;
+const interpreter = @import("interpreter.zig");
 
 /// Compiles `program` (an ordinary Sifu expression, e.g. `1 + 2`) to a complete,
 /// runnable WAT module, by evaluating it against wat.sifu and wrapping the
@@ -37,8 +37,8 @@ pub fn compile(allocator: Allocator, trie: Trie, program: []const u8) ![]const u
     var pattern = try Parser.parse(allocator, program);
     defer pattern.deinit(allocator);
 
-    const eval = try interpreter.evaluateComplete(trie, allocator, 0, pattern);
-    var value = eval.value orelse return "";
+    const eval = try interpreter.evaluateComplete(trie, allocator, pattern);
+    var value = eval orelse return "";
     defer value.deinit(allocator);
 
     const folded = try value.toString(allocator);

@@ -21,15 +21,19 @@ fails.
 - Ast - one possible encoding of the intermediate representation required to parse Sifu semantics from text 
 - Trie - a trie of patterns, nested by braces like `{ F, G -> 2 }`. Simple
 tries form sets like `{1, 2, 3}` or hashmaps like `{F -> 1, G -> 2}`.
-- Match
-  1. an expression of the form `into : from` where
+- Match - the result of evaluating a match, consisting of selecting the lowest index that is equal or a variable and then rewriting its value with any bound variables.
+- Index - starting from 0, the nth top-level entry in a trie.
+- Height - the level of nesting in a pattern or trie. Used by the structurally recursive evaluator to guarantee termination while matching at the same index.
+- Length - the number of terms in a pattern, or entries in a trie.
+- Match Op: an expression of the form `into : from` where
     - *into* is the expression to match into
     - *from* is the trie to match from
-  2. the result of evaluating a match, consisting of selecting and rewriting.
+- Evaluate - repeated applications of a series of evaluators at each level of nesting.
+- Evaluator - a function from `Pattern, anytype -> Pattern` which stores context, like bounds, between calls. Typically involves repeated matches, and is responsible for termination (i.e., a lower bound evaluator sets its lower bound to each match index to ensure eventual termination).
 - Arrow
   1. an expression of the form `from -> into` where
     - from is the expression to rewrite from, which was matched
-    - into is the expression to rewrite into, which is the evaluation
+    - into is the expression to rewrite into, which is the result
   2. an encoding in a trie that represents an arrow after its insertion in
 that pattern, like the arrow in `{F -> 123}`
 - Value - the right side of an arrow, the part rewritten to
@@ -54,16 +58,13 @@ By default, after beginning with a trie at top level everything is assumed to be
 
 #### Verbs
 
-- Current scope - the set of all parent tries and the current but only the
-current expression and above
 - Select - the first phase during matching when looking up an expression that
 match keys in the trie
 - Evaluate - given an expression, match it against the current scope and rewrite
 to the first match's value. Repeats until no match, no value, or the value is
 equal to the current expression.
-- Return: a shorthand for "evaluate to after matching from a tag"
-- Function: a nickname for multi-term patterns that start with a constant (the
-"function" name) and take "arguments" as variables in its subsequent terms.
+- Function: a nickname for arrows that start with a constant (the
+"function" name) and take "arguments" as variables in its subsequent terms, and possibly rewrite them in their value.
 
 
 ---
@@ -79,14 +80,10 @@ By default, all expressions in Sifu form an app until either an infix or trie is
 
 ### Parentheses
 Parentheses do not specify precedence, they force their contained
-expression into a single-term Pattern. This has a sometimes surprising consequence:
-single-terms inside parentheses are singleton pattern instead of terms. While
+expression into a single-term Pattern. Single terms inside parentheses are a singleton pattern instead of a term. While
 this is weird for expressions, is makes sense for matching, and consistency in
 general. If the key `(Foo Bar)` doesn't match `Foo Bar`, then `(Foo)` shouldn't
 match `Foo`.
-
-(These technically make the language into a Lisp, but don't tell anyone, I want
-_some_ users)
 
 ### Infix Operators
 
@@ -159,7 +156,7 @@ their patterns but not evaluated.
 
 ## Semantics and Syntax Isomorphism
 
-All non-whitespace syntax in Sifu can be parsed into a Pattern, then pretty printed back into the original syntax (although it will be desugared). This implies that _all_ non-whitespace syntax has semantics, i.e. parentheses have meaning.
+All non-whitespace syntax in Sifu can be parsed into a Pattern, then pretty printed back into the original syntax (if the linter is run before input, these strings will be identical). This implies that _all_ non-whitespace syntax has semantics, i.e. parentheses have meaning.
 
 
 ## Type Checking as Pattern matching on Patterns
@@ -177,4 +174,4 @@ Then an expression like this should also have type `Bool`:
 ```
 And (False) (True)
 ```
-To type check it, we need to show each argument will match its parameter at least once. Both `False : Bool` and `True : Bool` match, so this program is checked.
+To type check it, we need to show each argument will match its parameter at least once. Both `False : Bool` and `True : Bool` match, so the match is checked. The resulting value must also do that same, and should be evaluated to see whether it is of type bool as well. If compiled, this step would be interpreted by the compiler at compile time, and then elided for optimization.

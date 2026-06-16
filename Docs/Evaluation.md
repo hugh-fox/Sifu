@@ -54,10 +54,13 @@ In Sifu, all forms of evaluation are essentially a repeated match and rewrite of
 
 # Specific Evaluators
 
+## Operators
 
-## Match
+This evaluator looks for an operator as is, but if it fails, it recurses on the lhs and rhs. Particularly useful for lists, where each element should be evaluated.
 
-A simple evaluator that just performs a single match and rewrite step, evaluating to the rewritten pattern and an index for which it was matched.
+## Match Step
+
+A simple step that just performs a single match and rewrite step, evaluating to the rewritten pattern and an index for which it was matched.
 
 ## Evaluate Complete
 
@@ -67,3 +70,13 @@ It supports structural and nested recursion.
 ## Evaluate Concatenative
 
 Like Evaluate-Complete, but adds a step for when a pattern doesn't match. It will then increment an index in that pattern and evaluate the rest, appending it to the original prefix which didn't match.
+
+---
+
+# Evaluators that Don't Use a Trie
+
+Some evaluators are "pure" in the sense that they don't need context, or their state is immutable.
+
+## Pattern
+
+The pattern evaluator takes no state. It just checks for `match` operators, and then if one is found, checks if the rhs is a trie. If so, it does an evaluation on the lhs against the rhs trie.

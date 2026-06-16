@@ -14,7 +14,7 @@ const ts = if (use_tree_sitter) @import("tree_sitter_parser.zig") else struct {}
 const trie_module = @import("sifu/trie.zig");
 const Pattern = trie_module.Pattern;
 const Trie = trie_module.Trie;
-const core = @import("interpreter/core.zig");
+const core = @import("interpreter.zig");
 const Streams = @import("streams.zig").Streams;
 
 // const Node = Pattern.Node;
@@ -69,7 +69,7 @@ export fn destroyTrie(trie_ptr: u32) void {
 /// equal to (or greater than) this never actually fired a rule (the search ran
 /// off the end), which lets the caller tell a real result from an echo.
 export fn trieSize(trie_ptr: u32) u32 {
-    return @intCast(@as(*Trie, @ptrFromInt(trie_ptr)).size());
+    return @intCast(@as(*Trie, @ptrFromInt(trie_ptr)).length());
 }
 
 export fn parse(ptr: [*]const u8, len: u32) u32 {
@@ -101,33 +101,39 @@ export fn matchStr(trie_ptr: u32, query_ptr: [*]const u8, query_len: u32, index:
     return matchPattern(trie_ptr, @intCast(@intFromPtr(query)), index);
 }
 
-/// Caller frees the result string, the result `pattern`, and the returned
-/// `MatchResult`. Performs one match + rewrite step on the already-parsed
-/// `pattern` starting from `index`, which lets chained evaluations skip
-/// re-parsing.
-export fn matchPattern(trie_ptr: u32, pattern_ptr: u32, index: u32) u32 {
-    const trie: *Trie = @ptrFromInt(trie_ptr);
-    const pattern: *Pattern = @ptrFromInt(pattern_ptr);
-    const result = core.evaluateMatch(trie.*, wasm_allocator, .{ .lower = index, .upper = trie.size() }, pattern.*) catch
-        panic("Match error");
-
-    const expr = result.value orelse
-        return 0; // no match
-
+/// Builds a heap `MatchResult` for `expr` matched at trie index `index`: a
+/// freshly allocated result string, a `*Pattern` clone for chaining, and the
+/// struct itself. The caller (js) frees all three.
+fn makeResult(expr: Pattern, index: usize) u32 {
     const expr_string = expr.toString(wasm_allocator) catch
-        panic("Writing match expr failed");
+        panic("Writing expr failed");
     const result_pattern = expr.clone(wasm_allocator) catch
-        panic("Cloning match pattern failed");
+        panic("Cloning pattern failed");
 
     const out = wasm_allocator.create(MatchResult) catch
         panic("Allocation of match result failed");
     out.* = .{
         .ptr = @intCast(@intFromPtr(expr_string.ptr)),
         .len = @intCast(expr_string.len),
-        .index = @intCast(result.index),
+        .index = @intCast(index),
         .pattern = @intCast(@intFromPtr(result_pattern)),
     };
     return @intCast(@intFromPtr(out));
+}
+
+/// Caller frees the result string, the result `pattern`, and the returned
+/// `MatchResult`. Performs one match + rewrite step on the already-parsed
+/// `pattern` starting from `index`, which lets chained evaluations skip
+/// re-parsing. Returns 0 when no rule matches.
+export fn matchPattern(trie_ptr: u32, pattern_ptr: u32, index: u32) u32 {
+    const trie: *Trie = @ptrFromInt(trie_ptr);
+    const pattern: *Pattern = @ptrFromInt(pattern_ptr);
+    var it = core.Iterator.initAt(trie.*, wasm_allocator, index, pattern.*) catch
+        panic("Match error");
+    defer it.deinit();
+    const stepped = (core.matchStep(&it) catch panic("Match error")) orelse
+        return 0; // no match
+    return makeResult(stepped, it.index);
 }
 
 /// Caller frees the result string, the result `pattern`, and the returned
@@ -142,30 +148,58 @@ export fn evalStr(trie_ptr: u32, query_ptr: [*]const u8, query_len: u32, index: 
 }
 
 /// Caller frees the result string, the result `pattern`, and the returned
-/// `MatchResult`. Evaluates the already-parsed `pattern` starting from `index`,
-/// which lets chained evaluations skip re-parsing.
+/// `MatchResult`. Fully evaluates the already-parsed `pattern` to a fixed point
+/// (a complete evaluation runs to completion, so the starting `index` is
+/// unused). The reported index is the trie size, signalling "no further step".
 export fn evalPattern(trie_ptr: u32, pattern_ptr: u32, index: u32) u32 {
+    _ = index;
     const trie: *Trie = @ptrFromInt(trie_ptr);
     const pattern: *Pattern = @ptrFromInt(pattern_ptr);
-    const result = core.evaluateComplete(trie.*, wasm_allocator, index, pattern.*) catch
-        panic("Eval error");
+    var result = (core.evaluateComplete(trie.*, wasm_allocator, pattern.*) catch
+        panic("Eval error")) orelse return 0;
+    defer result.deinit(wasm_allocator);
+    return makeResult(result, trie.length());
+}
 
-    const expr = result.value orelse
-        return 0; // no match
-    const expr_string = expr.toString(wasm_allocator) catch
-        panic("Writing eval expr failed");
-    const result_pattern = expr.clone(wasm_allocator) catch
-        panic("Cloning eval pattern failed");
+/// Caller frees the result string, the result `pattern`, and the returned
+/// `MatchResult`. Parses `query` then creates a stepping `iterator`.
+export fn iteratorStr(trie_ptr: u32, query_ptr: [*]const u8, query_len: u32) u32 {
+    const query = wasm_allocator.create(Pattern) catch
+        panic("Allocation of query failed");
+    defer query.destroy(wasm_allocator);
+    query.* = Parser.parse(wasm_allocator, query_ptr[0..query_len]) catch
+        panic("Error parsing query");
+    return iterator(trie_ptr, @intCast(@intFromPtr(query)));
+}
 
-    const out = wasm_allocator.create(MatchResult) catch
-        panic("Allocation of match result failed");
-    out.* = .{
-        .ptr = @intCast(@intFromPtr(expr_string.ptr)),
-        .len = @intCast(expr_string.len),
-        .index = @intCast(result.index),
-        .pattern = @intCast(@intFromPtr(result_pattern)),
-    };
-    return @intCast(@intFromPtr(out));
+/// Creates a stepping evaluation `Iterator` over the already-parsed `pattern`,
+/// returning a heap pointer the caller drives with `iteratorNext` and frees with
+/// `destroyIterator`. The iterator copies `pattern`, so the caller still owns it.
+export fn iterator(trie_ptr: u32, pattern_ptr: u32) u32 {
+    const trie: *Trie = @ptrFromInt(trie_ptr);
+    const pattern: *Pattern = @ptrFromInt(pattern_ptr);
+    const it = wasm_allocator.create(core.Iterator) catch
+        panic("Allocation of iterator failed");
+    it.* = core.Iterator.init(trie.*, wasm_allocator, pattern.*) catch
+        panic("Iterator init failed");
+    return @intCast(@intFromPtr(it));
+}
+
+/// Advances an `iterator` by one top-level match/rewrite step, returning a
+/// `MatchResult` (the rewritten expression and the trie index it matched at) or
+/// 0 once evaluation has settled. The caller frees the result as for `match`.
+export fn iteratorNext(iter_ptr: u32) u32 {
+    const it: *core.Iterator = @ptrFromInt(iter_ptr);
+    const stepped = (core.matchStep(it) catch panic("Iterator step error")) orelse
+        return 0; // settled
+    return makeResult(stepped, it.index);
+}
+
+/// Frees an `Iterator` previously returned by `iterator`/`iteratorStr`.
+export fn destroyIterator(iter_ptr: u32) void {
+    const it: *core.Iterator = @ptrFromInt(iter_ptr);
+    it.deinit();
+    wasm_allocator.destroy(it);
 }
 
 // Allocator `len` bytes using the wasm allocator
