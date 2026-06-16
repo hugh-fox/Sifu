@@ -127,6 +127,8 @@ fn writeAllTimeout(file: Io.File, bytes: []const u8, deadline: Io.Timeout) !void
 /// stream (stdin, stdout, stderr) shares a single deadline, so a hung child is
 /// always killed rather than blocking the test forever.
 fn runSifu(allocator: Allocator, trie_content: []const u8, query: []const u8) ![]u8 {
+    // This exe is built with -DDetectLeaks so the integration tests catch leaks
+    // and use-after-free in the evaluator.
     const sifu_exe = @import("integration_options").sifu_exe;
 
     var child = try std.process.spawn(testing.io, .{

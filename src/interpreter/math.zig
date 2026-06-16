@@ -12,7 +12,7 @@
 //! This is a known limitation of this MVP.
 //!
 //! Returns null when nothing folded; otherwise an owned single-literal pattern.
-//! The bytes of any computed literal are allocated from `ctx.allocator` and outlive the call (they
+//! The bytes of any computed literal are allocated from the passed allocator and outlive the call (they
 //! are not freed by `deinit`, matching how the interpreter treats constant text), so
 //! drive this with an arena or otherwise own those bytes.
 
@@ -28,8 +28,7 @@ const Pattern = @import("../sifu/pattern.zig").Pattern;
 /// unchanged. Recursion into nested patterns is the driver's job
 /// (`core.evaluate`), so nested expressions are already folded by the time
 /// this runs at a level.
-pub fn step(pattern: Pattern, ctx: anytype) Allocator.Error!?Pattern {
-    const allocator = ctx.allocator;
+pub fn step(pattern: Pattern, allocator: Allocator) Allocator.Error!?Pattern {
     // A top-level arithmetic chain looks like `operand (op operand)*`, i.e. the
     // second node is a math infix. Fold the whole root into one literal.
     if (pattern.root.len >= 2 and isMathOp(pattern.root[1])) {
@@ -104,7 +103,7 @@ const core = @import("../interpreter.zig");
 /// caller's arena so computed literals are reclaimed in bulk.
 fn evalToString(allocator: Allocator, source: []const u8) ![]const u8 {
     const pattern = try Parser.parse(allocator, source);
-    const folded = try core.evaluatePure(allocator, pattern, step);
+    const folded = try core.evaluateMath(allocator, pattern);
     return folded.toString(allocator);
 }
 

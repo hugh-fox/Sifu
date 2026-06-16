@@ -1,345 +1,92 @@
 const std = @import("std");
 const Allocator = std.mem.Allocator;
-const ArrayList = std.ArrayList;
-const debug = std.log.debug;
-const panic = std.debug.panic;
 
 const Node = @import("sifu/node.zig").Node;
 const Pattern = @import("sifu/pattern.zig").Pattern;
-const trie_module = @import("sifu/trie.zig");
-const Trie = trie_module.Trie;
-const Bound = trie_module.Bound;
-const VarBindings = trie_module.VarBindings;
+const Trie = @import("sifu/trie.zig").Trie;
 const comments_interpreter = @import("interpreter/comments.zig");
 const math_interpreter = @import("interpreter/math.zig");
 const string_interpreter = @import("interpreter/string.zig");
+const matcher = @import("interpreter/matcher.zig");
 
-/// Rewrites all variable captures into the matched expression. Copies any
-/// variables in node if they are keys in bindings with their values. If
-/// there are no matches in bindings, this function is equivalent to copy.
-pub fn rewrite(
-    allocator: Allocator,
-    pattern: Pattern,
-    term_bindings: *const VarBindings,
-) Allocator.Error!Pattern {
-    var result = ArrayList(Node).empty;
-    errdefer result.deinit(allocator);
-    var max_child: usize = 0;
+pub const MatchCtx = matcher.MatchCtx;
+pub const MatchEvaluator = matcher.MatchEvaluator;
+pub const matchStep = matcher.matchStep;
+pub const initMatch = matcher.initMatch;
+pub const initMatchAt = matcher.initMatchAt;
+pub const rewrite = matcher.rewrite;
+pub const evaluateBounded = matcher.evaluateBounded;
 
-    for (pattern.root) |node| switch (node) {
-        .constant => |constant| try result.append(allocator, Node.ofConstant(constant)),
-        .variable => |variable| {
-            const is_var_pattern = variable.len > 0 and variable[0] == '*';
-            if (is_var_pattern) {
-                if (term_bindings.get(variable)) |sub_pattern| {
-                    debug("Var pattern found: {s}", .{variable});
-                    for (sub_pattern.pattern.root) |sub_node| {
-                        const copied = try sub_node.copy(allocator);
-                        max_child = @max(max_child, copied.height());
-                        try result.append(allocator, copied);
-                    }
-                } else try result.append(allocator, node);
-            } else {
-                if (term_bindings.get(variable)) |bound_node| {
-                    debug("Var found: {s}", .{variable});
-                    const copied = try bound_node.copy(allocator);
-                    max_child = @max(max_child, copied.height());
-                    try result.append(allocator, copied);
-                } else {
-                    debug("Var not found", .{});
-                    try result.append(allocator, node);
-                }
-            }
-        },
-        inline .pattern, .arrow, .match, .list => |nested, tag| {
-            const rewritten = try rewrite(allocator, nested, term_bindings);
-            const wrapped = Pattern{ .root = rewritten.root, .height = rewritten.height + 1 };
-            max_child = @max(max_child, wrapped.height);
-            try result.append(allocator, @unionInit(Node, @tagName(tag), wrapped));
-        },
-        .infix => |inf| {
-            const rewritten = try rewrite(allocator, inf.rhs, term_bindings);
-            const wrapped = Pattern{ .root = rewritten.root, .height = rewritten.height + 1 };
-            max_child = @max(max_child, wrapped.height);
-            try result.append(allocator, Node{ .infix = .{ .op = inf.op, .rhs = wrapped } });
-        },
-        // A trie literal carries no rewritable variables of its own; copy it
-        // through so a value like `A : {trie}` survives the rewrite intact.
-        .trie => try result.append(allocator, try node.copy(allocator)),
-        // Comments are kept in the trie (so its print stays layout-faithful) but
-        // are inert: drop them from a rewritten value so they never reach output.
-        .comment => {},
-        else => panic("unimplemented", .{}),
-    };
-
-    const nodes = try result.toOwnedSlice(allocator);
-    return Pattern{ .root = nodes, .height = max_child };
-}
-
-/// Adapt a trie-free `step` (`fn (Pattern, ctx) Allocator.Error!?Pattern`, null
-/// when nothing changed) into the unified driver's step interface
-/// (`fn (*Iterator) Allocator.Error!?Pattern`). The pure step only needs the
-/// allocator; it reads and replaces `it.current` and ignores the trie/bounds.
-fn pureStep(comptime f: anytype) fn (*Iterator) Allocator.Error!?Pattern {
+pub fn Evaluator(
+    comptime Ctx: type,
+    comptime stepFn: fn (Pattern, Allocator, *Ctx) Allocator.Error!?Pattern,
+) type {
     return struct {
-        fn step(it: *Iterator) Allocator.Error!?Pattern {
-            const next = (try f(it.current, .{ .allocator = it.allocator })) orelse
-                return null;
-            it.current.deinit(it.allocator);
-            it.current = next;
-            return it.current;
-        }
-    }.step;
-}
-
-/// Drive a pure (trie-free) `step` over every level of a pattern using the
-/// single `evaluate` driver (with an empty trie, so no matching happens). A
-/// pure step is `fn (Pattern, ctx) Allocator.Error!?Pattern`, returning null
-/// when it changed nothing. Caller owns the returned pattern.
-pub fn evaluatePure(
-    allocator: Allocator,
-    pattern: Pattern,
-    comptime step: anytype,
-) Allocator.Error!Pattern {
-    var it = try Iterator.init(Trie{}, allocator, pattern);
-    defer it.deinit();
-    return evaluate(&it, pureStep(step), false);
-}
-
-/// Bound/index bookkeeping for trie evaluation. The iterator owns the `current`
-/// pattern and the lower/upper bounds; it does *not* perform matching. Each
-/// `next` only reports the index to match from (or null once the level has
-/// settled); the actual match/rewrite is the `matchStep` evaluator, which calls
-/// back into `advance` to move the bounds. The recursive `evaluate` drives this
-/// to a fixed point and spawns `child` iterators for nested patterns; wasm
-/// drives `matchStep` directly to expose each step of evaluation.
-pub const Iterator = struct {
-    trie: Trie,
-    allocator: Allocator,
-    bound: Bound,
-    start_lower: usize = 0,
-    index: usize = 0,
-    matched: bool = false,
-    current: Pattern = .{},
-
-    pub fn init(trie: Trie, allocator: Allocator, pattern: Pattern) Allocator.Error!Iterator {
-        return initAt(trie, allocator, 0, pattern);
-    }
-
-    pub fn initAt(
-        trie: Trie,
         allocator: Allocator,
-        lower: usize,
-        pattern: Pattern,
-    ) Allocator.Error!Iterator {
-        return .{
-            .trie = trie,
-            .allocator = allocator,
-            .bound = .{ .lower = lower, .upper = trie.length() },
-            .start_lower = lower,
-            .current = try pattern.copy(allocator),
-        };
-    }
+        current: Pattern = .{},
+        ctx: Ctx,
 
-    pub fn deinit(self: *Iterator) void {
-        self.current.deinit(self.allocator);
-    }
+        const Self = @This();
 
-    /// The index to match from on this step, or null once the level has settled
-    /// (the lower bound reached the upper). This only tracks position; matching
-    /// is `matchStep`'s job.
-    pub fn next(self: *Iterator) ?usize {
-        if (self.bound.lower >= self.bound.upper)
-            return null;
-        return self.bound.lower;
-    }
+        /// Fully evaluate `current` against the context and return the result.
+        /// Takes ownership of `current` (it is left empty), so the result is the
+        /// caller's; `.ctx` remains readable for the final bookkeeping.
+        pub fn next(self: *Self) Allocator.Error!Pattern {
+            return evaluate(self);
+        }
 
-    /// Record a match at `match_index`, raising the lower bound past the matched
-    /// rule so it cannot fire again at this level. Structural recursion (rescanning
-    /// a shrunk term against earlier rules) is handled by `child` on descent, not
-    /// by rescanning here: rescanning the top level from a lower bound re-opens
-    /// growing rules and loops on cyclic programs (e.g. `A -> (A); (A) -> A`).
-    fn advance(self: *Iterator, match_index: usize) void {
-        self.index = match_index;
-        self.matched = true;
-        debug("Iterator.advance: at index {}", .{match_index});
-        self.bound = .{ .lower = match_index + 1, .upper = self.bound.upper };
-    }
+        /// One atomic rewrite. Returns the new `current` (owned by the iterator)
+        /// or null once this level has settled (nothing changed). The atomic
+        /// step does not free the old `current`; that is done here on replace.
+        /// This is the unit `evaluate` loops to a fixed point.
+        pub fn step(self: *Self) Allocator.Error!?Pattern {
+            const stepped = (try stepFn(self.current, self.allocator, &self.ctx)) orelse
+                return null;
+            self.current.deinit(self.allocator);
+            self.current = stepped;
+            return self.current;
+        }
 
-    fn child(
-        self: Iterator,
-        sub: Pattern,
-        content_height: usize,
-        pattern_height: usize,
-    ) Allocator.Error!Iterator {
-        const structural_upper = if (self.matched) self.index + 1 else self.bound.upper;
-        const nested_upper = if (self.matched) self.index else self.bound.upper;
-        const recurse_upper = if (content_height < pattern_height) structural_upper else nested_upper;
-        // `sub.height` carries the wrapping level's `+1`; the child evaluates the
-        // unwrapped content, so reset its height to `content_height`. Otherwise
-        // the recursive `evaluate` reads a `pattern_height` one too high and a
-        // same-height rewrite (e.g. `A -> (A)`) looks structural and loops.
-        var current = try sub.copy(self.allocator);
-        current.height = content_height;
-        return .{
-            .trie = self.trie,
-            .allocator = self.allocator,
-            .bound = .{ .lower = 0, .upper = recurse_upper },
-            .current = current,
-        };
-    }
-};
-
-/// One top-level trie match/rewrite step driven by `it`. Reads the index to
-/// match from via `it.next`, matches `it.current` against the trie there, and
-/// on success rewrites `it.current` and advances the iterator's bounds.
-/// Returns the new `current` (owned by `it`) or null when nothing matched and
-/// the level has settled. Kept separate from the iterator so the iterator only
-/// tracks position; this is the trie-matching evaluator.
-pub fn matchStep(it: *Iterator) Allocator.Error!?Pattern {
-    const allocator = it.allocator;
-    if (it.next() == null) return null;
-
-    // A bare `{trie}` literal is a settled value, not a query term: matching it
-    // against the rule trie is meaningless and crashes the trie matcher. Leave
-    // it as-is so a label resolved to its bound trie (e.g. `T1 -> {A, B}`) stops.
-    if (it.current.root.len == 1 and it.current.root[0] == .trie) return null;
-
-    var term_bindings = VarBindings{};
-    defer term_bindings.deinit(allocator);
-    var match = try it.trie.match(allocator, it.bound, &term_bindings, it.current);
-    defer match.deinit(allocator);
-    const matched_value = match.value orelse return null;
-
-    const rewritten = try rewrite(allocator, matched_value, &term_bindings);
-    it.advance(match.match_index);
-
-    it.current.deinit(allocator);
-    it.current = rewritten;
-    return it.current;
+        pub fn deinit(self: *Self) void {
+            self.current.deinit(self.allocator);
+        }
+    };
 }
 
-/// The single evaluation driver. Settles the current level by running `step`
-/// to a fixed point, then recurses into every child with the same step. `step`
-/// transforms `it.current` in place and returns the new value (or null when
-/// nothing changed). When `trie_transforms` is set (the `matchStep` matcher),
-/// the level also gets the trie-specific transforms: inline-trie `lhs : {trie}`
-/// matching and operator/list head recursion. Pure steps (comments, strings)
-/// pass `false` and ignore the iterator's trie and bounds entirely.
-fn evaluate(
-    it: *Iterator,
-    comptime step: fn (*Iterator) Allocator.Error!?Pattern,
-    comptime trie_transforms: bool,
-) Allocator.Error!Pattern {
+fn evaluate(it: anytype) Allocator.Error!Pattern {
+    const Eval = @TypeOf(it.*);
     const allocator = it.allocator;
     const pattern_height = it.current.height;
-    it.start_lower = it.bound.lower;
 
     // Settle this level: run the step until it reports no more change.
-    while (try step(it)) |_| {}
+    while (try it.step()) |_| {}
 
-    // Take ownership of the settled pattern; the iterator keeps its bookkeeping
-    // (index, matched, bound) so `child` can still derive recursion bounds.
+    // Take ownership of the settled pattern; the context keeps its bookkeeping
+    // so `child` can still derive recursion bounds.
     var current = it.current;
     it.current = .{};
     errdefer current.deinit(allocator);
 
-    // Pattern match against an inline trie: `lhs : {trie}`. The trailing match
-    // node carries its own trie, so the lhs (the prefix before it) is evaluated
-    // against that trie using this same recursive evaluator rather than the
-    // iterator's trie. A lhs that isn't a member evaluates to the empty pattern.
-    if (trie_transforms and
-        current.root.len >= 2 and current.root[current.root.len - 1] == .match)
-    {
-        const raw_rhs = current.root[current.root.len - 1].match;
-        // A label rhs (e.g. `T1`) is resolved against the iterator's trie first
-        // so it becomes its bound `{trie}` before the membership check; a literal
-        // `{trie}` rhs is already in hand and is used directly.
-        const is_literal_trie = raw_rhs.root.len == 1 and raw_rhs.root[0] == .trie;
-        var resolved: ?Pattern = null;
-        if (!is_literal_trie) {
-            var rhs_it = Iterator{
-                .trie = it.trie,
-                .allocator = allocator,
-                .bound = .{ .lower = 0, .upper = it.bound.upper },
-                .current = try raw_rhs.copy(allocator),
-            };
-            errdefer rhs_it.deinit();
-            resolved = try evaluate(&rhs_it, step, trie_transforms);
-        }
-        defer if (resolved) |*r| r.deinit(allocator);
-        const rhs = resolved orelse raw_rhs;
-        if (rhs.root.len == 1 and rhs.root[0] == .trie) {
-            const inline_trie = rhs.root[0].trie;
-            const lhs = Pattern{
-                .root = current.root[0 .. current.root.len - 1],
-                .height = contentHeight(current.root[0 .. current.root.len - 1]),
-            };
-            // Membership: a full match of the lhs against the trie.
-            var bindings = VarBindings{};
-            defer bindings.deinit(allocator);
-            var matched = try inline_trie.match(allocator, .{ .upper = inline_trie.length() }, &bindings, lhs);
-            defer matched.deinit(allocator);
-            var out = if (matched.len != lhs.root.len)
-                Pattern{ .root = &.{}, .height = 0 }
-            else blk: {
-                var lhs_it = try Iterator.init(inline_trie, allocator, lhs);
-                defer lhs_it.deinit();
-                break :blk try evaluate(&lhs_it, step, trie_transforms);
-            };
-            errdefer out.deinit(allocator);
-            current.deinit(allocator);
-            return out;
-        }
-    }
-
-    // Operator recursion: when a top-level list operator survives the match
-    // loop, the prefix before it (the operator's lhs) is a head that no whole
-    // rule consumed, so evaluate it as its own sub-expression and splice the
-    // result back ahead of the tail. The tail itself is the nested list child
-    // handled by the recursion below.
-    if (trie_transforms) if (firstList(current.root)) |list_pos| {
-        const head = Pattern{
-            .root = current.root[0..list_pos],
-            .height = contentHeight(current.root[0..list_pos]),
-        };
-        var head_it = Iterator{
-            .trie = it.trie,
-            .allocator = allocator,
-            .bound = .{ .lower = 0, .upper = it.bound.upper },
-            .current = try head.copy(allocator),
-        };
-        errdefer head_it.deinit();
-        var reduced = try evaluate(&head_it, step, trie_transforms);
-        if (reduced.eql(head)) {
-            reduced.deinit(allocator);
-        } else {
-            const tail = current.root[list_pos..];
-            const spliced = try allocator.alloc(Node, reduced.root.len + tail.len);
-            @memcpy(spliced[0..reduced.root.len], reduced.root);
-            @memcpy(spliced[reduced.root.len..], tail);
-            for (current.root[0..list_pos]) |*node| @constCast(node).deinit(allocator);
-            allocator.free(current.root);
-            allocator.free(reduced.root);
-            current.root = spliced;
-        }
-    };
+    // Hand the level to the context's structural transforms. A returned value is
+    // the final result (recursion stops); null means descend into `current`,
+    // which `transform` may have mutated in place.
+    if (try it.ctx.transform(&current, allocator)) |result| return result;
 
     var max_height: usize = 0;
     for (current.root) |*node| switch (node.*) {
         .infix => |inf| {
-            var child_it = try it.child(inf.rhs, contentHeight(inf.rhs.root), pattern_height);
+            var child_it = try spawnChild(Eval, it.ctx, inf.rhs, pattern_height, allocator);
             errdefer child_it.deinit();
-            var rhs = try evaluate(&child_it, step, trie_transforms);
+            var rhs = try evaluate(&child_it);
             rhs.height += 1;
             max_height = @max(max_height, rhs.height);
             @constCast(&inf.rhs).deinit(allocator);
             node.* = Node{ .infix = .{ .op = inf.op, .rhs = rhs } };
         },
         inline .pattern, .match, .arrow, .list, .newline => |sub, tag| {
-            var child_it = try it.child(sub, contentHeight(sub.root), pattern_height);
+            var child_it = try spawnChild(Eval, it.ctx, sub, pattern_height, allocator);
             errdefer child_it.deinit();
-            var evaluated = try evaluate(&child_it, step, trie_transforms);
+            var evaluated = try evaluate(&child_it);
             evaluated.height += 1;
             max_height = @max(max_height, evaluated.height);
             @constCast(&sub).deinit(allocator);
@@ -351,26 +98,87 @@ fn evaluate(
     return current;
 }
 
-fn contentHeight(root: []const Node) usize {
+/// Build a child iterator of type `Eval` for descending into `sub`. The child's
+/// context comes from the parent's `ctx.child` (which derives recursion bounds
+/// from `content_height`/`pattern_height`); its `current` is a copy of `sub`
+/// reset to the unwrapped `content_height` so the recursion reads the right
+/// height. Identical preparation for every context, so it is hoisted here.
+fn spawnChild(
+    comptime Eval: type,
+    parent_ctx: anytype,
+    sub: Pattern,
+    pattern_height: usize,
+    allocator: Allocator,
+) Allocator.Error!Eval {
+    const content_height = contentHeight(sub.root);
+    var current = try sub.copy(allocator);
+    current.height = content_height;
+    return .{
+        .allocator = allocator,
+        .current = current,
+        .ctx = parent_ctx.child(content_height, pattern_height),
+    };
+}
+
+/// The height of a level's content: the max height over its nodes, with no
+/// wrapping `+1`. Used by `evaluate` (and the matcher) to set a child's height
+/// when descending into it as its own root.
+pub fn contentHeight(root: []const Node) usize {
     var height: usize = 0;
     for (root) |node| height = @max(height, node.height());
     return height;
 }
 
-fn firstList(root: []const Node) ?usize {
-    for (root, 0..) |node, i|
-        if (node == .list) return if (i > 0) i else null;
-    return null;
+/// The context for a pure (non-trie) pass: no match bounds, no early-finish
+/// transform. It only satisfies the `evaluate` driver's interface so the pure
+/// `step` functions can reuse the same node-walk as the trie matcher.
+const PureCtx = struct {
+    pub fn transform(_: *PureCtx, _: *Pattern, _: Allocator) Allocator.Error!?Pattern {
+        return null; // pure passes never finalize early; always recurse
+    }
+    pub fn child(_: PureCtx, _: usize, _: usize) PureCtx {
+        return .{};
+    }
+};
+
+/// Adapt a pure `step` (which ignores any context) to the `Evaluator` step
+/// signature, which threads a `*PureCtx`.
+fn pureStep(
+    comptime step: fn (Pattern, Allocator) Allocator.Error!?Pattern,
+) fn (Pattern, Allocator, *PureCtx) Allocator.Error!?Pattern {
+    return struct {
+        fn f(p: Pattern, a: Allocator, _: *PureCtx) Allocator.Error!?Pattern {
+            return step(p, a);
+        }
+    }.f;
 }
 
-pub fn evaluateBounded(
-    trie: Trie,
+/// Run a pure `step` over `pattern` to a fixed point at every level, through the
+/// same node-walk the trie matcher uses.
+fn evaluatePure(
     allocator: Allocator,
     pattern: Pattern,
+    comptime step: fn (Pattern, Allocator) Allocator.Error!?Pattern,
 ) Allocator.Error!Pattern {
-    var it = try Iterator.init(trie, allocator, pattern);
+    var it = Evaluator(PureCtx, pureStep(step)){
+        .allocator = allocator,
+        .current = try pattern.copy(allocator),
+        .ctx = .{},
+    };
     defer it.deinit();
-    return evaluate(&it, matchStep, true);
+    return it.next();
+}
+
+pub fn evaluateComments(allocator: Allocator, pattern: Pattern) Allocator.Error!Pattern {
+    return evaluatePure(allocator, pattern, comments_interpreter.step);
+}
+
+pub fn evaluateMath(allocator: Allocator, pattern: Pattern) Allocator.Error!Pattern {
+    return evaluatePure(allocator, pattern, math_interpreter.step);
+}
+
+pub fn evaluateStrings(allocator: Allocator, pattern: Pattern) Allocator.Error!Pattern {
+    return evaluatePure(allocator, pattern, string_interpreter.step);
 }
 
 pub fn evaluateComplete(
@@ -379,7 +187,7 @@ pub fn evaluateComplete(
     pattern: Pattern,
 ) Allocator.Error!?Pattern {
     // Strip comments from the query so they never reach matching or output.
-    var stripped = try evaluatePure(allocator, pattern, comments_interpreter.step);
+    var stripped = try evaluateComments(allocator, pattern);
     defer stripped.deinit(allocator);
 
     // Trie-driven match/rewrite evaluation (structural and nested recursion,
@@ -388,16 +196,18 @@ pub fn evaluateComplete(
     defer evaluated.deinit(allocator);
 
     // Fold any arithmetic expressions in the result.
-    var folded_math = try evaluatePure(allocator, evaluated, math_interpreter.step);
+    var folded_math = try evaluateMath(allocator, evaluated);
     defer folded_math.deinit(allocator);
 
     // Fold any string concatenations in the result.
-    return try evaluatePure(allocator, folded_math, string_interpreter.step);
+    return try evaluateStrings(allocator, folded_math);
 }
 
 const testing = std.testing;
 const ArenaAllocator = std.heap.ArenaAllocator;
 const Parser = @import("Parser.zig");
+// Test-only: the pipeline tests below assert on the trie matcher's bindings.
+const VarBindings = @import("sifu/trie.zig").VarBindings;
 
 fn expectEval(allocator: Allocator, trie: Trie, query_str: []const u8, expected_str: []const u8) !void {
     var query = try Parser.parse(allocator, query_str);
@@ -504,56 +314,6 @@ test "evaluateComplete: VarPattern in nested pattern" {
     var trie = try Parser.parseTrie(testing.allocator, "(x, *x) --> x + *x");
     defer trie.deinit(testing.allocator);
     try expectEval(testing.allocator, trie, "(A, B C)", "A + B C");
-}
-
-test "rewrite: simple variable substitution" {
-    var trie = try Parser.parseTrie(testing.allocator, "x --> x");
-    defer trie.deinit(testing.allocator);
-
-    // Value pattern is [variable(x)]
-    const value_pattern = trie.getIndex(0);
-
-    // Set up bindings: x = A
-    var bindings = VarBindings{};
-    defer bindings.deinit(testing.allocator);
-    try bindings.put(testing.allocator, "x", Node{ .constant = "A" });
-
-    // Rewrite should replace x with A
-    var result = try rewrite(testing.allocator, value_pattern, &bindings);
-    defer result.deinit(testing.allocator);
-
-    try testing.expectEqual(@as(usize, 1), result.root.len);
-    try testing.expect(result.root[0] == .constant);
-    try testing.expectEqualStrings("A", result.root[0].constant);
-}
-
-test "rewrite: nested list with variables" {
-    var trie = try Parser.parseTrie(testing.allocator, "x, y --> y, x");
-    defer trie.deinit(testing.allocator);
-
-    // Value pattern is [variable(y), list([variable(x)])]
-    const value_pattern = trie.getIndex(0);
-    try testing.expectEqual(@as(usize, 2), value_pattern.root.len);
-    try testing.expect(value_pattern.root[0] == .variable);
-    try testing.expect(value_pattern.root[1] == .list);
-
-    // Set up bindings: x = A, y = B
-    var bindings = VarBindings{};
-    defer bindings.deinit(testing.allocator);
-    try bindings.put(testing.allocator, "x", Node{ .constant = "A" });
-    try bindings.put(testing.allocator, "y", Node{ .constant = "B" });
-
-    // Rewrite should produce [B, list([A])]
-    var result = try rewrite(testing.allocator, value_pattern, &bindings);
-    defer result.deinit(testing.allocator);
-
-    try testing.expectEqual(@as(usize, 2), result.root.len);
-    try testing.expect(result.root[0] == .constant);
-    try testing.expectEqualStrings("B", result.root[0].constant);
-    try testing.expect(result.root[1] == .list);
-    try testing.expectEqual(@as(usize, 1), result.root[1].list.root.len);
-    try testing.expect(result.root[1].list.root[0] == .constant);
-    try testing.expectEqualStrings("A", result.root[1].list.root[0].constant);
 }
 
 test "evaluateComplete: step by step x, y --> y, x" {

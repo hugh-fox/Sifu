@@ -10,8 +10,7 @@ const Pattern = @import("../sifu/pattern.zig").Pattern;
 pub const concat_op = "+";
 
 /// Placeholder; memory allocation is not handled.
-pub fn step(pattern: Pattern, ctx: anytype) Allocator.Error!?Pattern {
-    const allocator = ctx.allocator;
+pub fn step(pattern: Pattern, allocator: Allocator) Allocator.Error!?Pattern {
     // A top-level concatenation looks like `operand (+ operand)*`, i.e. the
     // second node is a `+` infix. Fold the whole root into one literal.
     if (pattern.root.len >= 2 and isConcat(pattern.root[1])) {
@@ -94,7 +93,7 @@ const core = @import("../interpreter.zig");
 /// caller's arena so computed literals are reclaimed in bulk.
 fn evalToString(allocator: Allocator, source: []const u8) ![]const u8 {
     const pattern = try Parser.parse(allocator, source);
-    const folded = try core.evaluatePure(allocator, pattern, step);
+    const folded = try core.evaluateStrings(allocator, pattern);
     return folded.toString(allocator);
 }
 
@@ -168,7 +167,7 @@ test "rule + concat assembles an instruction" {
     const rewritten = try core.evaluateComplete(trie, allocator, query) orelse
         return error.NoEvalResult;
 
-    const folded = try core.evaluatePure(allocator, rewritten, step);
+    const folded = try core.evaluateStrings(allocator, rewritten);
     const out = try folded.toString(allocator);
     try testing.expectEqualStrings("\"i32.const 42\"", out);
 }

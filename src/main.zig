@@ -101,8 +101,14 @@ pub fn main(init: std.process.Init) !void {
     var trie = Trie{};
     defer trie.deinit(allocator);
 
+    // The trie borrows its key/constant bytes from this source text, so the
+    // buffer holding it must outlive the trie (freed after the deinit above,
+    // which runs first by LIFO).
+    var trie_src = std.Io.Writer.Allocating.init(allocator);
+    defer trie_src.deinit();
+
     if (stdin_is_piped)
-        try loadTrie(allocator, streams, &trie);
+        trie_src = try loadTrie(allocator, streams, &trie);
 
     // Compile mode: evaluate the expression against the piped `wat.sifu` rules
     // and render the result as WAT text via the string interpreter.
@@ -142,10 +148,14 @@ pub fn main(init: std.process.Init) !void {
     }
 }
 
-fn loadTrie(allocator: Allocator, streams: Streams, trie: *Trie) !void {
+// Reads the trie definition from stdin and parses it into `trie`. The parser
+// stores borrowed slices into the source text as the trie's keys and constants,
+// so the returned buffer (which holds that text in place) must outlive `trie`;
+// the caller owns it and frees it with `deinit`.
+fn loadTrie(allocator: Allocator, streams: Streams, trie: *Trie) !std.Io.Writer.Allocating {
     // Read all of stdin at once to support multi-line patterns
     var buffer = std.Io.Writer.Allocating.init(allocator);
-    defer buffer.deinit();
+    errdefer buffer.deinit();
     while (true) {
         _ = streams.in.streamDelimiter(&buffer.writer, '\n') catch |err| switch (err) {
             error.EndOfStream => break,
@@ -154,10 +164,10 @@ fn loadTrie(allocator: Allocator, streams: Streams, trie: *Trie) !void {
         try buffer.writer.writeByte('\n');
         _ = streams.in.takeByte() catch break;
     }
-    const content = buffer.written();
-    if (content.len > 0) {
-        trie.* = try Parser.parseTrie(allocator, content);
+    if (buffer.written().len > 0) {
+        trie.* = try Parser.parseTrie(allocator, buffer.written());
     }
+    return buffer;
 }
 
 fn evalExpr(allocator: Allocator, streams: Streams, trie: *Trie, expr: []const u8) !void {

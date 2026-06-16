@@ -17,11 +17,9 @@ const Pattern = @import("../sifu/pattern.zig").Pattern;
 /// handled by the driver (`core.evaluate`), which applies this step at
 /// every level, so comments are removed throughout.
 ///
-/// As a unified `Step`: returns null when this level has no comment to drop
-/// (so the driver's fixpoint loop terminates), otherwise an owned pattern.
-/// `ctx` only needs to supply the allocator.
-pub fn step(pattern: Pattern, ctx: anytype) Allocator.Error!?Pattern {
-    const allocator = ctx.allocator;
+/// As a `pure.Step`: returns null when this level has no comment to drop (so
+/// the driver's fixpoint loop terminates), otherwise an owned pattern.
+pub fn step(pattern: Pattern, allocator: Allocator) Allocator.Error!?Pattern {
     var dropped = false;
     for (pattern.root) |node| {
         if (node == .comment) {
@@ -56,7 +54,7 @@ fn expectStripped(src: []const u8, expected: []const u8) !void {
     defer arena.deinit();
     const allocator = arena.allocator();
     const parsed = try Parser.parse(allocator, src);
-    const stripped = try core.evaluatePure(allocator, parsed, step);
+    const stripped = try core.evaluateComments(allocator, parsed);
     const str = try stripped.toString(allocator);
     try testing.expectEqualStrings(expected, str);
 }

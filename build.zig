@@ -201,8 +201,34 @@ pub fn build(b: *std.Build) void {
     build_options.addOption([]const []const u8, "test_filters", test_filters);
 
     integration_tests.root_module.addOptions("build_options", build_options);
+
+    // The integration tests spawn the sifu exe, so they only catch leaks and
+    // use-after-free if that exe runs under the DebugAllocator. Build a variant
+    // with -DDetectLeaks forced on for them, leaving the default `zig build run`
+    // exe on its arena.
+    const leakcheck_options = b.addOptions();
+    leakcheck_options.addOption(bool, "verbose_errors", verbose_errors);
+    leakcheck_options.addOption(bool, "detect_leaks", true);
+    leakcheck_options.addOption(bool, "tree_sitter", use_tree_sitter);
+
+    const leakcheck_exe = b.addExecutable(.{
+        .name = "sifu-leakcheck",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/main.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{
+                .{ .name = "module", .module = module },
+            },
+        }),
+    });
+    leakcheck_exe.root_module.addImport("cli", cli.module("cli"));
+    if (use_tree_sitter)
+        leakcheck_exe.root_module.addImport("tree_sitter_sifu", tree_sitter_sifu.module("tree_sitter_sifu"));
+    leakcheck_exe.root_module.addOptions("build_options", leakcheck_options);
+
     const integration_options = b.addOptions();
-    integration_options.addOptionPath("sifu_exe", exe.getEmittedBin());
+    integration_options.addOptionPath("sifu_exe", leakcheck_exe.getEmittedBin());
     integration_tests.root_module.addOptions("integration_options", integration_options);
     const run_integration_tests = b.addRunArtifact(integration_tests);
     const integration_test_step = b.step("integration", "Run integration tests on test/ folder");
