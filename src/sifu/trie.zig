@@ -1057,10 +1057,29 @@ pub const Trie = struct {
                         .list, .pattern, .match, .arrow, .infix => true,
                         else => false,
                     };
-                    // Var patterns (starting with '*') capture the rest of the pattern
+                    // Var patterns (starting with '*') capture the rest of the
+                    // pattern. The exception is when this var is followed by a
+                    // separator in the trie (e.g. the rule `*x, *y` stores a `,`
+                    // branch after `*x`): then it captures only up to the next
+                    // list/newline separator, leaving the separator and the
+                    // following segment to be matched by the rest of the rule.
+                    // A lone var_pattern has no separator branch, so it still
+                    // swallows the whole list (needed for `map` and friends).
                     if (branch.isVarPattern()) {
-                        // Compute height of the captured portion
-                        const rest_root = pattern.root[pattern_index..];
+                        const var_trie = variable.entry.value_ptr;
+                        const segmented = var_trie.map.get(",") != null or
+                            var_trie.map.get("\n") != null;
+                        var boundary = pattern.root.len;
+                        if (segmented) {
+                            boundary = pattern_index;
+                            while (boundary < pattern.root.len) : (boundary += 1) {
+                                switch (pattern.root[boundary]) {
+                                    .list, .newline => break,
+                                    else => {},
+                                }
+                            }
+                        }
+                        const rest_root = pattern.root[pattern_index..boundary];
                         var rest_height: usize = 0;
                         for (rest_root) |rest_node| {
                             rest_height = @max(rest_height, rest_node.height());
@@ -1083,9 +1102,15 @@ pub const Trie = struct {
                             debug("Assigning rest to var pattern at {*}", .{get_or_put.value_ptr});
                             get_or_put.value_ptr.* = .{ .pattern = rest };
                         }
-                        current = variable.entry.value_ptr;
-                        pattern_index = pattern.root.len;
-                        break; // No need to match rest of pattern
+                        current = var_trie;
+                        if (boundary == pattern.root.len) {
+                            pattern_index = pattern.root.len;
+                            break; // Captured everything; nothing left to match.
+                        }
+                        // Advance past the captured segment; the loop's `+= 1`
+                        // lands on the separator so it is matched next.
+                        pattern_index = boundary - 1;
+                        continue;
                     } else if (!is_compound) {
                         // Regular variables for non-compound nodes
                         const get_or_put = try term_bindings.getOrPut(allocator, var_name);

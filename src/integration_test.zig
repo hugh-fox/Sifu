@@ -239,9 +239,7 @@ fn nameSelected(name: []const u8) bool {
 const behavior_skips = [_][]const u8{
     "BetaReduce",
     "Bool",
-    "Empty",
     "Map2",
-    "Math",
 };
 
 /// Whether `name` is on the hardcoded skip list.
