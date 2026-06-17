@@ -128,12 +128,12 @@ fn makeResult(expr: Pattern, index: usize) u32 {
 export fn matchPattern(trie_ptr: u32, pattern_ptr: u32, index: u32) u32 {
     const trie: *Trie = @ptrFromInt(trie_ptr);
     const pattern: *Pattern = @ptrFromInt(pattern_ptr);
-    var it = core.initMatchAt(trie.*, wasm_allocator, index, pattern.*) catch
+    var it = core.initEvalAt(trie.*, wasm_allocator, index, pattern.*) catch
         panic("Match error");
     defer it.deinit();
     const stepped = (it.step() catch panic("Match error")) orelse
         return 0; // no match
-    return makeResult(stepped, it.ctx.index);
+    return makeResult(stepped, it.ctx.index.?);
 }
 
 /// Caller frees the result string, the result `pattern`, and the returned
@@ -178,9 +178,9 @@ export fn iteratorStr(trie_ptr: u32, query_ptr: [*]const u8, query_len: u32) u32
 export fn iterator(trie_ptr: u32, pattern_ptr: u32) u32 {
     const trie: *Trie = @ptrFromInt(trie_ptr);
     const pattern: *Pattern = @ptrFromInt(pattern_ptr);
-    const it = wasm_allocator.create(core.MatchEvaluator) catch
+    const it = wasm_allocator.create(core.EvalEvaluator) catch
         panic("Allocation of iterator failed");
-    it.* = core.initMatch(trie.*, wasm_allocator, pattern.*) catch
+    it.* = core.initEval(trie.*, wasm_allocator, pattern.*) catch
         panic("Iterator init failed");
     return @intCast(@intFromPtr(it));
 }
@@ -189,15 +189,15 @@ export fn iterator(trie_ptr: u32, pattern_ptr: u32) u32 {
 /// `MatchResult` (the rewritten expression and the trie index it matched at) or
 /// 0 once evaluation has settled. The caller frees the result as for `match`.
 export fn iteratorNext(iter_ptr: u32) u32 {
-    const it: *core.MatchEvaluator = @ptrFromInt(iter_ptr);
+    const it: *core.EvalEvaluator = @ptrFromInt(iter_ptr);
     const stepped = (it.step() catch panic("Iterator step error")) orelse
         return 0; // settled
-    return makeResult(stepped, it.ctx.index);
+    return makeResult(stepped, it.ctx.index.?);
 }
 
 /// Frees an `Iterator` previously returned by `iterator`/`iteratorStr`.
 export fn destroyIterator(iter_ptr: u32) void {
-    const it: *core.MatchEvaluator = @ptrFromInt(iter_ptr);
+    const it: *core.EvalEvaluator = @ptrFromInt(iter_ptr);
     it.deinit();
     wasm_allocator.destroy(it);
 }

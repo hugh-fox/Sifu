@@ -212,9 +212,27 @@ pub const Trie = struct {
                 try entry.value_ptr.*.copy(allocator),
             );
 
-        // Copy the branch lists
-        try result.constant_branches.appendSlice(allocator, self.constant_branches.items);
-        try result.var_branches.appendSlice(allocator, self.var_branches.items);
+        // Copy the branch lists. Each branch holds a map Entry pointing at the
+        // source map, so rebuild it against the copied map or the pointers
+        // dangle once the source is freed.
+        try result.constant_branches.ensureTotalCapacity(allocator, self.constant_branches.items.len);
+        for (self.constant_branches.items) |index_branch| {
+            const idx, const branch = index_branch;
+            const entry = result.map.getEntry(branch.constant.entry.key_ptr.*).?;
+            result.constant_branches.appendAssumeCapacity(.{ idx, .{ .constant = .{
+                .entry = entry,
+                .next_index = branch.constant.next_index,
+            } } });
+        }
+        try result.var_branches.ensureTotalCapacity(allocator, self.var_branches.items.len);
+        for (self.var_branches.items) |index_branch| {
+            const idx, const branch = index_branch;
+            const entry = result.map.getEntry(branch.variable.entry.key_ptr.*).?;
+            result.var_branches.appendAssumeCapacity(.{ idx, .{ .variable = .{
+                .entry = entry,
+                .next_index = branch.variable.next_index,
+            } } });
+        }
 
         // Value branches contain Patterns that need deep copying
         try result.value_branches.ensureTotalCapacity(allocator, self.value_branches.items.len);
@@ -1117,6 +1135,91 @@ pub const Trie = struct {
             .trie_ptr = current,
             .match_index = index,
             .len = pattern_index,
+        };
+    }
+
+    /// Rewrites all variable captures into the matched expression. Copies any
+    /// variables in node if they are keys in bindings with their values. If
+    /// there are no matches in bindings, this function is equivalent to copy.
+    pub fn rewrite(
+        allocator: Allocator,
+        pattern: Pattern,
+        term_bindings: *const VarBindings,
+    ) Allocator.Error!Pattern {
+        var result = ArrayList(Node).empty;
+        errdefer result.deinit(allocator);
+        var max_child: usize = 0;
+
+        for (pattern.root) |node| switch (node) {
+            .constant => |constant| try result.append(allocator, Node.ofConstant(constant)),
+            .variable => |variable| {
+                const is_var_pattern = variable.len > 0 and variable[0] == '*';
+                if (is_var_pattern) {
+                    if (term_bindings.get(variable)) |sub_pattern| {
+                        debug("Var pattern found: {s}", .{variable});
+                        for (sub_pattern.pattern.root) |sub_node| {
+                            const copied = try sub_node.copy(allocator);
+                            max_child = @max(max_child, copied.height());
+                            try result.append(allocator, copied);
+                        }
+                    } else try result.append(allocator, node);
+                } else {
+                    if (term_bindings.get(variable)) |bound_node| {
+                        debug("Var found: {s}", .{variable});
+                        const copied = try bound_node.copy(allocator);
+                        max_child = @max(max_child, copied.height());
+                        try result.append(allocator, copied);
+                    } else {
+                        debug("Var not found", .{});
+                        try result.append(allocator, node);
+                    }
+                }
+            },
+            inline .pattern, .arrow, .match, .list => |nested, tag| {
+                const rewritten = try rewrite(allocator, nested, term_bindings);
+                const wrapped = Pattern{ .root = rewritten.root, .height = rewritten.height + 1 };
+                max_child = @max(max_child, wrapped.height);
+                try result.append(allocator, @unionInit(Node, @tagName(tag), wrapped));
+            },
+            .infix => |inf| {
+                const rewritten = try rewrite(allocator, inf.rhs, term_bindings);
+                const wrapped = Pattern{ .root = rewritten.root, .height = rewritten.height + 1 };
+                max_child = @max(max_child, wrapped.height);
+                try result.append(allocator, Node{ .infix = .{ .op = inf.op, .rhs = wrapped } });
+            },
+            // A trie literal carries no rewritable variables of its own; copy it
+            // through so a value like `A : {trie}` survives the rewrite intact.
+            .trie => try result.append(allocator, try node.copy(allocator)),
+            // Comments are kept in the trie (so its print stays layout-faithful) but
+            // are inert: drop them from a rewritten value so they never reach output.
+            .comment => {},
+            else => panic("unimplemented", .{}),
+        };
+
+        const nodes = try result.toOwnedSlice(allocator);
+        return Pattern{ .root = nodes, .height = max_child };
+    }
+
+    /// The rewritten value of the lowest full match of `pattern` within `bound`,
+    /// or null when nothing matched. Combines `match` and `rewrite` so callers
+    /// (the evaluation steps) get a single `orelse return null` and never have to
+    /// thread bindings or the raw `Match` themselves. The caller owns the
+    /// returned pattern. `match_index` is the index the match was found at, which
+    /// the steps use to shrink their bounds.
+    pub fn matchRewrite(
+        self: *const Self,
+        allocator: Allocator,
+        bound: Bound,
+        pattern: Pattern,
+    ) Allocator.Error!?struct { value: Pattern, match_index: usize } {
+        var term_bindings = VarBindings{};
+        defer term_bindings.deinit(allocator);
+        var result = try self.match(allocator, bound, &term_bindings, pattern);
+        defer result.deinit(allocator);
+        const matched_value = result.value orelse return null;
+        return .{
+            .value = try rewrite(allocator, matched_value, &term_bindings),
+            .match_index = result.match_index,
         };
     }
 

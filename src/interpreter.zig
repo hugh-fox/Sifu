@@ -1,21 +1,126 @@
 const std = @import("std");
 const Allocator = std.mem.Allocator;
+const ArrayList = std.ArrayList;
+const debug = std.log.debug;
+const panic = std.debug.panic;
 
 const Node = @import("sifu/node.zig").Node;
 const Pattern = @import("sifu/pattern.zig").Pattern;
-const Trie = @import("sifu/trie.zig").Trie;
+const trie_module = @import("sifu/trie.zig");
+const Trie = trie_module.Trie;
+const VarBindings = trie_module.VarBindings;
 const comments_interpreter = @import("interpreter/comments.zig");
 const math_interpreter = @import("interpreter/math.zig");
 const string_interpreter = @import("interpreter/string.zig");
-const matcher = @import("interpreter/matcher.zig");
 
-pub const MatchCtx = matcher.MatchCtx;
-pub const MatchEvaluator = matcher.MatchEvaluator;
-pub const matchStep = matcher.matchStep;
-pub const initMatch = matcher.initMatch;
-pub const initMatchAt = matcher.initMatchAt;
-pub const rewrite = matcher.rewrite;
-pub const evaluateBounded = matcher.evaluateBounded;
+// Each evaluation mode lives in its own file; this file holds the generic
+// `Evaluator` they build on, the pure passes, and the `evaluateModes` pipeline
+// that chains the selected modes.
+const lower = @import("interpreter/lower.zig");
+const nested = @import("interpreter/nested.zig");
+const recursive = @import("interpreter/recursive.zig");
+const random = @import("interpreter/random.zig");
+const Bound = trie_module.Bound;
+
+pub const Mode = enum { lower, nested, recursive, random };
+
+/// Every mode active: the default `evaluateComplete` behavior.
+pub const all_modes: []const Mode = &.{ .lower, .recursive, .nested };
+
+pub const EvalCtx = struct {
+    trie: Trie,
+    bound: Bound,
+    /// The index of the last match at this level, or null until one happens.
+    index: ?usize = null,
+    /// The descent modes active for this evaluation, shared down through `child`.
+    modes: []const Mode = all_modes,
+
+    fn has(self: EvalCtx, mode: Mode) bool {
+        return std.mem.indexOfScalar(Mode, self.modes, mode) != null;
+    }
+
+    /// The rule index to match from at this level, or null once the level has
+    /// settled. `.random` picks within the bound; otherwise the lowest in-range
+    /// index. Used by `lower.matchStep` to gate matching.
+    pub fn pickIndex(self: EvalCtx) ?usize {
+        if (self.has(.random))
+            return random.pickIndex(self.bound);
+        return lower.nextIndex(self.bound);
+    }
+
+    /// The bounds for descending into a sub-pattern of `content_height` within a
+    /// level of `pattern_height`. Before a match at this level (index == null) the
+    /// sub-term keeps the full upper bound. After a match a shrinking sub-term may
+    /// recurse at the same index (`recursive`, §2) and an equal-height one drops
+    /// strictly below it (`nested`, §3); each applies only if its mode is active
+    /// (a disabled mode yields upper 0, leaving the sub-term unmatched).
+    pub fn child(self: EvalCtx, content_height: usize, pattern_height: usize) EvalCtx {
+        const recurse_upper = if (self.index == null)
+            self.bound.upper
+        else
+            recursive.descendUpper(self.has(.recursive), self.bound, content_height, pattern_height) orelse
+                (if (self.has(.nested)) nested.descendUpper(self.bound) else 0);
+        return .{
+            .trie = self.trie,
+            .bound = .{ .lower = 0, .upper = recurse_upper },
+            .modes = self.modes,
+        };
+    }
+
+    /// The structural rewrites of a settled level: the inline-trie membership
+    /// match (`lhs : {trie}`), which finalizes the level, and (when `.nested` is
+    /// active) the operator/list-head recursion, which reduces the head in place
+    /// before the driver descends. The caller owns `current` and frees it on error.
+    pub fn transform(self: *EvalCtx, current: *Pattern, allocator: Allocator) Allocator.Error!?Pattern {
+        if (try lower.membership(self.trie, self.bound.upper, current, allocator)) |result|
+            return result;
+        if (self.has(.nested))
+            try nested.head(allocator, self.trie, self.modes, self.bound.upper, current);
+        return null;
+    }
+};
+
+/// The trie-matching iterator: `EvalCtx` bookkeeping stepped by `lower.matchStep`
+/// (the §1 match/rewrite), gated on the `.lower` mode being active.
+pub const EvalEvaluator = Evaluator(EvalCtx, evalStep);
+
+fn evalStep(current: Pattern, allocator: Allocator, ctx: *EvalCtx) Allocator.Error!?Pattern {
+    if (!ctx.has(.lower)) return null;
+    return lower.matchStep(current, allocator, ctx);
+}
+
+/// Build an `EvalEvaluator` over a copy of `pattern`, matching from rule 0.
+pub fn initEval(trie: Trie, allocator: Allocator, pattern: Pattern) Allocator.Error!EvalEvaluator {
+    return initEvalAt(trie, allocator, 0, pattern);
+}
+
+/// Build an `EvalEvaluator` over a copy of `pattern`, matching from rule `lower_index`.
+pub fn initEvalAt(
+    trie: Trie,
+    allocator: Allocator,
+    lower_index: usize,
+    pattern: Pattern,
+) Allocator.Error!EvalEvaluator {
+    return .{
+        .allocator = allocator,
+        .current = try pattern.copy(allocator),
+        .ctx = .{ .trie = trie, .bound = .{ .lower = lower_index, .upper = trie.length() } },
+    };
+}
+
+/// Evaluate `pattern` against `trie` to a fixed point with the given `modes`
+/// active, composed per level inside a single traversal.
+pub fn evaluateModes(
+    trie: Trie,
+    allocator: Allocator,
+    pattern: Pattern,
+    modes: []const Mode,
+) Allocator.Error!Pattern {
+    var it = try initEval(trie, allocator, pattern);
+    it.ctx.modes = modes;
+    defer it.deinit();
+    return it.next();
+}
 
 pub fn Evaluator(
     comptime Ctx: type,
@@ -121,7 +226,7 @@ fn spawnChild(
 }
 
 /// The height of a level's content: the max height over its nodes, with no
-/// wrapping `+1`. Used by `evaluate` (and the matcher) to set a child's height
+/// wrapping `+1`. Used by `evaluate` (and the rewrite) to set a child's height
 /// when descending into it as its own root.
 pub fn contentHeight(root: []const Node) usize {
     var height: usize = 0;
@@ -131,7 +236,7 @@ pub fn contentHeight(root: []const Node) usize {
 
 /// The context for a pure (non-trie) pass: no match bounds, no early-finish
 /// transform. It only satisfies the `evaluate` driver's interface so the pure
-/// `step` functions can reuse the same node-walk as the trie matcher.
+/// `step` functions can reuse the same node-walk as the trie rewrite.
 const PureCtx = struct {
     pub fn transform(_: *PureCtx, _: *Pattern, _: Allocator) Allocator.Error!?Pattern {
         return null; // pure passes never finalize early; always recurse
@@ -154,7 +259,7 @@ fn pureStep(
 }
 
 /// Run a pure `step` over `pattern` to a fixed point at every level, through the
-/// same node-walk the trie matcher uses.
+/// same node-walk the trie rewrite uses.
 fn evaluatePure(
     allocator: Allocator,
     pattern: Pattern,
@@ -190,9 +295,13 @@ pub fn evaluateComplete(
     var stripped = try evaluateComments(allocator, pattern);
     defer stripped.deinit(allocator);
 
-    // Trie-driven match/rewrite evaluation (structural and nested recursion,
-    // including `lhs : {trie}` matches against inline tries).
-    var evaluated = try evaluateBounded(trie, allocator, stripped);
+    // Trie-driven match/rewrite evaluation. Each mode is its own pass, chained
+    // by `evaluateModes`; drop a mode or reorder to mix and match.
+    var evaluated = try evaluateModes(trie, allocator, stripped, &.{
+        .lower, // §1: match at the index, then raise the lower bound past it
+        .recursive, // §2: recurse at the same index on shrinking sub-terms
+        .nested, // §3: descend strictly below the index (e.g. list heads)
+    });
     defer evaluated.deinit(allocator);
 
     // Fold any arithmetic expressions in the result.
@@ -206,8 +315,6 @@ pub fn evaluateComplete(
 const testing = std.testing;
 const ArenaAllocator = std.heap.ArenaAllocator;
 const Parser = @import("Parser.zig");
-// Test-only: the pipeline tests below assert on the trie matcher's bindings.
-const VarBindings = @import("sifu/trie.zig").VarBindings;
 
 fn expectEval(allocator: Allocator, trie: Trie, query_str: []const u8, expected_str: []const u8) !void {
     var query = try Parser.parse(allocator, query_str);
@@ -224,6 +331,58 @@ fn expectEval(allocator: Allocator, trie: Trie, query_str: []const u8, expected_
     } else {
         return error.NoEvalResult;
     }
+}
+
+/// Evaluate `query_str` against `trie` with exactly `modes` active and assert the
+/// printed result equals `expected_str`. Used to pin down each evaluation mode
+/// (`.lower`, `.recursive`, `.nested`) on its own and in combination.
+fn expectSteps(
+    allocator: Allocator,
+    trie: Trie,
+    query_str: []const u8,
+    modes: []const Mode,
+    expected_str: []const u8,
+) !void {
+    var query = try Parser.parse(allocator, query_str);
+    defer query.deinit(allocator);
+    var val = try evaluateModes(trie, allocator, query, modes);
+    defer val.deinit(allocator);
+    const result_str = try val.toString(allocator);
+    defer allocator.free(result_str);
+    try testing.expectEqualStrings(expected_str, result_str);
+}
+
+test "evaluateModes: lower gates matching" {
+    var trie = try Parser.parseTrie(testing.allocator, "A -> B");
+    defer trie.deinit(testing.allocator);
+    // With lower on, A matches and rewrites to B.
+    try expectSteps(testing.allocator, trie, "A", &.{.lower}, "B");
+    // Lower is the matcher; without it the other modes have nothing to descend.
+    try expectSteps(testing.allocator, trie, "A", &.{ .recursive, .nested }, "A");
+}
+
+test "evaluateModes: recursive reduces shrinking sub-terms at the same index" {
+    var trie = try Parser.parseTrie(testing.allocator, "(x) --> x\n(x, *xs) --> x, (*xs)");
+    defer trie.deinit(testing.allocator);
+    // Recursive alone (no nested) collapses the whole list by re-firing the rules
+    // on the shrinking tail at the same index.
+    try expectSteps(testing.allocator, trie, "(1, 2, 3)", &.{ .lower, .recursive }, "1, 2, 3");
+    // Without recursive, only the top level is reduced; the tail stays nested.
+    try expectSteps(testing.allocator, trie, "(1, 2, 3)", &.{.lower}, "1, (2, 3)");
+}
+
+test "evaluateModes: nested reduces list heads against previous rules" {
+    var trie = try Parser.parseTrie(testing.allocator,
+        \\F x --> G x
+        \\(x, *xs) --> F x, (*xs)
+    );
+    defer trie.deinit(testing.allocator);
+    // Nested (with lower) evaluates the list head (F 1) against the previous rule
+    // inside the nested expression; the tail stays nested since collapsing it
+    // would require re-firing the same rule (recursive).
+    try expectSteps(testing.allocator, trie, "(1, 2,)", &.{ .lower, .nested }, "G 1, (2, )");
+    // Without nested, the head is left unreduced.
+    try expectSteps(testing.allocator, trie, "(1, 2,)", &.{.lower}, "F 1, (2, )");
 }
 
 test "evaluateComplete: simple rewrite" {
@@ -394,7 +553,7 @@ test "Structural recursion: height tracking through evaluation" {
     try testing.expect(match_result.value != null);
 
     // Rewrite step
-    var rewritten = try rewrite(testing.allocator, match_result.value.?, &bindings);
+    var rewritten = try Trie.rewrite(testing.allocator, match_result.value.?, &bindings);
     defer rewritten.deinit(testing.allocator);
 
     // Check structural recursion condition
