@@ -19,10 +19,11 @@ const string_interpreter = @import("interpreter/string.zig");
 const lower = @import("interpreter/lower.zig");
 const nested = @import("interpreter/nested.zig");
 const recursive = @import("interpreter/recursive.zig");
+const numeric = @import("interpreter/numeric.zig");
 const random = @import("interpreter/random.zig");
 const Bound = trie_module.Bound;
 
-pub const Mode = enum { lower, nested, recursive, random };
+pub const Mode = enum { lower, nested, recursive, numeric, random };
 
 /// Every mode active: the default `evaluateComplete` behavior.
 pub const all_modes: []const Mode = &.{ .lower, .recursive, .nested };
@@ -54,11 +55,20 @@ pub const EvalCtx = struct {
     /// recurse at the same index (`recursive`, §2) and an equal-height one drops
     /// strictly below it (`nested`, §3); each applies only if its mode is active
     /// (a disabled mode yields upper 0, leaving the sub-term unmatched).
-    pub fn child(self: EvalCtx, content_height: usize, pattern_height: usize) EvalCtx {
+    /// `numeric` (§2 on values) re-fires the index when the sub-term's number
+    /// shrank below the parent's, even if its height did not.
+    pub fn child(
+        self: EvalCtx,
+        content_height: usize,
+        pattern_height: usize,
+        content_number: ?i64,
+        pattern_number: ?i64,
+    ) EvalCtx {
         const recurse_upper = if (self.index == null)
             self.bound.upper
         else
             recursive.descendUpper(self.has(.recursive), self.bound, content_height, pattern_height) orelse
+                numeric.descendUpper(self.has(.numeric), self.bound, content_number, pattern_number) orelse
                 (if (self.has(.nested)) nested.descendUpper(self.bound) else 0);
         return .{
             .trie = self.trie,
@@ -162,6 +172,7 @@ fn evaluate(it: anytype) Allocator.Error!Pattern {
     const Eval = @TypeOf(it.*);
     const allocator = it.allocator;
     const pattern_height = it.current.height;
+    const pattern_number = numeric.maxNumber(it.current.root);
 
     // Settle this level: run the step until it reports no more change.
     while (try it.step()) |_| {}
@@ -180,7 +191,7 @@ fn evaluate(it: anytype) Allocator.Error!Pattern {
     var max_height: usize = 0;
     for (current.root) |*node| switch (node.*) {
         .infix => |inf| {
-            var child_it = try spawnChild(Eval, it.ctx, inf.rhs, pattern_height, allocator);
+            var child_it = try spawnChild(Eval, it.ctx, inf.rhs, pattern_height, pattern_number, allocator);
             errdefer child_it.deinit();
             var rhs = try evaluate(&child_it);
             rhs.height += 1;
@@ -189,7 +200,7 @@ fn evaluate(it: anytype) Allocator.Error!Pattern {
             node.* = Node{ .infix = .{ .op = inf.op, .rhs = rhs } };
         },
         inline .pattern, .match, .arrow, .list, .newline => |sub, tag| {
-            var child_it = try spawnChild(Eval, it.ctx, sub, pattern_height, allocator);
+            var child_it = try spawnChild(Eval, it.ctx, sub, pattern_height, pattern_number, allocator);
             errdefer child_it.deinit();
             var evaluated = try evaluate(&child_it);
             evaluated.height += 1;
@@ -213,6 +224,7 @@ fn spawnChild(
     parent_ctx: anytype,
     sub: Pattern,
     pattern_height: usize,
+    pattern_number: ?i64,
     allocator: Allocator,
 ) Allocator.Error!Eval {
     const content_height = contentHeight(sub.root);
@@ -221,7 +233,7 @@ fn spawnChild(
     return .{
         .allocator = allocator,
         .current = current,
-        .ctx = parent_ctx.child(content_height, pattern_height),
+        .ctx = parent_ctx.child(content_height, pattern_height, numeric.maxNumber(sub.root), pattern_number),
     };
 }
 
@@ -241,7 +253,7 @@ const PureCtx = struct {
     pub fn transform(_: *PureCtx, _: *Pattern, _: Allocator) Allocator.Error!?Pattern {
         return null; // pure passes never finalize early; always recurse
     }
-    pub fn child(_: PureCtx, _: usize, _: usize) PureCtx {
+    pub fn child(_: PureCtx, _: usize, _: usize, _: ?i64, _: ?i64) PureCtx {
         return .{};
     }
 };
@@ -300,6 +312,7 @@ pub fn evaluateComplete(
     var evaluated = try evaluateModes(trie, allocator, stripped, &.{
         .lower, // §1: match at the index, then raise the lower bound past it
         .recursive, // §2: recurse at the same index on shrinking sub-terms
+        .numeric, // §2 on values: recurse at the same index on shrinking numbers
         .nested, // §3: descend strictly below the index (e.g. list heads)
     });
     defer evaluated.deinit(allocator);

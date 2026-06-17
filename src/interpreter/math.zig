@@ -61,7 +61,7 @@ fn isMathOp(node: Node) bool {
 /// a math infix whose rhs is a single operand. Returns `null` when the sequence
 /// is not a foldable integer expression (non-integer operand, unbound variable,
 /// or division by zero).
-fn foldRoot(root: []const Node) ?i64 {
+pub fn foldRoot(root: []const Node) ?i64 {
     if (root.len == 0) return null;
 
     var acc = operandValue(root[0]) orelse return null;
