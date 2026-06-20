@@ -60,3 +60,54 @@ pub fn head(
     allocator.free(reduced.root);
     current.root = spliced;
 }
+
+/// Re-attempt a just-reduced wrapped term (`node`) one level up so a rule that
+/// matches only the enclosing form — e.g. `(x) -> x` — can fire. Matches from
+/// `from`, the lower bound the term's contents already reached, so an exhausted
+/// cycle (e.g. `(A) -> A` / `A -> (A)`) is not re-entered. Returns the
+/// replacement node when the term collapses to a single node, else null.
+/// Terminates because such a rule's rhs drops a nesting level.
+pub fn lift(
+    trie: Trie,
+    modes: []const core.Mode,
+    upper: usize,
+    node: Node,
+    from: usize,
+    allocator: Allocator,
+) Allocator.Error!?Node {
+    if (node != .pattern) return null;
+    var term_root = [_]Node{node};
+    const term = Pattern{ .root = &term_root, .height = node.height() };
+    var it = core.EvalEvaluator{
+        .allocator = allocator,
+        .current = try term.copy(allocator),
+        .ctx = .{ .trie = trie, .bound = .{ .lower = from, .upper = upper }, .modes = modes },
+    };
+    defer it.deinit();
+    while (try it.step()) |_| {}
+    if (it.current.eql(term) or it.current.root.len != 1) return null;
+    return try it.current.root[0].copy(allocator);
+}
+
+/// Re-settle `current` after a `lift` removed a nesting level, in case a match
+/// at this level is now possible (e.g. an application whose argument just became
+/// a constant). Settles only — it does not descend again, which is bound-limited
+/// per level. Takes ownership of `current` and returns the settled level.
+pub fn resettle(
+    trie: Trie,
+    modes: []const core.Mode,
+    bound: Bound,
+    current: Pattern,
+    allocator: Allocator,
+) Allocator.Error!Pattern {
+    var it = core.EvalEvaluator{
+        .allocator = allocator,
+        .current = current,
+        .ctx = .{ .trie = trie, .bound = bound, .modes = modes },
+    };
+    errdefer it.deinit();
+    while (try it.step()) |_| {}
+    const settled = it.current;
+    it.current = .{};
+    return settled;
+}

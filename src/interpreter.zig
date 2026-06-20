@@ -35,6 +35,9 @@ pub const EvalCtx = struct {
     index: ?usize = null,
     /// The descent modes active for this evaluation, shared down through `child`.
     modes: []const Mode = all_modes,
+    /// Set by `lift` when a sub-term lost a nesting level, so `afterDescent`
+    /// knows to re-settle the level.
+    lifted: bool = false,
 
     fn has(self: EvalCtx, mode: Mode) bool {
         return std.mem.indexOfScalar(Mode, self.modes, mode) != null;
@@ -64,15 +67,26 @@ pub const EvalCtx = struct {
         content_number: ?i64,
         pattern_number: ?i64,
     ) EvalCtx {
-        const recurse_upper = if (self.index == null)
-            self.bound.upper
+        // A recursive descent (§2) re-fires the matched rule at the same index on
+        // a shrinking sub-term, so it keeps a `lower = 0` range capped at the
+        // current index. A non-recursive nested descent instead shrinks the
+        // bound from the bottom: it continues from the raised lower (past the
+        // matched rule) with the full upper, so later rules can still fire deeper
+        // in the nesting. It may shrink over rules that could have matched, but
+        // never cycles — the lower bound only rises, exhausting the rules.
+        const sub_bound: Bound = if (self.index == null)
+            .{ .lower = 0, .upper = self.bound.upper }
+        else if (recursive.descendUpper(self.has(.recursive), self.bound, content_height, pattern_height)) |upper|
+            .{ .lower = 0, .upper = upper }
+        else if (numeric.descendUpper(self.has(.numeric), self.bound, content_number, pattern_number)) |upper|
+            .{ .lower = 0, .upper = upper }
+        else if (self.has(.nested))
+            .{ .lower = 0, .upper = nested.descendUpper(self.bound) }
         else
-            recursive.descendUpper(self.has(.recursive), self.bound, content_height, pattern_height) orelse
-                numeric.descendUpper(self.has(.numeric), self.bound, content_number, pattern_number) orelse
-                (if (self.has(.nested)) nested.descendUpper(self.bound) else 0);
+            .{ .lower = 0, .upper = 0 };
         return .{
             .trie = self.trie,
-            .bound = .{ .lower = 0, .upper = recurse_upper },
+            .bound = sub_bound,
             .modes = self.modes,
         };
     }
@@ -87,6 +101,30 @@ pub const EvalCtx = struct {
         if (self.has(.nested))
             try nested.head(allocator, self.trie, self.modes, self.bound.upper, current);
         return null;
+    }
+
+    /// After a sub-term `node` has been reduced (its evaluation reached
+    /// `child_it`'s lower bound), the nested mode re-attempts it one level up so
+    /// a rule matching only the enclosing form (`(x) -> x`) can fire. Records a
+    /// successful lift for `afterDescent`. A no-op when `.nested` is inactive.
+    pub fn lift(self: *EvalCtx, node: *Node, child_it: anytype, allocator: Allocator) Allocator.Error!void {
+        if (!self.has(.nested)) return;
+        if (try nested.lift(self.trie, self.modes, self.bound.upper, node.*, child_it.ctx.bound.lower, allocator)) |reduced| {
+            node.deinit(allocator);
+            node.* = reduced;
+            self.lifted = true;
+        }
+    }
+
+    /// Re-settle the level once if a `lift` removed a nesting level, in case a
+    /// match here is now possible (e.g. an application whose argument became a
+    /// constant). Returns the re-settled level, or null to keep `current`.
+    pub fn afterDescent(self: *EvalCtx, current: *Pattern, allocator: Allocator) Allocator.Error!?Pattern {
+        if (!self.lifted) return null;
+        self.lifted = false;
+        const settled = try nested.resettle(self.trie, self.modes, self.bound, current.*, allocator);
+        current.* = .{};
+        return settled;
     }
 };
 
@@ -204,9 +242,15 @@ fn evaluate(it: anytype) Allocator.Error!Pattern {
             errdefer child_it.deinit();
             var evaluated = try evaluate(&child_it);
             evaluated.height += 1;
-            max_height = @max(max_height, evaluated.height);
+            // Only a sub-term that actually reduced can newly match a rule one
+            // level up; an unchanged one would just re-grow it.
+            const changed = !evaluated.eql(sub);
             @constCast(&sub).deinit(allocator);
             node.* = @unionInit(Node, @tagName(tag), evaluated);
+            // Let the context re-attempt the just-reduced sub-term one level up
+            // (the nested mode's `(x) -> x` style lift); a no-op for the rest.
+            if (changed) try it.ctx.lift(node, &child_it, allocator);
+            max_height = @max(max_height, node.height());
         },
         inline .newline, .indent => |sep, tag| {
             var child_it = try spawnChild(Eval, it.ctx, sep.rhs, pattern_height, pattern_number, allocator);
@@ -220,6 +264,10 @@ fn evaluate(it: anytype) Allocator.Error!Pattern {
         else => max_height = @max(max_height, node.height()),
     };
     current.height = max_height;
+
+    // Give the context a chance to re-settle the level after a lift (a no-op for
+    // the pure passes and when nothing was lifted).
+    if (try it.ctx.afterDescent(&current, allocator)) |result| return result;
     return current;
 }
 
@@ -264,6 +312,12 @@ const PureCtx = struct {
     }
     pub fn child(_: PureCtx, _: usize, _: usize, _: ?i64, _: ?i64) PureCtx {
         return .{};
+    }
+    pub fn lift(_: *PureCtx, _: *Node, child_it: anytype, _: Allocator) Allocator.Error!void {
+        _ = child_it; // pure passes have no trie to re-match against
+    }
+    pub fn afterDescent(_: *PureCtx, _: *Pattern, _: Allocator) Allocator.Error!?Pattern {
+        return null;
     }
 };
 

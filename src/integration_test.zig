@@ -236,11 +236,7 @@ fn nameSelected(name: []const u8) bool {
 }
 
 /// Behavior tests known to fail that we explicitly skip for now.
-const behavior_skips = [_][]const u8{
-    "BetaReduce",
-    "Bool",
-    "Map2",
-};
+const behavior_skips = [_][]const u8{};
 
 /// Whether `name` is on the hardcoded skip list.
 fn isSkipped(name: []const u8) bool {

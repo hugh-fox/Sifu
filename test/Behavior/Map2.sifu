@@ -1,5 +1,5 @@
 Map fn () -> ()
-Map fn (*head, *tail) --> fn (*head), Map fn (*tail)
+Map fn (*head, *tail) --> fn *head, Map fn (*tail)
 
 # ===
 
@@ -15,7 +15,7 @@ Map F (1 (2))
 
 # ---
 
-1 (2)
+Map F (1 (2))
 
 # ===
 

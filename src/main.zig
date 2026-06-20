@@ -140,12 +140,8 @@ pub fn main(init: std.process.Init) !void {
         return replWithTrie(allocator, streams, &trie);
     }
 
-    if (has_expr) {
+    if (has_expr)
         try evalExpr(allocator, streams, &trie, config.expression);
-    } else if (stdin_is_piped) {
-        try trie.writeCanonical(streams.out);
-        try streams.out.flush();
-    }
 }
 
 // Reads the trie definition from stdin and parses it into `trie`. The parser

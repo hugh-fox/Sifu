@@ -960,12 +960,10 @@ pub const Trie = struct {
             },
             // Comments are stripped before matching; never matches a branch.
             .comment => return null,
-            inline .arrow, .match => |_, tag| {
-                std.debug.panic(
-                    "unimplemented node type {s} in matchTerm",
-                    .{@tagName(tag)},
-                );
-            },
+            // Arrows and matches are flattened like infixes: the operator
+            // constant (`->`/`:`) sits on the path followed by the rhs pattern.
+            .arrow => |rhs| return self.matchSeparator(allocator, bound, term_bindings, "->", rhs),
+            .match => |rhs| return self.matchSeparator(allocator, bound, term_bindings, ":", rhs),
         }
 
         return null;
@@ -1040,7 +1038,14 @@ pub const Trie = struct {
         if (pattern.root.len == 0) {
             if (current.findNextVar(bound)) |var_candidate| {
                 const var_index, const var_branch = var_candidate;
-                if (var_branch.isVarPattern()) {
+                // Only capture the empty pattern into this var_pattern when no
+                // sibling constant branch is available. A bare empty tuple `()`
+                // has a `)` constant to match here, so prefer that; a
+                // trailing-comma tail (e.g. `(x,)`) has only the var, so it
+                // captures the empty segment.
+                if (var_branch.isVarPattern() and
+                    current.findNextConstant(bound) == null)
+                {
                     const var_name = var_branch.variable.entry.key_ptr.*;
                     const var_trie = var_branch.variable.entry.value_ptr;
                     // Bind var_pattern to empty pattern
