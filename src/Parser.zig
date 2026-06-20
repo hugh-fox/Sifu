@@ -636,14 +636,71 @@ fn appendEntryRecursive(result: *Trie, allocator: Allocator, pattern: Pattern) O
     };
 
     if (sep_contents) |contents| {
-        if (last_idx > 0)
-            try result.appendEntry(allocator, Pattern.fromSlice(pattern.root[0..last_idx]));
+        const prefix = pattern.root[0..last_idx];
+        // An indented line continues a trailing arrow/match whose value is still
+        // empty (only comments): the continuation folds in as that value rather
+        // than starting a new entry. A complete entry (non-empty value, e.g. the
+        // `X -> 1` lines inside a brace body) is not folded, so its indented
+        // sibling stays a separate entry.
+        if (last_idx > 0 and pattern.root[last_idx] == .indent and
+            try foldContinuation(result, allocator, prefix, contents))
+            return;
+        if (last_idx > 0) switch (prefix[last_idx - 1]) {
+            // A prefix ending in a newline/indent group is itself unfinished
+            // structure (e.g. an indent group trailed by an empty newline);
+            // reprocess it so the inner separator splits or folds. A trailing
+            // `.list` (comma) stays within the entry, so handle it as one entry.
+            .newline, .indent => try appendEntryRecursive(result, allocator, Pattern.fromSlice(prefix)),
+            else => try result.appendEntry(allocator, Pattern.fromSlice(prefix)),
+        };
         try appendEntryRecursive(result, allocator, contents);
         return;
     }
 
     // No separator found - treat entire pattern as a single entry
     try result.appendEntry(allocator, pattern);
+}
+
+/// Folds an indented continuation `contents` into the trailing arrow/match of
+/// `prefix` when that operator's value is still empty (only comments). Returns
+/// true when it folded (the caller is done), false to fall back to the normal
+/// entry split. Only the continuation's first entry becomes the value; any
+/// further separated entries are appended normally.
+fn foldContinuation(result: *Trie, allocator: Allocator, prefix: []Node, contents: Pattern) Oom!bool {
+    const op = prefix[prefix.len - 1];
+    const op_value: Pattern = switch (op) {
+        .arrow, .match => |p| p,
+        else => return false,
+    };
+    for (op_value.root) |node| if (node != .comment) return false;
+
+    // Split the continuation at its first separator: the leading part is the
+    // folded value, the rest (if any) stays as following entries.
+    var split: usize = contents.root.len;
+    for (contents.root, 0..) |node, i| switch (node) {
+        .list, .newline, .indent => {
+            split = i;
+            break;
+        },
+        else => {},
+    };
+
+    var value = std.ArrayList(Node).empty;
+    try value.appendSlice(allocator, op_value.root);
+    try value.appendSlice(allocator, contents.root[0..split]);
+    const merged_value = incrementHeight(Pattern.fromSlice(try value.toOwnedSlice(allocator)));
+
+    var entry = try allocator.alloc(Node, prefix.len);
+    @memcpy(entry[0 .. prefix.len - 1], prefix[0 .. prefix.len - 1]);
+    entry[prefix.len - 1] = switch (op) {
+        .arrow => Node{ .arrow = merged_value },
+        else => Node{ .match = merged_value },
+    };
+    try result.appendEntry(allocator, Pattern.fromSlice(entry));
+
+    if (split < contents.root.len)
+        try appendEntryRecursive(result, allocator, Pattern.fromSlice(contents.root[split..]));
+    return true;
 }
 
 fn patternOf(nodes: []Node, max_child_height: usize) Pattern {
