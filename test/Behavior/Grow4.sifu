@@ -1,6 +1,6 @@
 # This test is a little unexpected, but it demonstrates the behavior of nested
 # evaluation's shrinking upper bound coinciding with a raising lower bound.
-# More expected behavior would be to modify the second rule to `(A) -> ((A))`.
+# More expected behavior would be to modify the second rule to `(A) -> (A)`.
 A -> (A)
 A -> (A)
 
