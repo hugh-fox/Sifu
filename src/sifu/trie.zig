@@ -755,6 +755,20 @@ pub const Trie = struct {
         return min_branch;
     }
 
+    /// Whether this trie (the continuation after a var_pattern) has a branch
+    /// that could match `node`, so the var_pattern should stop capturing here
+    /// and let the rest of the rule resume. A following variable matches any
+    /// term.
+    fn continuesAt(self: *const Self, node: Node) bool {
+        if (self.var_branches.items.len > 0) return true;
+        return switch (node) {
+            .constant => |c| self.map.get(c) != null,
+            .infix => |inf| self.map.get(inf.op) != null,
+            .pattern => self.map.get("(") != null,
+            else => false,
+        };
+    }
+
     /// Find the first term at or after bound
     fn matchTerm(
         self: *const Self,
@@ -1083,17 +1097,24 @@ pub const Trie = struct {
                     // swallows the whole list (needed for `map` and friends).
                     if (branch.isVarPattern()) {
                         const var_trie = variable.entry.value_ptr;
+                        // The var_pattern captures a run of terms starting at
+                        // this one. A list separator always ends the segment.
+                        // Otherwise it extends until the rest of the rule (the
+                        // trie continuation after the var) can resume matching
+                        // an upcoming term; a trailing var with no such
+                        // continuation swallows everything that remains.
                         const segmented = var_trie.map.get(",") != null or
                             var_trie.map.get(";") != null or
                             var_trie.map.get("\n") != null;
-                        var boundary = pattern.root.len;
-                        if (segmented) {
-                            boundary = pattern_index;
-                            while (boundary < pattern.root.len) : (boundary += 1) {
+                        var boundary = pattern_index + 1;
+                        while (boundary < pattern.root.len) : (boundary += 1) {
+                            if (segmented) {
                                 switch (pattern.root[boundary]) {
                                     .list, .semicolon, .newline, .indent => break,
                                     else => {},
                                 }
+                            } else if (var_trie.continuesAt(pattern.root[boundary])) {
+                                break;
                             }
                         }
                         const rest_root = pattern.root[pattern_index..boundary];
