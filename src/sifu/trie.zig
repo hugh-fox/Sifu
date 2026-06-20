@@ -817,54 +817,10 @@ pub const Trie = struct {
             },
 
             .variable => |variable| {
-                // Match against bound variable or bind new one
-                if (term_bindings.get(variable)) |bound_node| {
-                    debug("Checking existing var binding: {s}", .{variable});
-                    // Variable already bound - need to match the bound value
-                    return if (node.eql(bound_node)) {
-                        panic("unimplemented\n", .{});
-                    } else {
-                        panic("unimplemented\n", .{});
-                    };
-                } else {
-                    debug(
-                        "Variable {s} not yet bound - matches anything",
-                        .{variable},
-                    );
-                    // Variable not bound - it can match any single term
-                    // We need to try matching each possible branch
-                    if (self.findNext(bound)) |next_candidate| {
-                        const next_index, const next_branch = next_candidate;
-
-                        // Bind the variable to what we're matching
-                        const bound_value = switch (next_branch) {
-                            .constant => |branch_node| Node.ofConstant(
-                                branch_node.entry.key_ptr.*,
-                            ),
-                            .variable => |branch_node| Node.ofVar(
-                                branch_node.entry.key_ptr.*,
-                            ),
-                            .value => {
-                                // TODO
-                                // new_bindings.deinit(allocator);
-                                return null;
-                            },
-                        };
-
-                        try term_bindings.put(allocator, variable, bound_value);
-
-                        const next_trie = switch (next_branch) {
-                            .constant => |b| b.entry.value_ptr,
-                            .variable => |b| b.entry.value_ptr,
-                            .value => @panic("value branch in variable matching"),
-                        };
-                        return .{
-                            .index = next_index,
-                            .branch = next_branch,
-                            .trie = next_trie,
-                        };
-                    }
-                }
+                // A subject variable is opaque: it can only match a trie var
+                // branch (handled above), never a concrete rule term.
+                debug("Subject variable {s} has no var branch to match", .{variable});
+                return null;
             },
             .pattern => |pattern| {
                 // Match opening paren

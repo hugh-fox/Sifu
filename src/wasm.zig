@@ -6,8 +6,6 @@ const fmt = std.fmt;
 const io = std.io;
 const ArrayList = std.ArrayList;
 const Allocator = std.mem.Allocator;
-// for debugging with zig test --test-filter, comment this import
-const verbose_errors = @import("build_options").verbose_errors;
 const use_tree_sitter = @import("build_options").tree_sitter;
 const Parser = @import("Parser.zig");
 const ts = if (use_tree_sitter) @import("tree_sitter_parser.zig") else struct {};
@@ -275,11 +273,5 @@ pub const streams: Streams = .{
         .writeFn = writeFn,
         .context = undefined,
     },
-    .err = if (verbose_errors)
-        io.Writer{
-            .writeFn = writeFn,
-            .context = undefined,
-        }
-    else
-        io.Writer.Discarding,
+    .err = io.Writer.Discarding,
 };

@@ -23,7 +23,6 @@ const detect_leaks = @import("build_options").detect_leaks;
 const debug_mode = @import("builtin").mode == .Debug;
 const Reader = Io.Reader;
 const Writer = Io.Writer;
-const verbose_tests = @import("build_options").verbose_errors;
 const use_tree_sitter = @import("build_options").tree_sitter;
 const Parser = @import("Parser.zig");
 const ts = if (use_tree_sitter) @import("tree_sitter_parser.zig") else struct {};
@@ -33,11 +32,27 @@ const compiler = @import("compiler.zig");
 var config = struct {
     interactive: bool = false,
     compile: bool = false,
+    verbose: bool = false,
     source: []const u8 = "",
     trie: []const u8 = "",
     evaluate: []const u8 = "",
     expression: []const u8 = "",
 }{};
+
+// Gates debug logs at runtime; set from the --verbose flag after parsing.
+var log_enabled = false;
+
+pub const std_options: std.Options = .{ .logFn = logFn };
+
+fn logFn(
+    comptime level: std.log.Level,
+    comptime scope: @TypeOf(.enum_literal),
+    comptime format: []const u8,
+    args: anytype,
+) void {
+    if (level == .debug and !log_enabled) return;
+    std.log.defaultLog(level, scope, format, args);
+}
 
 fn noOp() !void {}
 
@@ -80,6 +95,12 @@ pub fn main(init: std.process.Init) !void {
                     .value_ref = r.mkRef(&config.compile),
                 },
                 .{
+                    .long_name = "verbose",
+                    .short_alias = 'v',
+                    .help = "write debug logs to stderr",
+                    .value_ref = r.mkRef(&config.verbose),
+                },
+                .{
                     .long_name = "source",
                     .short_alias = 's',
                     .help = "source file to parse into the trie to evaluate against",
@@ -115,6 +136,7 @@ pub fn main(init: std.process.Init) !void {
         },
     };
     _ = try r.getAction(&app);
+    log_enabled = config.verbose;
 
     const stdin_is_piped = !(std.Io.File.stdin().isTty(init.io) catch false);
 

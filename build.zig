@@ -15,11 +15,6 @@ pub fn build(b: *std.Build) void {
     // set a preferred release mode, allowing the user to decide how to optimize.
     const optimize = b.standardOptimizeOption(.{});
 
-    const verbose_errors = b.option(
-        bool,
-        "VerboseErrors",
-        "Write all error and debug information to stderr",
-    ) orelse false;
     const detect_leaks = b.option(
         bool,
         "DetectLeaks",
@@ -31,7 +26,6 @@ pub fn build(b: *std.Build) void {
         "Use the tree-sitter parser instead of the recursive descent parser",
     ) orelse false;
     const build_options = b.addOptions();
-    build_options.addOption(bool, "verbose_errors", verbose_errors);
     build_options.addOption(bool, "detect_leaks", detect_leaks);
     build_options.addOption(bool, "tree_sitter", use_tree_sitter);
 
@@ -73,12 +67,11 @@ pub fn build(b: *std.Build) void {
     if (use_tree_sitter)
         exe.root_module.addImport("tree_sitter_sifu", tree_sitter_sifu.module("tree_sitter_sifu"));
 
-    // This is commented out so as to not build the x86 default when targeting
-    // wasm.
-    // This declares intent for the executable to be installed into the
-    // standard location when the user invokes the "install" step (the default
-    // step when running `zig build`).
-    // b.installArtifact(exe);
+    // Only install the native exe into zig-out for release builds, so the
+    // default debug `zig build`/`zig build run` doesn't build the x86 exe when
+    // targeting wasm.
+    if (optimize != .Debug)
+        b.installArtifact(exe);
 
     // This *creates* a Run step in the build graph, to be executed when another
     // step is evaluated that depends on it. The next line below will establish
@@ -207,7 +200,6 @@ pub fn build(b: *std.Build) void {
     // with -DDetectLeaks forced on for them, leaving the default `zig build run`
     // exe on its arena.
     const leakcheck_options = b.addOptions();
-    leakcheck_options.addOption(bool, "verbose_errors", verbose_errors);
     leakcheck_options.addOption(bool, "detect_leaks", true);
     leakcheck_options.addOption(bool, "tree_sitter", use_tree_sitter);
 

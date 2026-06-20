@@ -13,7 +13,6 @@ const ArrayListUnmanaged = std.ArrayListUnmanaged;
 const DoublyLinkedList = std.DoublyLinkedList;
 const assert = std.debug.assert;
 const panic = std.debug.panic;
-const verbose_errors = @import("build_options").verbose_errors;
 const debug_mode = @import("builtin").mode == .Debug;
 const Trie = @import("sifu/trie.zig").Trie;
 const Pattern = @import("sifu/trie.zig").Pattern;
