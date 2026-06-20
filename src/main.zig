@@ -33,6 +33,9 @@ const compiler = @import("compiler.zig");
 var config = struct {
     interactive: bool = false,
     compile: bool = false,
+    source: []const u8 = "",
+    trie: []const u8 = "",
+    evaluate: []const u8 = "",
     expression: []const u8 = "",
 }{};
 
@@ -76,6 +79,24 @@ pub fn main(init: std.process.Init) !void {
                     .help = "compile the expression to WAT using wat.sifu",
                     .value_ref = r.mkRef(&config.compile),
                 },
+                .{
+                    .long_name = "source",
+                    .short_alias = 's',
+                    .help = "source file to parse into the trie to evaluate against",
+                    .value_ref = r.mkRef(&config.source),
+                },
+                .{
+                    .long_name = "trie",
+                    .short_alias = 't',
+                    .help = "expression parsed as the trie to evaluate against (top-level, no braces)",
+                    .value_ref = r.mkRef(&config.trie),
+                },
+                .{
+                    .long_name = "evaluate",
+                    .short_alias = 'e',
+                    .help = "expression to evaluate",
+                    .value_ref = r.mkRef(&config.evaluate),
+                },
             }),
             .target = cli.CommandTarget{
                 .action = cli.CommandAction{
@@ -96,7 +117,6 @@ pub fn main(init: std.process.Init) !void {
     _ = try r.getAction(&app);
 
     const stdin_is_piped = !(std.Io.File.stdin().isTty(init.io) catch false);
-    const has_expr = config.expression.len > 0;
 
     var trie = Trie{};
     defer trie.deinit(allocator);
@@ -104,21 +124,40 @@ pub fn main(init: std.process.Init) !void {
     // The trie borrows its key/constant bytes from this source text, so the
     // buffer holding it must outlive the trie (freed after the deinit above,
     // which runs first by LIFO).
-    var trie_src = std.Io.Writer.Allocating.init(allocator);
-    defer trie_src.deinit();
+    var trie_src: []const u8 = "";
+    defer if (trie_src.len > 0) allocator.free(trie_src);
 
-    if (stdin_is_piped)
-        trie_src = try loadTrie(allocator, streams, &trie);
+    if (config.trie.len > 0) {
+        trie = try Parser.parseTrie(allocator, config.trie);
+    } else if (config.source.len > 0) {
+        trie_src = try Io.Dir.cwd().readFileAlloc(init.io, config.source, allocator, .unlimited);
+        if (trie_src.len > 0)
+            trie = try Parser.parseTrie(allocator, trie_src);
+    }
 
-    // Compile mode: evaluate the expression against the piped `wat.sifu` rules
+    // The expression to evaluate, preferring -e, then a positional arg, then
+    // piped stdin. The stdin buffer must outlive the eval that borrows it.
+    var stdin_buf = std.Io.Writer.Allocating.init(allocator);
+    defer stdin_buf.deinit();
+    var expr: []const u8 = "";
+    if (config.evaluate.len > 0) {
+        expr = config.evaluate;
+    } else if (config.expression.len > 0) {
+        expr = config.expression;
+    } else if (stdin_is_piped and !config.interactive) {
+        stdin_buf = try readAll(allocator, streams);
+        expr = stdin_buf.written();
+    }
+
+    // Compile mode: evaluate the expression against the source `wat.sifu` rules
     // and render the result as WAT text via the string interpreter.
     if (config.compile) {
-        if (!has_expr) {
+        if (expr.len == 0) {
             try streams.err.print("error: -c/--compile needs an expression to compile\n", .{});
             try streams.err.flush();
             return;
         }
-        const wat = try compiler.compile(allocator, trie, config.expression);
+        const wat = try compiler.compile(allocator, trie, expr);
         try streams.out.print("{s}\n", .{wat});
         try streams.out.flush();
         return;
@@ -126,7 +165,7 @@ pub fn main(init: std.process.Init) !void {
 
     if (config.interactive) {
         if (stdin_is_piped) {
-            // Reopen TTY for interactive input after loading trie from pipe
+            // Reopen TTY for interactive input when stdin was a pipe
             var tty_buffer: [1024]u8 = undefined;
             const tty_file = try Io.Dir.openFileAbsolute(init.io, "/dev/tty", .{});
             var tty_reader = tty_file.reader(init.io, &tty_buffer);
@@ -140,16 +179,13 @@ pub fn main(init: std.process.Init) !void {
         return replWithTrie(allocator, streams, &trie);
     }
 
-    if (has_expr)
-        try evalExpr(allocator, streams, &trie, config.expression);
+    if (expr.len > 0)
+        try evalExpr(allocator, streams, &trie, expr);
 }
 
-// Reads the trie definition from stdin and parses it into `trie`. The parser
-// stores borrowed slices into the source text as the trie's keys and constants,
-// so the returned buffer (which holds that text in place) must outlive `trie`;
-// the caller owns it and frees it with `deinit`.
-fn loadTrie(allocator: Allocator, streams: Streams, trie: *Trie) !std.Io.Writer.Allocating {
-    // Read all of stdin at once to support multi-line patterns
+// Reads all of stdin into a buffer at once, to support multi-line input. The
+// caller owns the returned buffer and frees it with `deinit`.
+fn readAll(allocator: Allocator, streams: Streams) !std.Io.Writer.Allocating {
     var buffer = std.Io.Writer.Allocating.init(allocator);
     errdefer buffer.deinit();
     while (true) {
@@ -159,9 +195,6 @@ fn loadTrie(allocator: Allocator, streams: Streams, trie: *Trie) !std.Io.Writer.
         };
         try buffer.writer.writeByte('\n');
         _ = streams.in.takeByte() catch break;
-    }
-    if (buffer.written().len > 0) {
-        trie.* = try Parser.parseTrie(allocator, buffer.written());
     }
     return buffer;
 }
