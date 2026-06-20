@@ -28,7 +28,7 @@ pub fn maxNumber(root: []const Node) ?i64 {
 fn nodeNumber(node: Node) ?i64 {
     return switch (node) {
         .constant => |constant| std.fmt.parseInt(i64, constant, 10) catch null,
-        inline .pattern, .list => |sub| math.foldRoot(sub.root) orelse maxNumber(sub.root),
+        inline .pattern, .list, .semicolon => |sub| math.foldRoot(sub.root) orelse maxNumber(sub.root),
         else => null,
     };
 }

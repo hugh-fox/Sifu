@@ -1,0 +1,18 @@
+# A leading `$` glued to an identifier makes a constant (a literal key), even
+# when the body looks like a variable (lowercase). This lets generated code use
+# placeholder names like `$problem_id` that are matched literally rather than
+# binding as variables.
+$problem_id -> 2563
+
+# `$x` is a constant key, whereas the bare `x` beside it stays a variable.
+Set $x To x -> Done
+
+# `$` constants mix with ordinary terms inside nested groups and lists.
+INSERT INTO answers ($problem_id, number, NULL) VALUES
+
+# A lone `$` (or `$ ` followed by a space) is an ordinary operator symbol, not
+# a constant prefix.
+a $ b
+
+# Underscores and dashes are allowed in the body, like any identifier.
+$is_active -> $sub-total

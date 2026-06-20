@@ -217,6 +217,58 @@ fn runBehaviorTest(allocator: Allocator, comptime name: []const u8) !void {
     if (passed == 0) return error.NoTestsRun;
 }
 
+/// Identifiers used to build random expressions, mixing ASCII and multibyte
+/// UTF-8 (CJK, Greek, accented). Each is a single valid sifu token.
+const random_idents = [_][]const u8{
+    "foo", "Bar",  "x",    "Const", "你好",
+    "世界", "猫Cat", "Δ",    "λ",     "café",
+    "T",   "ab12", "X你",   "变量",    "f",
+};
+
+/// Appends a random, already-canonical expression to `out`: space-separated
+/// atoms, each either an identifier or a parenthesized sub-expression. Because
+/// the layout is canonical, evaluating it against an empty trie must echo it
+/// back verbatim (a no-op).
+fn genExpr(out: *ArrayList(u8), allocator: Allocator, rng: std.Random, depth: u8) !void {
+    const atoms = rng.intRangeAtMost(usize, 1, 4);
+    for (0..atoms) |i| {
+        if (i > 0) try out.append(allocator, ' ');
+        // Only nest while we have depth budget, and not for every atom.
+        if (depth > 0 and rng.boolean()) {
+            try out.append(allocator, '(');
+            try genExpr(out, allocator, rng, depth - 1);
+            try out.append(allocator, ')');
+        } else {
+            const ident = random_idents[rng.uintLessThan(usize, random_idents.len)];
+            try out.appendSlice(allocator, ident);
+        }
+    }
+}
+
+/// Evaluates random expressions against an empty trie and asserts each is
+/// echoed back unchanged. Guards against the lexer dropping UTF-8 bytes.
+fn runEmptyTrieNoop(allocator: Allocator) !void {
+    const seed: u64 = 0x5ec0ffee;
+    var prng = std.Random.DefaultPrng.init(seed);
+    const rng = prng.random();
+
+    for (0..64) |_| {
+        var expr: ArrayList(u8) = .empty;
+        defer expr.deinit(allocator);
+        try genExpr(&expr, allocator, rng, 3);
+
+        const actual = try runSifu(allocator, "", expr.items);
+        defer allocator.free(actual);
+
+        testing.expectEqualStrings(expr.items, actual) catch |err| {
+            std.debug.print("seed {d}: empty-trie eval changed '{s}' -> '{s}'\n", .{
+                seed, expr.items, actual,
+            });
+            return err;
+        };
+    }
+}
+
 const build_options = @import("build_options");
 const parsable_files = build_options.parsable_files;
 const behavior_files = build_options.behavior_files;
@@ -262,6 +314,15 @@ comptime {
             }
         };
     }
+
+    _ = struct {
+        test "EmptyTrieNoop" {
+            if (!nameSelected("EmptyTrieNoop")) return error.SkipZigTest;
+            var arena = std.heap.ArenaAllocator.init(testing.allocator);
+            defer arena.deinit();
+            try runEmptyTrieNoop(arena.allocator());
+        }
+    };
 
     for (behavior_files) |file| {
         _ = struct {

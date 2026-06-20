@@ -222,6 +222,7 @@ fn parseTermNode(
         var_pattern,
         number,
         string,
+        single_string,
         symbol,
         nested_pattern,
         nested_trie,
@@ -235,7 +236,7 @@ fn parseTermNode(
     };
 
     return switch (kind) {
-        .key, .number, .string, .symbol => Node{ .constant = text },
+        .key, .number, .string, .single_string, .symbol => Node{ .constant = text },
         .variable => Node{ .variable = text },
         .var_pattern => Node{ .variable = text },
         .comment => Node{ .comment = text },
@@ -260,7 +261,7 @@ fn convertRHS(
         return Node{ .pattern = rhs_pattern.* };
     } else if (mem.eql(u8, node_kind, "semicolon")) {
         defer rhs_pattern.* = .{};
-        return Node{ .list = rhs_pattern.* };
+        return Node{ .semicolon = rhs_pattern.* };
     } else if (mem.eql(u8, node_kind, "newline_sep")) {
         defer rhs_pattern.* = .{};
         return Node{ .newline = .{ .ws = ws, .rhs = rhs_pattern.* } };

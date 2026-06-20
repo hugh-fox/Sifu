@@ -112,7 +112,7 @@ pub fn membership(trie: Trie, upper: usize, current: *Pattern, allocator: Alloca
 
 pub fn firstList(root: []const Node) ?usize {
     for (root, 0..) |node, i|
-        if (node == .list) return if (i > 0) i else null;
+        if (node == .list or node == .semicolon) return if (i > 0) i else null;
     return null;
 }
 

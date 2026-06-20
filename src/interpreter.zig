@@ -237,7 +237,7 @@ fn evaluate(it: anytype) Allocator.Error!Pattern {
             @constCast(&inf.rhs).deinit(allocator);
             node.* = Node{ .infix = .{ .op = inf.op, .rhs = rhs } };
         },
-        inline .pattern, .match, .arrow, .list => |sub, tag| {
+        inline .pattern, .match, .arrow, .list, .semicolon => |sub, tag| {
             var child_it = try spawnChild(Eval, it.ctx, sub, pattern_height, pattern_number, allocator);
             errdefer child_it.deinit();
             var evaluated = try evaluate(&child_it);

@@ -1,0 +1,13 @@
+# Double-quoted and single-quoted strings are distinct token kinds. Both round
+# trip verbatim, including their quotes, escapes, and UTF-8 contents. Single
+# quotes are common in SQL string literals.
+"hello" 'world'
+
+# Empty strings of both kinds.
+"" ''
+
+# UTF-8 inside single quotes, mixed into a list like a SQL row.
+INSERT (a, 'duì', '对', 1, "double")
+
+# Escaped quotes inside each kind.
+"say \"hi\"" 'it\'s'

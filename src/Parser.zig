@@ -37,6 +37,7 @@ pub const Tag = enum {
     var_pattern,
     number,
     string,
+    single_string,
     symbol,
     comment,
     semicolon,
@@ -132,16 +133,27 @@ fn advance(self: *Self) Token {
         '\n' => return self.lexWhitespace(),
         ',' => return self.single(.comma),
         '"' => return self.lexString(),
+        '\'' => return self.lexSingleString(),
         else => {},
     }
 
     if (isDigit(c)) return self.lexNumber();
+
+    // A leading `$` glued directly to an identifier (e.g. `$x`, `$problem_id`)
+    // is a constant, not a variable: the `$` lets otherwise variable-looking
+    // (lowercase) names be treated as literal keys. A lone `$` or `$ name`
+    // (space) stays an operator symbol.
+    if (c == '$' and self.pos + 1 < self.source.len and isIdentStart(self.source[self.pos + 1]))
+        return self.lexDollarConstant();
 
     // Identifiers may carry a leading run of `-`/`_` (e.g. `-Const`, `_x`),
     // mirroring the grammar's key/variable/var_pattern regexes. What follows the
     // prefix decides the kind: `*`+lowercase -> var_pattern (underscores only in
     // the prefix), uppercase -> key/constant, lowercase -> variable. A bare `_`
     // is itself a key. Anything else starting with `-`/`*` is an operator.
+    // Bytes outside ASCII (UTF-8 multibyte sequences, e.g. CJK) are ordinary
+    // identifier characters, lexed as a constant like an uppercase letter.
+    if (c >= 0x80) return self.lexConstant();
     if (c == '_' or c == '-' or c == '*' or isUpper(c) or isLower(c)) {
         var i = self.pos;
         while (i < self.source.len and (self.source[i] == '-' or self.source[i] == '_'))
@@ -227,6 +239,15 @@ fn lexVariable(self: *Self) Token {
     return .{ .tag = .variable, .start = start, .end = self.pos };
 }
 
+// `$name`: a constant whose body is an ordinary identifier. The `$` is kept in
+// the token text so it round-trips.
+fn lexDollarConstant(self: *Self) Token {
+    const start = self.pos;
+    self.pos += 1; // skip the leading `$`
+    self.scanIdentTail();
+    return .{ .tag = .constant, .start = start, .end = self.pos };
+}
+
 fn lexVarPattern(self: *Self) Token {
     const start = self.pos;
     while (self.pos < self.source.len and self.source[self.pos] == '_')
@@ -257,19 +278,29 @@ fn lexNumber(self: *Self) Token {
 }
 
 fn lexString(self: *Self) Token {
+    return self.lexQuoted('"', .string);
+}
+
+// Single-quoted strings (`'...'`) are a distinct token from double-quoted
+// strings, kept apart so source like SQL string literals round-trips faithfully.
+fn lexSingleString(self: *Self) Token {
+    return self.lexQuoted('\'', .single_string);
+}
+
+fn lexQuoted(self: *Self, quote: u8, tag: Tag) Token {
     const start = self.pos;
-    self.pos += 1; // skip opening "
+    self.pos += 1; // skip opening quote
     while (self.pos < self.source.len) {
         if (self.source[self.pos] == '\\' and self.pos + 1 < self.source.len) {
             self.pos += 2; // skip escape sequence
-        } else if (self.source[self.pos] == '"') {
-            self.pos += 1; // skip closing "
+        } else if (self.source[self.pos] == quote) {
+            self.pos += 1; // skip closing quote
             break;
         } else {
             self.pos += 1;
         }
     }
-    return .{ .tag = .string, .start = start, .end = self.pos };
+    return .{ .tag = tag, .start = start, .end = self.pos };
 }
 
 fn lexOperator(self: *Self) Token {
@@ -305,7 +336,12 @@ fn isDigit(c: u8) bool {
 }
 
 fn isIdentTail(c: u8) bool {
-    return isUpper(c) or isLower(c) or isDigit(c) or c == '_';
+    return isUpper(c) or isLower(c) or isDigit(c) or c == '_' or c >= 0x80;
+}
+
+// The character that may immediately follow `$` to form a variable.
+fn isIdentStart(c: u8) bool {
+    return isUpper(c) or isLower(c) or isDigit(c) or c == '_' or c >= 0x80;
 }
 
 fn isOpChar(c: u8) bool {
@@ -347,13 +383,14 @@ pub fn parsePattern(self: *Self, allocator: Allocator) Oom!Pattern {
     return self.parsePrec1(allocator);
 }
 
-/// Builds the wrapper node for a separator token. A semicolon/comma produces a
-/// `.list`; a newline/indent produces a `.newline`/`.indent` carrying the
-/// literal whitespace, so the printer reproduces the exact layout.
+/// Builds the wrapper node for a separator token. A comma produces a `.list`, a
+/// semicolon a `.semicolon`; a newline/indent produces a `.newline`/`.indent`
+/// carrying the literal whitespace, so the printer reproduces the exact layout.
 fn sepNode(self: *Self, tok: Token, rhs: Pattern) Node {
     return switch (tok.tag) {
         .newline => Node{ .newline = .{ .ws = tok.text(self.source), .rhs = incrementHeight(rhs) } },
         .indent => Node{ .indent = .{ .ws = tok.text(self.source), .rhs = incrementHeight(rhs) } },
+        .semicolon => Node{ .semicolon = incrementHeight(rhs) },
         else => Node{ .list = incrementHeight(rhs) },
     };
 }
@@ -527,7 +564,7 @@ fn parseTerms(self: *Self, allocator: Allocator) Oom!Pattern {
 fn parseTerm(self: *Self, allocator: Allocator) Oom!Node {
     const tok = self.eat();
     return switch (tok.tag) {
-        .constant, .number, .string => Node{ .constant = tok.text(self.source) },
+        .constant, .number, .string, .single_string => Node{ .constant = tok.text(self.source) },
         .variable => Node{ .variable = tok.text(self.source) },
         .var_pattern => Node{ .variable = tok.text(self.source) },
         .comment => Node{ .comment = tok.text(self.source) },
@@ -566,6 +603,7 @@ fn canStartTerm(self: Self) bool {
         .var_pattern,
         .number,
         .string,
+        .single_string,
         .comment,
         .left_paren,
         .left_brace,
@@ -581,7 +619,8 @@ fn incrementHeight(p: Pattern) Pattern {
 
 fn wrapOp(tag: Tag, rhs: Pattern) Node {
     return switch (tag) {
-        .semicolon, .comma => Node{ .list = incrementHeight(rhs) },
+        .semicolon => Node{ .semicolon = incrementHeight(rhs) },
+        .comma => Node{ .list = incrementHeight(rhs) },
         .long_match, .match => Node{ .match = incrementHeight(rhs) },
         .long_arrow, .arrow => Node{ .arrow = incrementHeight(rhs) },
         else => Node{ .pattern = incrementHeight(rhs) },
@@ -630,7 +669,7 @@ fn appendEntryRecursive(result: *Trie, allocator: Allocator, pattern: Pattern) O
     // A trailing separator splits entries: prefix is one entry, contents more.
     const last_idx = pattern.root.len - 1;
     const sep_contents: ?Pattern = switch (pattern.root[last_idx]) {
-        .list => |p| p,
+        .list, .semicolon => |p| p,
         .newline, .indent => |sep| sep.rhs,
         else => null,
     };
@@ -678,7 +717,7 @@ fn foldContinuation(result: *Trie, allocator: Allocator, prefix: []Node, content
     // folded value, the rest (if any) stays as following entries.
     var split: usize = contents.root.len;
     for (contents.root, 0..) |node, i| switch (node) {
-        .list, .newline, .indent => {
+        .list, .semicolon, .newline, .indent => {
             split = i;
             break;
         },
@@ -730,7 +769,7 @@ pub fn parse(allocator: Allocator, source: []const u8) Oom!Pattern {
 
 const testing = std.testing;
 
-const NodeTag = enum { constant, variable, var_pattern, comment, pattern, infix, match, arrow, list, newline, indent, trie };
+const NodeTag = enum { constant, variable, var_pattern, comment, pattern, infix, match, arrow, list, semicolon, newline, indent, trie };
 
 fn expectNodes(pattern: Pattern, expected_tags: []const NodeTag) !void {
     try testing.expectEqual(expected_tags.len, pattern.root.len);
@@ -744,6 +783,7 @@ fn expectNodes(pattern: Pattern, expected_tags: []const NodeTag) !void {
             .match => .match,
             .arrow => .arrow,
             .list => .list,
+            .semicolon => .semicolon,
             .newline => .newline,
             .indent => .indent,
             .trie => .trie,
@@ -878,12 +918,13 @@ test "semicolon: A ; B ; C" {
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
     const p = try parse(arena.allocator(), "A ; B ; C");
-    // Right-assoc: [A, list([B, list([C])])]
-    try expectNodes(p, &.{ .constant, .list });
+    // Right-assoc: [A, semicolon([B, semicolon([C])])]. Semicolons are their
+    // own node type, distinct from comma lists.
+    try expectNodes(p, &.{ .constant, .semicolon });
     try testing.expectEqualStrings("A", p.root[0].constant);
-    try testing.expectEqualStrings("B", p.root[1].list.root[0].constant);
-    try expectNodes(p.root[1].list, &.{ .constant, .list });
-    try testing.expectEqualStrings("C", p.root[1].list.root[1].list.root[0].constant);
+    try testing.expectEqualStrings("B", p.root[1].semicolon.root[0].constant);
+    try expectNodes(p.root[1].semicolon, &.{ .constant, .semicolon });
+    try testing.expectEqualStrings("C", p.root[1].semicolon.root[1].semicolon.root[0].constant);
 }
 
 test "incrementHeight pattern: (A B)" {
@@ -1178,17 +1219,17 @@ test "multiline: multi-line pattern without continuation" {
 test "multiline: newlines and semicolons produce same structure" {
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
-    // Newlines and semicolons are distinct nodes (.newline vs .list) for
+    // Newlines and semicolons are distinct nodes (.newline vs .semicolon) for
     // pretty-print isomorphism, but separate entries the same way.
     const with_newline = try parse(arena.allocator(), "A\nB");
     const with_semicolon = try parse(arena.allocator(), "A; B");
 
     try expectNodes(with_newline, &.{ .constant, .newline });
-    try expectNodes(with_semicolon, &.{ .constant, .list });
+    try expectNodes(with_semicolon, &.{ .constant, .semicolon });
     try testing.expectEqualStrings("A", with_newline.root[0].constant);
     try testing.expectEqualStrings("A", with_semicolon.root[0].constant);
     try testing.expectEqualStrings("B", with_newline.root[1].newline.rhs.root[0].constant);
-    try testing.expectEqualStrings("B", with_semicolon.root[1].list.root[0].constant);
+    try testing.expectEqualStrings("B", with_semicolon.root[1].semicolon.root[0].constant);
 }
 
 test "multiline: trailing operators do not continue" {

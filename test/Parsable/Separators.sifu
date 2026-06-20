@@ -1,0 +1,12 @@
+# Semicolons and commas are distinct separators with their own node types:
+# `;` is a lower-precedence (prec 1) separator that prints as `;`, while `,` is
+# a higher-precedence (prec 3) list separator that prints as `,`. They must not
+# collapse into each other.
+A; B, C
+
+# Mixed across precedence levels within one expression.
+First, Second; Third, Fourth
+
+# Trailing separators of each kind.
+1, 2,
+X; Y;

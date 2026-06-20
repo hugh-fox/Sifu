@@ -68,6 +68,11 @@ pub const Node = union(enum) {
     /// Lists are operators that are recognized as separators for
     /// patterns.
     list: Pattern,
+    /// A single element in a semicolon separated list, with the `;` elided.
+    /// Distinct from `.list` (comma): a lower-precedence separator that prints
+    /// as `;` and matches on its own `;` key, but is otherwise evaluated like a
+    /// list.
+    semicolon: Pattern,
     /// A newline-separated entry. Evaluated like list/semicolon but carries the
     /// literal newline whitespace for pretty-print isomorphism.
     newline: Sep,
@@ -194,7 +199,7 @@ pub const Node = union(enum) {
 
     pub fn height(self: Node) usize {
         return switch (self) {
-            .pattern, .match, .arrow, .list => |p| p.height,
+            .pattern, .match, .arrow, .list, .semicolon => |p| p.height,
             .newline, .indent => |sep| sep.rhs.height,
             .infix => |inf| inf.rhs.height,
             else => 0,
@@ -253,6 +258,7 @@ pub const Node = union(enum) {
                     .arrow => try writer.writeAll("-> "),
                     .match => try writer.writeAll(": "),
                     .list => try writer.writeAll(", "),
+                    .semicolon => try writer.writeAll("; "),
                     else => {},
                 }
                 try pattern.writeIndent(writer, optional_indent);

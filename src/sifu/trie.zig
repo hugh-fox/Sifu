@@ -513,6 +513,13 @@ pub const Trie = struct {
 
                 break :blk next;
             },
+            .semicolon => |semi| blk: {
+                var next = trie;
+                next = try next.getOrPutConstant(allocator, index, ";");
+                next = try next.ensurePath(allocator, index, semi);
+
+                break :blk next;
+            },
             .indent => |ind| blk: {
                 var next = trie;
                 next = try next.getOrPutConstant(allocator, index, ",");
@@ -864,6 +871,7 @@ pub const Trie = struct {
             // Separators flatten onto the trie path as a key (`,` or `\n`)
             // followed by their contents. `.indent` evaluates like a comma.
             .list => |pattern| return self.matchSeparator(allocator, bound, term_bindings, ",", pattern),
+            .semicolon => |pattern| return self.matchSeparator(allocator, bound, term_bindings, ";", pattern),
             .newline => |sep| return self.matchSeparator(allocator, bound, term_bindings, "\n", sep.rhs),
             .indent => |sep| return self.matchSeparator(allocator, bound, term_bindings, ",", sep.rhs),
             .trie => |query_trie| {
@@ -1062,7 +1070,7 @@ pub const Trie = struct {
                     // already happened in the recursive matchTerm call. But var_patterns
                     // need special handling because they capture the rest of the pattern.
                     const is_compound = switch (node) {
-                        .list, .pattern, .match, .arrow, .infix => true,
+                        .list, .semicolon, .pattern, .match, .arrow, .infix => true,
                         else => false,
                     };
                     // Var patterns (starting with '*') capture the rest of the
@@ -1076,13 +1084,14 @@ pub const Trie = struct {
                     if (branch.isVarPattern()) {
                         const var_trie = variable.entry.value_ptr;
                         const segmented = var_trie.map.get(",") != null or
+                            var_trie.map.get(";") != null or
                             var_trie.map.get("\n") != null;
                         var boundary = pattern.root.len;
                         if (segmented) {
                             boundary = pattern_index;
                             while (boundary < pattern.root.len) : (boundary += 1) {
                                 switch (pattern.root[boundary]) {
-                                    .list, .newline, .indent => break,
+                                    .list, .semicolon, .newline, .indent => break,
                                     else => {},
                                 }
                             }
@@ -1214,7 +1223,7 @@ pub const Trie = struct {
                     }
                 }
             },
-            inline .pattern, .arrow, .match, .list => |nested, tag| {
+            inline .pattern, .arrow, .match, .list, .semicolon => |nested, tag| {
                 const rewritten = try rewrite(allocator, nested, term_bindings);
                 const wrapped = Pattern{ .root = rewritten.root, .height = rewritten.height + 1 };
                 max_child = @max(max_child, wrapped.height);

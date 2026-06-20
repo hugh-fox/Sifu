@@ -25,13 +25,13 @@ pub const Pattern = struct {
         if (slice.len == 1) {
             return;
         } else for (slice[1 .. slice.len - 1]) |*node| {
-            // Don't add space before list/newline nodes or comma keys
-            if (node.* != .list and node.* != .newline and node.* != .indent and !node.isCommaConstant())
+            // Don't add space before separator nodes or comma keys
+            if (node.* != .list and node.* != .semicolon and node.* != .newline and node.* != .indent and !node.isCommaConstant())
                 try writer.writeByte(' ');
             try node.writeSExp(writer, optional_indent);
         }
-        // Don't add space before list/newline nodes or comma keys
-        if (slice[slice.len - 1] != .list and slice[slice.len - 1] != .newline and slice[slice.len - 1] != .indent and !slice[slice.len - 1].isCommaConstant())
+        // Don't add space before separator nodes or comma keys
+        if (slice[slice.len - 1] != .list and slice[slice.len - 1] != .semicolon and slice[slice.len - 1] != .newline and slice[slice.len - 1] != .indent and !slice[slice.len - 1].isCommaConstant())
             try writer.writeByte(' ');
         try slice[slice.len - 1]
             .writeSExp(writer, optional_indent);
