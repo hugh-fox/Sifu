@@ -5,6 +5,11 @@ Bool -> { True, False }
 Not (True)  -> False
 Not (False) -> True
 
+
+*x == *x --> True
+_ == _   --> False
+
+
 # Define a function that takes a tuple of any two `Bools`. Lowercase identifier
 # are variables instead of constants, and match any term. Arguments that don't
 # match the pattern `_ : Bool` cause the parent `Xor` match to fail also. 
@@ -19,13 +24,5 @@ Xor (x : Bool, y : Bool) -> Not (x == y)
 If (bool : Bool) Then (*true) Else (*false) -> bool : {
     True  -> *true
     False -> *false
-}
-
-# Variables by themselves can implement generic functions. Equality is defined
-# by set membership. If `x` is not in `{y}`, then the nested match evaluates to
-# `()`.
-x == y --> (x : {y}) : {
-    () -> False
-    _  -> True
 }
 

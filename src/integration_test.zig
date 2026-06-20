@@ -122,17 +122,17 @@ fn writeAllTimeout(file: Io.File, bytes: []const u8, deadline: Io.Timeout) !void
     }
 }
 
-/// Spawns the sifu executable, feeds it `trie_content` on stdin and `query` as
-/// an argument, and returns its stdout. Caller owns the returned slice. Every
-/// stream (stdin, stdout, stderr) shares a single deadline, so a hung child is
-/// always killed rather than blocking the test forever.
+/// Spawns the sifu executable, passing `trie_content` via `--trie` and feeding
+/// `query` on stdin, and returns its stdout. Caller owns the returned slice.
+/// Every stream (stdin, stdout, stderr) shares a single deadline, so a hung
+/// child is always killed rather than blocking the test forever.
 fn runSifu(allocator: Allocator, trie_content: []const u8, query: []const u8) ![]u8 {
     // This exe is built with -DDetectLeaks so the integration tests catch leaks
     // and use-after-free in the evaluator.
     const sifu_exe = @import("integration_options").sifu_exe;
 
     var child = try std.process.spawn(testing.io, .{
-        .argv = &.{ sifu_exe, query },
+        .argv = &.{ sifu_exe, "--trie", trie_content },
         .stdin = .pipe,
         .stdout = .pipe,
         .stderr = .ignore,
@@ -142,8 +142,8 @@ fn runSifu(allocator: Allocator, trie_content: []const u8, query: []const u8) ![
     // Anchor a single deadline that bounds the whole interaction.
     const deadline = sifu_timeout.toDeadline(testing.io);
 
-    // Send the trie definition, then close stdin so the child sees EOF.
-    try writeAllTimeout(child.stdin.?, trie_content, deadline);
+    // Send the expression on stdin, then close it so the child sees EOF.
+    try writeAllTimeout(child.stdin.?, query, deadline);
     child.stdin.?.close(testing.io);
     child.stdin = null;
 

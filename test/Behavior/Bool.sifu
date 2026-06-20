@@ -3,6 +3,10 @@ Bool -> { True, False }
 Not (True)  -> False
 Not (False) -> True
 
+*x == *x --> True
+_ == _   --> False
+
+
 Xor (x : Bool, y : Bool) -> Not (x == y)
 
 If (bool : Bool) Then (*true) Else (*false) -> bool : {
@@ -10,15 +14,12 @@ If (bool : Bool) Then (*true) Else (*false) -> bool : {
     False -> *false
 }
 
-x == y --> (x : {y}) and (y : {x}) :: {
-    () -> False
-    _  -> True
-}
-
 
 # ===
 
-
+A == A
 
 # ---
+
+True
 
