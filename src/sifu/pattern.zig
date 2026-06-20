@@ -26,12 +26,12 @@ pub const Pattern = struct {
             return;
         } else for (slice[1 .. slice.len - 1]) |*node| {
             // Don't add space before list/newline nodes or comma keys
-            if (node.* != .list and node.* != .newline and !node.isCommaConstant())
+            if (node.* != .list and node.* != .newline and node.* != .indent and !node.isCommaConstant())
                 try writer.writeByte(' ');
             try node.writeSExp(writer, optional_indent);
         }
         // Don't add space before list/newline nodes or comma keys
-        if (slice[slice.len - 1] != .list and slice[slice.len - 1] != .newline and !slice[slice.len - 1].isCommaConstant())
+        if (slice[slice.len - 1] != .list and slice[slice.len - 1] != .newline and slice[slice.len - 1] != .indent and !slice[slice.len - 1].isCommaConstant())
             try writer.writeByte(' ');
         try slice[slice.len - 1]
             .writeSExp(writer, optional_indent);
@@ -50,6 +50,14 @@ pub const Pattern = struct {
         var allocating_writer = Io.Writer.Allocating.fromArrayList(allocator, &buff);
         try self.write(&allocating_writer.writer);
         return allocating_writer.toOwnedSlice();
+    }
+
+    /// Wrap an existing node slice as a Pattern, computing its height from the
+    /// tallest child. The slice is borrowed, not copied.
+    pub fn fromSlice(nodes: []Node) Pattern {
+        var max_child: usize = 0;
+        for (nodes) |n| max_child = @max(max_child, n.height());
+        return .{ .root = nodes, .height = max_child };
     }
 
     pub fn copy(self: Pattern, allocator: Allocator) !Pattern {

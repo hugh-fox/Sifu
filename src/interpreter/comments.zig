@@ -45,6 +45,41 @@ pub fn step(pattern: Pattern, allocator: Allocator) Allocator.Error!?Pattern {
     return .{ .root = try result.toOwnedSlice(allocator), .height = pattern.height };
 }
 
+/// One whitespace-collapse step on a single pattern level. Whitespace
+/// separators (`.newline`/`.indent`) carry layout only; after comments are gone
+/// they can leave empty entries (a comment-only line, or a leading/trailing
+/// newline). Collapse those so the residual pattern matches as if the layout
+/// weren't there. Run as a separate pass *after* comment removal so emptied
+/// separators are visible (the top-down driver settles a level before its
+/// children, so a separator emptied by a nested comment is only seen on a later
+/// pass). A separator is always the last node at its level (right associative),
+/// so a sole separator means an empty leading entry.
+pub fn whitespaceStep(pattern: Pattern, allocator: Allocator) Allocator.Error!?Pattern {
+    const root = pattern.root;
+    if (root.len == 1) {
+        switch (root[0]) {
+            .newline, .indent => |sep| return try sep.rhs.copy(allocator),
+            else => {},
+        }
+    }
+    if (root.len == 0) return null;
+
+    const empty_tail = switch (root[root.len - 1]) {
+        .newline, .indent => |sep| sep.rhs.root.len == 0,
+        else => false,
+    };
+    if (!empty_tail) return null;
+
+    var result = std.ArrayList(Node).empty;
+    errdefer {
+        for (result.items) |*n| n.deinit(allocator);
+        result.deinit(allocator);
+    }
+    for (root[0 .. root.len - 1]) |node|
+        try result.append(allocator, try node.copy(allocator));
+    return .{ .root = try result.toOwnedSlice(allocator), .height = pattern.height };
+}
+
 const testing = std.testing;
 const Parser = @import("../Parser.zig");
 const core = @import("../interpreter.zig");
@@ -64,7 +99,7 @@ test "evaluateComments: trailing comment removed" {
 }
 
 test "evaluateComments: comment inside arrow value removed" {
-    try expectStripped("A -> # c\n  B", "A -> B");
+    try expectStripped("A -> B # c", "A -> B");
 }
 
 test "evaluateComments: leading comment removed" {

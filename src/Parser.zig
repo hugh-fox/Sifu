@@ -41,6 +41,7 @@ pub const Tag = enum {
     comment,
     semicolon,
     newline,
+    indent,
     comma,
     long_match,
     long_arrow,
@@ -128,89 +129,53 @@ fn advance(self: *Self) Token {
         },
         '`' => return self.single(.backtick),
         ';' => return self.single(.semicolon),
-        '\n' => {
-            // Skip newlines that end comment-only lines (look back to start of line).
-            // This makes `# comment\n` disappear entirely.
-            var line_start = self.pos;
-            while (line_start > 0 and self.source[line_start - 1] != '\n')
-                line_start -= 1;
-            var has_code = false;
-            var scan = line_start;
-            while (scan < self.pos) : (scan += 1) {
-                const ch = self.source[scan];
-                if (ch == '#') break; // Rest is comment
-                if (ch != ' ' and ch != '\t' and ch != '\r') {
-                    has_code = true;
-                    break;
-                }
-            }
-            if (!has_code) {
-                // Line was whitespace/comment only - skip this newline
-                self.pos += 1;
-                return self.advance();
-            }
-
-            // Skip trailing newlines (newline followed only by whitespace/newlines/comments)
-            var check_pos = self.pos + 1;
-            while (check_pos < self.source.len) : (check_pos += 1) {
-                const ch = self.source[check_pos];
-                if (ch == '#') {
-                    // Skip comment
-                    while (check_pos < self.source.len and self.source[check_pos] != '\n')
-                        check_pos += 1;
-                } else if (ch != ' ' and ch != '\t' and ch != '\r' and ch != '\n') break;
-            } else {
-                // Only whitespace/newlines/comments until EOF - skip this newline
-                self.pos += 1;
-                return self.advance();
-            }
-
-            // Line continuation: at the top level, a next line indented deeper
-            // than the current one continues the current expression rather than
-            // separating a new entry. `scan` and `check_pos` sit on the first
-            // code byte of the current and next code line respectively.
-            if (self.bracket_depth == 0) {
-                const current_indent = scan - line_start;
-                var next_line_start = check_pos;
-                while (next_line_start > 0 and self.source[next_line_start - 1] != '\n')
-                    next_line_start -= 1;
-                const next_indent = check_pos - next_line_start;
-                if (next_indent > current_indent) {
-                    self.pos += 1;
-                    return self.advance();
-                }
-            }
-            return self.single(.newline);
-        },
+        '\n' => return self.lexWhitespace(),
         ',' => return self.single(.comma),
         '"' => return self.lexString(),
         else => {},
     }
 
-    // VarPattern: * followed by lowercase
-    if (c == '*' and self.pos + 1 < self.source.len and isLower(self.source[self.pos + 1]))
-        return self.lexVarPattern();
-
-    if (isUpper(c)) return self.lexConstant();
-    if (isLower(c)) return self.lexVariable();
     if (isDigit(c)) return self.lexNumber();
-    // A run of dashes directly followed (no space) by an identifier letter is
-    // part of that identifier (e.g. `-Const`); otherwise it is an operator
-    // (subtraction, `->`, `-->`), which is why dash operators need spaces.
-    if (c == '-') {
+
+    // Identifiers may carry a leading run of `-`/`_` (e.g. `-Const`, `_x`),
+    // mirroring the grammar's key/variable/var_pattern regexes. What follows the
+    // prefix decides the kind: `*`+lowercase -> var_pattern (underscores only in
+    // the prefix), uppercase -> key/constant, lowercase -> variable. A bare `_`
+    // is itself a key. Anything else starting with `-`/`*` is an operator.
+    if (c == '_' or c == '-' or c == '*' or isUpper(c) or isLower(c)) {
         var i = self.pos;
-        while (i < self.source.len and self.source[i] == '-') i += 1;
-        if (i < self.source.len) {
-            if (isUpper(self.source[i])) return self.lexConstant();
-            if (isLower(self.source[i])) return self.lexVariable();
-        }
-        return self.lexOperator();
+        while (i < self.source.len and (self.source[i] == '-' or self.source[i] == '_'))
+            i += 1;
+        const prefix = self.source[self.pos..i];
+        if (i + 1 < self.source.len and self.source[i] == '*' and
+            isLower(self.source[i + 1]) and !hasDash(prefix))
+            return self.lexVarPattern();
+        if (i < self.source.len and isUpper(self.source[i])) return self.lexConstant();
+        if (i < self.source.len and isLower(self.source[i])) return self.lexVariable();
+        if (c == '_') return self.lexConstant(); // bare `_` key
     }
     if (isOpChar(c)) return self.lexOperator();
 
     // Skip unknown bytes
     self.pos += 1;
     return self.advance();
+}
+
+/// Lex a whitespace separator starting at a newline. Consumes the run of
+/// newlines and horizontal whitespace (including blank lines) up to the next
+/// code byte or comment, mirroring the grammar's `_newline`/`_indent` tokens:
+/// the run is an `indent` if it ends with indentation (the next line is
+/// indented), otherwise a flush `newline`. The full run is the token text so
+/// the printer can reproduce the exact layout.
+fn lexWhitespace(self: *Self) Token {
+    const start = self.pos;
+    while (self.pos < self.source.len) : (self.pos += 1) {
+        const c = self.source[self.pos];
+        if (c != '\n' and c != '\r' and c != ' ' and c != '\t') break;
+    }
+    const last = self.source[self.pos - 1];
+    const tag: Tag = if (last == ' ' or last == '\t') .indent else .newline;
+    return .{ .tag = tag, .start = start, .end = self.pos };
 }
 
 fn single(self: *Self, tag: Tag) Token {
@@ -264,10 +229,16 @@ fn lexVariable(self: *Self) Token {
 
 fn lexVarPattern(self: *Self) Token {
     const start = self.pos;
+    while (self.pos < self.source.len and self.source[self.pos] == '_')
+        self.pos += 1; // leading underscores
     self.pos += 1; // skip *
     self.pos += 1; // skip first lowercase letter
     self.scanIdentTail();
     return .{ .tag = .var_pattern, .start = start, .end = self.pos };
+}
+
+fn hasDash(prefix: []const u8) bool {
+    return mem.indexOfScalar(u8, prefix, '-') != null;
 }
 
 fn lexNumber(self: *Self) Token {
@@ -357,6 +328,10 @@ fn isOpChar(c: u8) bool {
         '/',
         '\\',
         '~',
+        // Brackets are ordinary symbol characters, not special syntax: the
+        // evaluator implements lists itself by matching them like identifiers.
+        '[',
+        ']',
         => true,
         else => false,
     };
@@ -372,29 +347,43 @@ pub fn parsePattern(self: *Self, allocator: Allocator) Oom!Pattern {
     return self.parsePrec1(allocator);
 }
 
-/// Prec 1: semicolon/newline (right-associative to match Tree-sitter grammar)
-/// All three list separators (semicolon, newline, comma) produce .list nodes.
+/// Builds the wrapper node for a separator token. A semicolon/comma produces a
+/// `.list`; a newline/indent produces a `.newline`/`.indent` carrying the
+/// literal whitespace, so the printer reproduces the exact layout.
+fn sepNode(self: *Self, tok: Token, rhs: Pattern) Node {
+    return switch (tok.tag) {
+        .newline => Node{ .newline = .{ .ws = tok.text(self.source), .rhs = incrementHeight(rhs) } },
+        .indent => Node{ .indent = .{ .ws = tok.text(self.source), .rhs = incrementHeight(rhs) } },
+        else => Node{ .list = incrementHeight(rhs) },
+    };
+}
+
+fn isPrec1Sep(tag: Tag) bool {
+    return tag == .semicolon or tag == .newline;
+}
+
+/// Prec 1: semicolon `;` / newline (right-associative to match the grammar).
 fn parsePrec1(self: *Self, allocator: Allocator) Oom!Pattern {
     // Handle leading separator (empty LHS)
-    if (self.peek() == .semicolon or self.peek() == .newline) {
-        _ = self.eat();
+    if (isPrec1Sep(self.peek())) {
+        const sep = self.eat();
         const rhs = try self.parseOptionalPrec1(allocator);
         var nodes = try allocator.alloc(Node, 1);
-        nodes[0] = Node{ .list = incrementHeight(rhs) };
+        nodes[0] = self.sepNode(sep, rhs);
         return patternOf(nodes, rhs.height + 1);
     }
 
     const lhs = try self.parsePrec2(allocator);
-    if (self.peek() != .semicolon and self.peek() != .newline) return lhs;
+    if (!isPrec1Sep(self.peek())) return lhs;
 
     // Consume separator and recursively parse rhs (right-associative)
-    _ = self.eat();
+    const sep = self.eat();
     const rhs = try self.parseOptionalPrec1(allocator);
 
     var nodes = std.ArrayList(Node).empty;
     try nodes.appendSlice(allocator, lhs.root);
     allocator.free(lhs.root);
-    try nodes.append(allocator, Node{ .list = incrementHeight(rhs) });
+    try nodes.append(allocator, self.sepNode(sep, rhs));
     const max_child = @max(lhs.height, rhs.height + 1);
     return patternOf(try nodes.toOwnedSlice(allocator), max_child);
 }
@@ -432,28 +421,32 @@ fn parsePrec2(self: *Self, allocator: Allocator) Oom!Pattern {
     return patternOf(try nodes.toOwnedSlice(allocator), max_child);
 }
 
-/// Prec 3: comma (right-associative to match Tree-sitter grammar)
+fn isPrec3Sep(tag: Tag) bool {
+    return tag == .comma or tag == .indent;
+}
+
+/// Prec 3: comma `,` / indent (right-associative to match the grammar).
 fn parsePrec3(self: *Self, allocator: Allocator) Oom!Pattern {
-    if (self.peek() == .comma) {
-        // Leading comma: empty lhs
-        _ = self.eat();
+    if (isPrec3Sep(self.peek())) {
+        // Leading separator: empty lhs
+        const sep = self.eat();
         const rhs = try self.parseOptionalPrec3(allocator);
         var nodes = try allocator.alloc(Node, 1);
-        nodes[0] = Node{ .list = incrementHeight(rhs) };
+        nodes[0] = self.sepNode(sep, rhs);
         return patternOf(nodes, rhs.height + 1);
     }
 
     const lhs = try self.parsePrec4(allocator);
-    if (self.peek() != .comma) return lhs;
+    if (!isPrec3Sep(self.peek())) return lhs;
 
-    // Consume comma and recursively parse rhs (right-associative)
-    _ = self.eat();
+    // Consume separator and recursively parse rhs (right-associative)
+    const sep = self.eat();
     const rhs = try self.parseOptionalPrec3(allocator);
 
     var nodes = std.ArrayList(Node).empty;
     try nodes.appendSlice(allocator, lhs.root);
     allocator.free(lhs.root);
-    try nodes.append(allocator, Node{ .list = incrementHeight(rhs) });
+    try nodes.append(allocator, self.sepNode(sep, rhs));
     const max_child = @max(lhs.height, rhs.height + 1);
     return patternOf(try nodes.toOwnedSlice(allocator), max_child);
 }
@@ -606,65 +599,51 @@ pub fn parseTrie(allocator: Allocator, source: []const u8) Oom!Trie {
     return patternToTrie(allocator, pattern);
 }
 
-fn patternToTrie(allocator: Allocator, pattern: Pattern) Oom!Trie {
+pub fn patternToTrie(allocator: Allocator, pattern: Pattern) Oom!Trie {
     var result = Trie{};
     try appendEntryRecursive(&result, allocator, pattern);
     return result;
 }
 
-/// Recursively extract entries from a right-associative pattern.
-/// Any .list at the end of the root pattern is treated as an entry separator.
+/// Recursively extract entries from a right-associative pattern, splitting on
+/// the trailing separator at each level and handing each entry to
+/// `Trie.appendEntry` (the shared entry semantics). A trailing `.newline`/
+/// `.indent`/`.list` separates entries.
 fn appendEntryRecursive(result: *Trie, allocator: Allocator, pattern: Pattern) Oom!void {
     if (pattern.root.len == 0) return;
 
-    // Check if the last element is a .list - this indicates an entry separator
-    const last_idx = pattern.root.len - 1;
-    const last_node = pattern.root[last_idx];
+    // A leading newline/indent group is an empty-lhs entry separator: inside
+    // braces the body opens with the indentation of its first entry, so the
+    // group wraps the real entries with any trailing separator following it.
+    // Recurse into the group and then the rest (the comma list at prec 3 stays
+    // within an entry, so only newline/indent are split here, not `.list`).
+    switch (pattern.root[0]) {
+        .newline, .indent => |sep| {
+            try appendEntryRecursive(result, allocator, sep.rhs);
+            if (pattern.root.len > 1)
+                try appendEntryRecursive(result, allocator, Pattern.fromSlice(pattern.root[1..]));
+            return;
+        },
+        else => {},
+    }
 
-    const sep_contents: ?Pattern = switch (last_node) {
+    // A trailing separator splits entries: prefix is one entry, contents more.
+    const last_idx = pattern.root.len - 1;
+    const sep_contents: ?Pattern = switch (pattern.root[last_idx]) {
         .list => |p| p,
+        .newline, .indent => |sep| sep.rhs,
         else => null,
     };
 
     if (sep_contents) |contents| {
-        // This is an entry separator: prefix is one entry, contents are more entries
-        if (last_idx > 0) {
-            try appendEntry(result, allocator, patternFromSlice(pattern.root[0..last_idx]));
-        }
-        // Recursively process the separator contents
+        if (last_idx > 0)
+            try result.appendEntry(allocator, Pattern.fromSlice(pattern.root[0..last_idx]));
         try appendEntryRecursive(result, allocator, contents);
         return;
     }
 
     // No separator found - treat entire pattern as a single entry
-    try appendEntry(result, allocator, pattern);
-}
-
-/// Appends a single entry to the trie. The entry_pattern may contain an arrow
-/// indicating constant -> value, or just be a pattern (which becomes constant = value).
-fn appendEntry(result: *Trie, allocator: Allocator, entry_pattern: Pattern) Oom!void {
-    if (entry_pattern.root.len == 0) return;
-
-    // Look for an arrow node to split constant and value
-    var arrow_index: ?usize = null;
-    for (entry_pattern.root, 0..) |node, i| {
-        if (node == .arrow) {
-            arrow_index = i;
-            break;
-        }
-    }
-
-    if (arrow_index) |ai| {
-        // Split at arrow: nodes before arrow are constant, arrow's pattern is value
-        // Decrement height since arrow wrapper added 1
-        const constant = patternFromSlice(entry_pattern.root[0..ai]);
-        const arrow_pattern = entry_pattern.root[ai].arrow;
-        const value = Pattern{ .root = arrow_pattern.root, .height = arrow_pattern.height -| 1 };
-        _ = try result.append(allocator, constant, value);
-    } else {
-        // No arrow - pattern is both constant and value
-        _ = try result.append(allocator, entry_pattern, entry_pattern);
-    }
+    try result.appendEntry(allocator, pattern);
 }
 
 fn patternOf(nodes: []Node, max_child_height: usize) Pattern {
@@ -694,7 +673,7 @@ pub fn parse(allocator: Allocator, source: []const u8) Oom!Pattern {
 
 const testing = std.testing;
 
-const NodeTag = enum { constant, variable, var_pattern, comment, pattern, infix, match, arrow, list, newline, trie };
+const NodeTag = enum { constant, variable, var_pattern, comment, pattern, infix, match, arrow, list, newline, indent, trie };
 
 fn expectNodes(pattern: Pattern, expected_tags: []const NodeTag) !void {
     try testing.expectEqual(expected_tags.len, pattern.root.len);
@@ -709,6 +688,7 @@ fn expectNodes(pattern: Pattern, expected_tags: []const NodeTag) !void {
             .arrow => .arrow,
             .list => .list,
             .newline => .newline,
+            .indent => .indent,
             .trie => .trie,
         };
         try testing.expectEqual(expected_tag, actual_tag);
@@ -903,10 +883,10 @@ test "comment preserved as node" {
     // Comments are kept as nodes; the newline still separates entries.
     // "A # comment\nB" becomes [A, comment, list([B])].
     const p = try parse(arena.allocator(), "A # comment\nB");
-    try expectNodes(p, &.{ .constant, .comment, .list });
+    try expectNodes(p, &.{ .constant, .comment, .newline });
     try testing.expectEqualStrings("A", p.root[0].constant);
     try testing.expectEqualStrings("# comment", p.root[1].comment);
-    try testing.expectEqualStrings("B", p.root[2].list.root[0].constant);
+    try testing.expectEqualStrings("B", p.root[2].newline.rhs.root[0].constant);
 }
 
 test "empty trie: {}" {
@@ -1023,14 +1003,14 @@ test "parseTrie: mixed operators" {
 test "multiline: newlines separate entries" {
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
-    // Newlines work like semicolons and produce .list nodes
+    // Newlines evaluate like semicolons but produce distinct .newline nodes
     const p = try parse(arena.allocator(), "A\nB\nC");
-    // [A, list([B, list([C])])]
-    try expectNodes(p, &.{ .constant, .list });
+    // [A, newline([B, newline([C])])]
+    try expectNodes(p, &.{ .constant, .newline });
     try testing.expectEqualStrings("A", p.root[0].constant);
-    try testing.expectEqualStrings("B", p.root[1].list.root[0].constant);
-    try expectNodes(p.root[1].list, &.{ .constant, .list });
-    try testing.expectEqualStrings("C", p.root[1].list.root[1].list.root[0].constant);
+    try testing.expectEqualStrings("B", p.root[1].newline.rhs.root[0].constant);
+    try expectNodes(p.root[1].newline.rhs, &.{ .constant, .newline });
+    try testing.expectEqualStrings("C", p.root[1].newline.rhs.root[1].newline.rhs.root[0].constant);
 }
 
 test "multiline: trailing arrow is empty" {
@@ -1038,11 +1018,11 @@ test "multiline: trailing arrow is empty" {
     defer arena.deinit();
     // Arrow at end of line has empty RHS, newline separates
     const p = try parse(arena.allocator(), "A ->\nB");
-    // [A, arrow([]), list([B])]
-    try expectNodes(p, &.{ .constant, .arrow, .list });
+    // [A, arrow([]), newline([B])]
+    try expectNodes(p, &.{ .constant, .arrow, .newline });
     try testing.expectEqualStrings("A", p.root[0].constant);
     try testing.expectEqual(@as(usize, 0), p.root[1].arrow.root.len);
-    try testing.expectEqualStrings("B", p.root[2].list.root[0].constant);
+    try testing.expectEqualStrings("B", p.root[2].newline.rhs.root[0].constant);
 }
 
 test "multiline: trailing comma separates" {
@@ -1050,33 +1030,33 @@ test "multiline: trailing comma separates" {
     defer arena.deinit();
     // Comma (prec 3) has empty RHS, newline (prec 1) separates B
     const p = try parse(arena.allocator(), "A,\nB");
-    // [A, list([]), list([B])] - comma with empty, then newline with B
-    try expectNodes(p, &.{ .constant, .list, .list });
+    // [A, list([]), newline([B])] - comma with empty, then newline with B
+    try expectNodes(p, &.{ .constant, .list, .newline });
     try testing.expectEqualStrings("A", p.root[0].constant);
     try testing.expectEqual(@as(usize, 0), p.root[1].list.root.len);
-    try testing.expectEqualStrings("B", p.root[2].list.root[0].constant);
+    try testing.expectEqualStrings("B", p.root[2].newline.rhs.root[0].constant);
 }
 
 test "multiline: trailing long arrow is empty" {
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
     const p = try parse(arena.allocator(), "A -->\nB");
-    // [A, arrow([]), list([B])]
-    try expectNodes(p, &.{ .constant, .arrow, .list });
+    // [A, arrow([]), newline([B])]
+    try expectNodes(p, &.{ .constant, .arrow, .newline });
     try testing.expectEqualStrings("A", p.root[0].constant);
     try testing.expectEqual(@as(usize, 0), p.root[1].arrow.root.len);
-    try testing.expectEqualStrings("B", p.root[2].list.root[0].constant);
+    try testing.expectEqualStrings("B", p.root[2].newline.rhs.root[0].constant);
 }
 
 test "multiline: trailing match is empty" {
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
     const p = try parse(arena.allocator(), "x :\nInt");
-    // [x, match([]), list([Int])]
-    try expectNodes(p, &.{ .variable, .match, .list });
+    // [x, match([]), newline([Int])]
+    try expectNodes(p, &.{ .variable, .match, .newline });
     try testing.expectEqualStrings("x", p.root[0].variable);
     try testing.expectEqual(@as(usize, 0), p.root[1].match.root.len);
-    try testing.expectEqualStrings("Int", p.root[2].list.root[0].constant);
+    try testing.expectEqualStrings("Int", p.root[2].newline.rhs.root[0].constant);
 }
 
 test "multiline: trie with newline entries" {
@@ -1107,21 +1087,22 @@ test "multiline: comment after trailing op" {
     // Comment after a trailing operator is kept as the arrow's only (comment)
     // child. The next line is not indented, so B remains a separate entry.
     const p = try parse(arena.allocator(), "A -> # value is B\nB");
-    // [A, arrow([comment]), list([B])]
-    try expectNodes(p, &.{ .constant, .arrow, .list });
+    // [A, arrow([comment]), newline([B])]
+    try expectNodes(p, &.{ .constant, .arrow, .newline });
     try testing.expectEqualStrings("A", p.root[0].constant);
     try testing.expectEqual(@as(usize, 1), p.root[1].arrow.root.len);
     try testing.expect(p.root[1].arrow.root[0] == .comment);
-    try testing.expectEqualStrings("B", p.root[2].list.root[0].constant);
+    try testing.expectEqualStrings("B", p.root[2].newline.rhs.root[0].constant);
 }
 
 test "multiline: multiple newlines are separate entries" {
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
-    // Two newlines = two separations (one entry per line)
+    // Consecutive blank lines collapse into a single newline separator
     const p = try parse(arena.allocator(), "A\n\nB");
-    // A, then list([list([B])]) - empty line is empty entry
-    try expectNodes(p, &.{ .constant, .list });
+    // [A, newline([B])]
+    try expectNodes(p, &.{ .constant, .newline });
+    try testing.expectEqualStrings("B", p.root[1].newline.rhs.root[0].constant);
 }
 
 test "multiline: multi-line pattern without continuation" {
@@ -1140,16 +1121,16 @@ test "multiline: multi-line pattern without continuation" {
 test "multiline: newlines and semicolons produce same structure" {
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
-    // Newlines and semicolons both produce .list nodes
+    // Newlines and semicolons are distinct nodes (.newline vs .list) for
+    // pretty-print isomorphism, but separate entries the same way.
     const with_newline = try parse(arena.allocator(), "A\nB");
     const with_semicolon = try parse(arena.allocator(), "A; B");
 
-    // Both should produce: [A, list([B])]
-    try expectNodes(with_newline, &.{ .constant, .list });
+    try expectNodes(with_newline, &.{ .constant, .newline });
     try expectNodes(with_semicolon, &.{ .constant, .list });
     try testing.expectEqualStrings("A", with_newline.root[0].constant);
     try testing.expectEqualStrings("A", with_semicolon.root[0].constant);
-    try testing.expectEqualStrings("B", with_newline.root[1].list.root[0].constant);
+    try testing.expectEqualStrings("B", with_newline.root[1].newline.rhs.root[0].constant);
     try testing.expectEqualStrings("B", with_semicolon.root[1].list.root[0].constant);
 }
 
@@ -1164,10 +1145,10 @@ test "multiline: trailing operators do not continue" {
     try expectNodes(single_line, &.{ .constant, .arrow });
     try testing.expectEqualStrings("B", single_line.root[1].arrow.root[0].constant);
 
-    // Multiline: [A, arrow([]), list([B])]
-    try expectNodes(with_newline, &.{ .constant, .arrow, .list });
+    // Multiline: [A, arrow([]), newline([B])]
+    try expectNodes(with_newline, &.{ .constant, .arrow, .newline });
     try testing.expectEqual(@as(usize, 0), with_newline.root[1].arrow.root.len);
-    try testing.expectEqualStrings("B", with_newline.root[2].list.root[0].constant);
+    try testing.expectEqualStrings("B", with_newline.root[2].newline.rhs.root[0].constant);
 }
 
 fn parseAndMatch(allocator: std.mem.Allocator, trie: Trie, query_str: []const u8) !?Pattern {

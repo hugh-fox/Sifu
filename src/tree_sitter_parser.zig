@@ -77,6 +77,7 @@ pub fn astToPattern(
         mem.eql(u8, node_kind, "long_match") or
         mem.eql(u8, node_kind, "long_arrow") or
         mem.eql(u8, node_kind, "comma") or
+        mem.eql(u8, node_kind, "indent_group") or
         mem.eql(u8, node_kind, "infix") or
         mem.eql(u8, node_kind, "match") or
         mem.eql(u8, node_kind, "arrow");
@@ -142,6 +143,9 @@ fn parseOperatorNode(
     var lhs_node: ?AstNode = null;
     var rhs_node: ?AstNode = null;
     var op_symbol: ?[]const u8 = null;
+    // Literal separating whitespace for newline_sep/indent_group, kept so the
+    // printer can reproduce the exact layout.
+    var ws: []const u8 = "";
 
     // Extract LHS, RHS, and operator symbol (for infix)
     var cursor = node.walk();
@@ -161,6 +165,11 @@ fn parseOperatorNode(
                     const end = child.endByte();
                     op_symbol = source[start..end];
                 }
+            } else if (mem.eql(u8, child.kind(), "newline") or
+                mem.eql(u8, child.kind(), "indent"))
+            {
+                // Literal separating whitespace (newline + indentation).
+                ws = source[child.startByte()..child.endByte()];
             }
 
             if (!cursor.gotoNextSibling()) break;
@@ -183,7 +192,7 @@ fn parseOperatorNode(
         Pattern{ .root = &[_]Node{}, .height = 0 };
 
     // Determine the wrapper type based on operator
-    const wrapper_node = convertRHS(allocator, node_kind, op_symbol, &rhs_pattern) catch |e| {
+    const wrapper_node = convertRHS(allocator, node_kind, op_symbol, ws, &rhs_pattern) catch |e| {
         panic("Error converting RHS for operator '{s}': {}", .{ node_kind, e });
     };
     // try nodes.append(allocator, Node{ .pattern = lhs_pattern });
@@ -209,7 +218,7 @@ fn parseTermNode(
     if (!node.isNamed()) return null;
 
     const NodeKind = enum {
-        constant,
+        key,
         variable,
         var_pattern,
         number,
@@ -218,6 +227,7 @@ fn parseTermNode(
         nested_pattern,
         nested_trie,
         quote,
+        comment,
     };
 
     const kind = std.meta.stringToEnum(NodeKind, node_kind) orelse {
@@ -226,9 +236,10 @@ fn parseTermNode(
     };
 
     return switch (kind) {
-        .constant, .number, .string, .symbol => Node{ .constant = text },
+        .key, .number, .string, .symbol => Node{ .constant = text },
         .variable => Node{ .variable = text },
         .var_pattern => Node{ .variable = text },
+        .comment => Node{ .comment = text },
         .nested_pattern => Node{ .pattern = try astToPattern(allocator, source, node) },
         .nested_trie => Node{ .trie = try astToTrie(allocator, source, node.childByFieldName("inner")) },
         .quote => Node{ .pattern = try astToPattern(allocator, source, node) },
@@ -239,6 +250,7 @@ fn convertRHS(
     allocator: Allocator,
     node_kind: []const u8,
     op_symbol: ?[]const u8,
+    ws: []const u8,
     rhs_pattern: *Pattern,
 ) !Node {
     _ = allocator;
@@ -252,10 +264,13 @@ fn convertRHS(
         return Node{ .list = rhs_pattern.* };
     } else if (mem.eql(u8, node_kind, "newline_sep")) {
         defer rhs_pattern.* = .{};
-        return Node{ .newline = rhs_pattern.* };
+        return Node{ .newline = .{ .ws = ws, .rhs = rhs_pattern.* } };
     } else if (mem.eql(u8, node_kind, "comma")) {
         defer rhs_pattern.* = .{};
         return Node{ .list = rhs_pattern.* };
+    } else if (mem.eql(u8, node_kind, "indent_group")) {
+        defer rhs_pattern.* = .{};
+        return Node{ .indent = .{ .ws = ws, .rhs = rhs_pattern.* } };
     } else if (mem.eql(u8, node_kind, "long_match") or mem.eql(u8, node_kind, "match")) {
         defer rhs_pattern.* = .{};
         return Node{ .match = rhs_pattern.* };
@@ -280,38 +295,38 @@ fn astToTrie(
 ) error{OutOfMemory}!Trie {
     var trie = Trie{};
     errdefer trie.deinit(allocator);
-
-    if (inner_node) |node| {
-        try appendToTrie(allocator, source, &trie, node);
-    }
-
+    if (inner_node) |node|
+        try appendAstEntries(allocator, source, &trie, node);
     return trie;
 }
 
-fn appendToTrie(
+fn isEntrySeparator(kind: []const u8) bool {
+    return mem.eql(u8, kind, "semicolon") or
+        mem.eql(u8, kind, "newline_sep") or
+        mem.eql(u8, kind, "comma") or
+        mem.eql(u8, kind, "indent_group");
+}
+
+/// Walk a brace body straight into the trie, splitting at the separator nodes
+/// the grammar already provides instead of materializing the whole body as a
+/// Pattern. Each leaf entry becomes its own small Pattern and is handed to
+/// `Trie.appendEntry` — the same entry semantics the Zig parser uses, so both
+/// arrive at the same trie.
+fn appendAstEntries(
     allocator: Allocator,
     source: []const u8,
     trie: *Trie,
     node: AstNode,
 ) error{OutOfMemory}!void {
-    const node_kind = node.kind();
-
-    // Both semicolon and newline_sep are entry separators
-    if (mem.eql(u8, node_kind, "semicolon") or mem.eql(u8, node_kind, "newline_sep")) {
-        var cursor = node.walk();
-        if (cursor.gotoFirstChild()) {
-            while (true) {
-                const child = cursor.node();
-                if (cursor.fieldName()) |fname| {
-                    if (mem.eql(u8, fname, "lhs") or mem.eql(u8, fname, "rhs")) {
-                        try appendToTrie(allocator, source, trie, child);
-                    }
-                }
-                if (!cursor.gotoNextSibling()) break;
-            }
-        }
-    } else {
-        const pattern = try astToPattern(allocator, source, node);
-        _ = try trie.append(allocator, pattern, null);
+    if (isEntrySeparator(node.kind())) {
+        if (node.childByFieldName("lhs")) |lhs|
+            try appendAstEntries(allocator, source, trie, lhs);
+        if (node.childByFieldName("rhs")) |rhs|
+            try appendAstEntries(allocator, source, trie, rhs);
+        return;
     }
+    var entry = try astToPattern(allocator, source, node);
+    defer entry.deinit(allocator);
+    try trie.appendEntry(allocator, entry);
 }
+

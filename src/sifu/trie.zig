@@ -513,10 +513,17 @@ pub const Trie = struct {
 
                 break :blk next;
             },
+            .indent => |ind| blk: {
+                var next = trie;
+                next = try next.getOrPutConstant(allocator, index, ",");
+                next = try next.ensurePath(allocator, index, ind.rhs);
+
+                break :blk next;
+            },
             .newline => |nl| blk: {
                 var next = trie;
                 next = try next.getOrPutConstant(allocator, index, "\n");
-                next = try next.ensurePath(allocator, index, nl);
+                next = try next.ensurePath(allocator, index, nl.rhs);
 
                 break :blk next;
             },
@@ -610,6 +617,33 @@ pub const Trie = struct {
             IndexBranch{ index, .{ .value = value } },
         );
         return current;
+    }
+
+    /// Append a single trie entry (one already split out from its separators).
+    /// An arrow splits the entry into a constant key and its value pattern;
+    /// without one the whole entry is both key and value. This is the single
+    /// source of entry semantics, so every parser that builds a trie directly
+    /// arrives at the same result.
+    pub fn appendEntry(self: *Self, allocator: Allocator, entry: Pattern) Allocator.Error!void {
+        if (entry.root.len == 0) return;
+
+        var arrow_index: ?usize = null;
+        for (entry.root, 0..) |node, i| {
+            if (node == .arrow) {
+                arrow_index = i;
+                break;
+            }
+        }
+
+        if (arrow_index) |ai| {
+            const constant = Pattern.fromSlice(entry.root[0..ai]);
+            const arrow_pattern = entry.root[ai].arrow;
+            // The arrow wrapper added a level of height; undo it for the value.
+            const value = Pattern{ .root = arrow_pattern.root, .height = arrow_pattern.height -| 1 };
+            _ = try self.append(allocator, constant, value);
+        } else {
+            _ = try self.append(allocator, entry, entry);
+        }
     }
 
     /// A partial or complete match of a given pattern against a trie.
@@ -871,42 +905,11 @@ pub const Trie = struct {
                 };
             },
 
-            .list, .newline => |pattern, tag| {
-                const sep_key = if (tag == .newline) "\n" else ",";
-                debug("Matching {s} with len {}", .{ @tagName(tag), pattern.root.len });
-                const open_entry = self.map.getEntry(sep_key) orelse
-                    return null;
-                const open_trie = open_entry.value_ptr;
-                debug("Matched separator at {*}", .{open_trie});
-                var index, _ = open_trie.findNext(bound) orelse
-                    return null;
-
-                // Recursively match the list contents
-                var pattern_match = try open_trie
-                    .match(allocator, .{ .lower = index, .upper = bound.upper }, term_bindings, pattern);
-                defer pattern_match.deinit(allocator);
-                index = pattern_match.match_index;
-
-                // Check that the full pattern matched
-                if (pattern_match.len != pattern.root.len) {
-                    debug("Separator match failed: only matched {} of {} terms", .{
-                        pattern_match.len,
-                        pattern.root.len,
-                    });
-                    return null;
-                }
-
-                debug("Matched separator tail at {*}", .{pattern_match.trie_ptr});
-                // Get the branch from the final matched position
-                const final_branch = pattern_match.trie_ptr.findNext(.{ .lower = index, .upper = bound.upper }) orelse
-                    return null;
-                _, const branch = final_branch;
-                return .{
-                    .index = index,
-                    .branch = branch,
-                    .trie = pattern_match.trie_ptr,
-                };
-            },
+            // Separators flatten onto the trie path as a key (`,` or `\n`)
+            // followed by their contents. `.indent` evaluates like a comma.
+            .list => |pattern| return self.matchSeparator(allocator, bound, term_bindings, ",", pattern),
+            .newline => |sep| return self.matchSeparator(allocator, bound, term_bindings, "\n", sep.rhs),
+            .indent => |sep| return self.matchSeparator(allocator, bound, term_bindings, ",", sep.rhs),
             .trie => |query_trie| {
                 var trie_pattern = try query_trie.toPattern(allocator);
                 defer trie_pattern.deinit(allocator);
@@ -968,6 +971,50 @@ pub const Trie = struct {
         return null;
     }
 
+    /// Matches a separator node (`.list`/`.newline`/`.indent`): look up the
+    /// separator key constant on the trie path, then recursively match the
+    /// separator's contents.
+    fn matchSeparator(
+        self: *const Self,
+        allocator: Allocator,
+        bound: Bound,
+        term_bindings: *VarBindings,
+        sep_key: []const u8,
+        pattern: Pattern,
+    ) Allocator.Error!?IndexBranchTrie {
+        const open_entry = self.map.getEntry(sep_key) orelse
+            return null;
+        const open_trie = open_entry.value_ptr;
+        debug("Matched separator at {*}", .{open_trie});
+        var index, _ = open_trie.findNext(bound) orelse
+            return null;
+
+        // Recursively match the separator contents
+        var pattern_match = try open_trie
+            .match(allocator, .{ .lower = index, .upper = bound.upper }, term_bindings, pattern);
+        defer pattern_match.deinit(allocator);
+        index = pattern_match.match_index;
+
+        // Check that the full pattern matched
+        if (pattern_match.len != pattern.root.len) {
+            debug("Separator match failed: only matched {} of {} terms", .{
+                pattern_match.len,
+                pattern.root.len,
+            });
+            return null;
+        }
+
+        debug("Matched separator tail at {*}", .{pattern_match.trie_ptr});
+        const final_branch = pattern_match.trie_ptr.findNext(.{ .lower = index, .upper = bound.upper }) orelse
+            return null;
+        _, const branch = final_branch;
+        return .{
+            .index = index,
+            .branch = branch,
+            .trie = pattern_match.trie_ptr,
+        };
+    }
+
     /// Finds the lowest index full match for the entire pattern.
     /// A full match means every term in the pattern matched a branch in the trie.
     pub fn match(
@@ -1013,7 +1060,7 @@ pub const Trie = struct {
             }
         }
 
-        while (pattern_index < pattern.root.len) : (pattern_index += 1) {
+        match_loop: while (pattern_index < pattern.root.len) : (pattern_index += 1) {
             const index_branch_trie = try current.matchTerm(
                 allocator,
                 .{ .lower = index, .upper = bound.upper },
@@ -1074,7 +1121,7 @@ pub const Trie = struct {
                             boundary = pattern_index;
                             while (boundary < pattern.root.len) : (boundary += 1) {
                                 switch (pattern.root[boundary]) {
-                                    .list, .newline => break,
+                                    .list, .newline, .indent => break,
                                     else => {},
                                 }
                             }
@@ -1092,9 +1139,13 @@ pub const Trie = struct {
                         if (get_or_put.found_existing) {
                             switch (get_or_put.value_ptr.*) {
                                 .pattern => |existing_pattern| {
-                                    if (!existing_pattern.eql(rest)) {
-                                        @panic("unimplemented: var_pattern already bound to different pattern");
-                                    }
+                                    // Conflicting capture: this var_pattern is
+                                    // already bound to a different segment, so
+                                    // the match fails here. Stop at the current
+                                    // len with a null value; the evaluator keeps
+                                    // the expression unchanged on a failed match.
+                                    if (!existing_pattern.eql(rest))
+                                        break :match_loop;
                                 },
                                 else => @panic("unimplemented: var_pattern bound to non-pattern value"),
                             }
@@ -1115,9 +1166,11 @@ pub const Trie = struct {
                         // Regular variables for non-compound nodes
                         const get_or_put = try term_bindings.getOrPut(allocator, var_name);
                         if (get_or_put.found_existing) {
-                            if (!get_or_put.value_ptr.eql(node)) {
-                                @panic("unimplemented: var already bound to different value");
-                            }
+                            // Conflicting capture: same as the var_pattern case
+                            // above, fail the match here and let the evaluator
+                            // keep the expression as-is.
+                            if (!get_or_put.value_ptr.eql(node))
+                                break :match_loop;
                         } else {
                             get_or_put.value_ptr.* = node;
                         }
@@ -1438,29 +1491,45 @@ pub const Trie = struct {
             null;
         try writer.writeByte('{');
         try writer.writeAll(if (optional_indent) |_| "\n" else "");
-        try writeEntries(self.map, writer, optional_indent_inc);
+        try self.writeEntries(writer, optional_indent_inc);
         for (0..optional_indent orelse 0) |_|
             try writer.writeByte(' ');
         try writer.writeByte('}');
         try writer.writeAll(if (optional_indent) |_| "\n" else "");
     }
 
+    // Print each unique branch key once, in the order it was first inserted
+    // (the map is unordered, but the branch lists preserve insertion order, so
+    // both parsers print identically). Each key appears once though a branch
+    // list may repeat it across indices, so skip keys already printed.
     fn writeEntries(
-        map: anytype,
+        self: *const Self,
         writer: anytype,
         optional_indent: ?usize,
     ) Writer.Error!void {
-        var iter = map.iterator();
-        while (iter.next()) |entry| {
-            for (0..optional_indent orelse 1) |_|
-                try writer.writeByte(' ');
+        for ([_]BranchList{ self.constant_branches, self.var_branches }) |branches| {
+            for (branches.items, 0..) |index_branch, i| {
+                const branch_node = (index_branch[1].node()) orelse continue;
+                const key = branch_node.entry.key_ptr.*;
+                if (firstWithKey(branches.items[0..i], key)) continue;
 
-            const node = entry.key_ptr.*;
-            try writer.writeAll(node);
-            try writer.writeAll(" -> ");
-            try entry.value_ptr.*.writeIndent(writer, optional_indent);
-            try writer.writeAll(if (optional_indent) |_| "" else ", ");
+                for (0..optional_indent orelse 1) |_|
+                    try writer.writeByte(' ');
+                try writer.writeAll(key);
+                try writer.writeAll(" -> ");
+                try branch_node.entry.value_ptr.*.writeIndent(writer, optional_indent);
+                try writer.writeAll(if (optional_indent) |_| "" else ", ");
+            }
         }
+    }
+
+    /// Whether any earlier branch in `prior` already carries `key`.
+    fn firstWithKey(prior: []const IndexBranch, key: []const u8) bool {
+        for (prior) |index_branch| {
+            const branch_node = index_branch[1].node() orelse continue;
+            if (mem.eql(u8, branch_node.entry.key_ptr.*, key)) return true;
+        }
+        return false;
     }
 };
 

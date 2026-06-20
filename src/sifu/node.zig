@@ -24,6 +24,15 @@ pub const Node = union(enum) {
         rhs: Pattern,
     };
 
+    /// Payload of a whitespace separator (`newline`/`indent`): the literal
+    /// separating whitespace (newline plus any leading indentation) kept
+    /// out-of-band so the printer can reproduce the exact layout, together
+    /// with the pattern that follows it.
+    pub const Sep = struct {
+        ws: []const u8,
+        rhs: Pattern,
+    };
+
     /// A unique constant, literal values. Uniqueness when in a pattern
     /// arises from NodeMap referencing the same value multiple times
     /// (based on Literal.eql).
@@ -59,9 +68,13 @@ pub const Node = union(enum) {
     /// Lists are operators that are recognized as separators for
     /// patterns.
     list: Pattern,
-    /// A newline-separated entry. Like list/semicolon but uses newline
-    /// for pretty-print isomorphism.
-    newline: Pattern,
+    /// A newline-separated entry. Evaluated like list/semicolon but carries the
+    /// literal newline whitespace for pretty-print isomorphism.
+    newline: Sep,
+    /// An indentation-grouped entry. Evaluated like a comma/list but carries the
+    /// literal newline + indentation whitespace, printed as a deeper-indented
+    /// group, for pretty-print isomorphism (the WAT folded form).
+    indent: Sep,
     /// An expression in braces.
     trie: Trie,
     /// A source comment (`# ...` up to end of line, `#` included). Comments
@@ -80,6 +93,11 @@ pub const Node = union(enum) {
             inline .constant, .variable, .comment => self,
             .pattern => |p| Node.ofPattern(try p.copy(allocator)),
             .infix => |inf| Node{ .infix = .{ .op = inf.op, .rhs = try inf.rhs.copy(allocator) } },
+            inline .newline, .indent => |sep, tag| @unionInit(
+                Node,
+                @tagName(tag),
+                .{ .ws = sep.ws, .rhs = try sep.rhs.copy(allocator) },
+            ),
             inline else => |pattern, tag| @unionInit(
                 Node,
                 @tagName(tag),
@@ -105,6 +123,7 @@ pub const Node = union(enum) {
             .constant, .variable, .comment => {},
             .trie => |*trie| @constCast(trie).deinit(allocator),
             .infix => |*inf| @constCast(&inf.rhs).deinit(allocator),
+            .newline, .indent => |*sep| @constCast(&sep.rhs).deinit(allocator),
             inline else => |*pattern| @constCast(pattern).deinit(allocator),
         }
     }
@@ -119,6 +138,9 @@ pub const Node = union(enum) {
             .trie => |trie| trie.eql(other.trie),
             .infix => |inf| mem.eql(u8, inf.op, other.infix.op) and
                 inf.rhs.eql(other.infix.rhs),
+            // Whitespace is layout-only; compare the following pattern.
+            .newline => |sep| sep.rhs.eql(other.newline.rhs),
+            .indent => |sep| sep.rhs.eql(other.indent.rhs),
             inline else => |pattern, tag| pattern
                 .eql(@field(other, @tagName(tag))),
         };
@@ -172,7 +194,8 @@ pub const Node = union(enum) {
 
     pub fn height(self: Node) usize {
         return switch (self) {
-            .pattern, .match, .arrow, .list, .newline => |p| p.height,
+            .pattern, .match, .arrow, .list => |p| p.height,
+            .newline, .indent => |sep| sep.rhs.height,
             .infix => |inf| inf.rhs.height,
             else => 0,
         };
@@ -218,13 +241,18 @@ pub const Node = union(enum) {
                     try inf.rhs.writeIndent(writer, optional_indent);
                 }
             },
+            // Whitespace separators reproduce their literal layout, then the
+            // pattern that follows.
+            .newline, .indent => |sep| {
+                try writer.writeAll(sep.ws);
+                try sep.rhs.writeIndent(writer, optional_indent);
+            },
             // Don't write an s-exp as its redundant for ops
             inline else => |pattern, tag| {
                 switch (tag) {
                     .arrow => try writer.writeAll("-> "),
                     .match => try writer.writeAll(": "),
                     .list => try writer.writeAll(", "),
-                    .newline => try writer.writeByte('\n'),
                     else => {},
                 }
                 try pattern.writeIndent(writer, optional_indent);

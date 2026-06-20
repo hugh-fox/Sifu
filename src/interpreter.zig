@@ -199,7 +199,7 @@ fn evaluate(it: anytype) Allocator.Error!Pattern {
             @constCast(&inf.rhs).deinit(allocator);
             node.* = Node{ .infix = .{ .op = inf.op, .rhs = rhs } };
         },
-        inline .pattern, .match, .arrow, .list, .newline => |sub, tag| {
+        inline .pattern, .match, .arrow, .list => |sub, tag| {
             var child_it = try spawnChild(Eval, it.ctx, sub, pattern_height, pattern_number, allocator);
             errdefer child_it.deinit();
             var evaluated = try evaluate(&child_it);
@@ -207,6 +207,15 @@ fn evaluate(it: anytype) Allocator.Error!Pattern {
             max_height = @max(max_height, evaluated.height);
             @constCast(&sub).deinit(allocator);
             node.* = @unionInit(Node, @tagName(tag), evaluated);
+        },
+        inline .newline, .indent => |sep, tag| {
+            var child_it = try spawnChild(Eval, it.ctx, sep.rhs, pattern_height, pattern_number, allocator);
+            errdefer child_it.deinit();
+            var evaluated = try evaluate(&child_it);
+            evaluated.height += 1;
+            max_height = @max(max_height, evaluated.height);
+            @constCast(&sep.rhs).deinit(allocator);
+            node.* = @unionInit(Node, @tagName(tag), .{ .ws = sep.ws, .rhs = evaluated });
         },
         else => max_height = @max(max_height, node.height()),
     };
@@ -287,7 +296,11 @@ fn evaluatePure(
 }
 
 pub fn evaluateComments(allocator: Allocator, pattern: Pattern) Allocator.Error!Pattern {
-    return evaluatePure(allocator, pattern, comments_interpreter.step);
+    // Strip comments first, then collapse the layout whitespace they leave
+    // behind (a second pass so separators emptied by nested comments are seen).
+    var stripped = try evaluatePure(allocator, pattern, comments_interpreter.step);
+    defer stripped.deinit(allocator);
+    return evaluatePure(allocator, stripped, comments_interpreter.whitespaceStep);
 }
 
 pub fn evaluateMath(allocator: Allocator, pattern: Pattern) Allocator.Error!Pattern {
