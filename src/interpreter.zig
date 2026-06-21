@@ -58,15 +58,15 @@ pub const EvalCtx = struct {
     /// recurse at the same index (`recursive`, §2) and an equal-height one drops
     /// strictly below it (`nested`, §3); each applies only if its mode is active
     /// (a disabled mode yields upper 0, leaving the sub-term unmatched).
-    /// `numeric` (§2 on values) re-fires the index when the sub-term's number
-    /// shrank below the parent's, even if its height did not.
+    /// `numeric` (§2 on values) re-fires the index on `sub` unless a previous
+    /// rule already matches it (then it defers to that rule via `nested`).
     pub fn child(
         self: EvalCtx,
         content_height: usize,
         pattern_height: usize,
-        content_number: ?i64,
-        pattern_number: ?i64,
-    ) EvalCtx {
+        sub: Pattern,
+        allocator: Allocator,
+    ) Allocator.Error!EvalCtx {
         // A recursive descent (§2) re-fires the matched rule at the same index on
         // a shrinking sub-term, so it keeps a `lower = 0` range capped at the
         // current index. A non-recursive nested descent instead shrinks the
@@ -78,7 +78,7 @@ pub const EvalCtx = struct {
             .{ .lower = 0, .upper = self.bound.upper }
         else if (recursive.descendUpper(self.has(.recursive), self.bound, content_height, pattern_height)) |upper|
             .{ .lower = 0, .upper = upper }
-        else if (numeric.descendUpper(self.has(.numeric), self.bound, content_number, pattern_number)) |upper|
+        else if (try numeric.descendUpper(self.has(.numeric), self.trie, self.bound, sub, allocator)) |upper|
             .{ .lower = 0, .upper = upper }
         else if (self.has(.nested))
             .{ .lower = 0, .upper = nested.descendUpper(self.bound) }
@@ -210,7 +210,6 @@ fn evaluate(it: anytype) Allocator.Error!Pattern {
     const Eval = @TypeOf(it.*);
     const allocator = it.allocator;
     const pattern_height = it.current.height;
-    const pattern_number = numeric.maxNumber(it.current.root);
 
     // Settle this level: run the step until it reports no more change.
     while (try it.step()) |_| {}
@@ -229,7 +228,7 @@ fn evaluate(it: anytype) Allocator.Error!Pattern {
     var max_height: usize = 0;
     for (current.root) |*node| switch (node.*) {
         .infix => |inf| {
-            var child_it = try spawnChild(Eval, it.ctx, inf.rhs, pattern_height, pattern_number, allocator);
+            var child_it = try spawnChild(Eval, it.ctx, inf.rhs, pattern_height, allocator);
             errdefer child_it.deinit();
             var rhs = try evaluate(&child_it);
             rhs.height += 1;
@@ -238,7 +237,7 @@ fn evaluate(it: anytype) Allocator.Error!Pattern {
             node.* = Node{ .infix = .{ .op = inf.op, .rhs = rhs } };
         },
         inline .pattern, .match, .arrow, .list, .semicolon => |sub, tag| {
-            var child_it = try spawnChild(Eval, it.ctx, sub, pattern_height, pattern_number, allocator);
+            var child_it = try spawnChild(Eval, it.ctx, sub, pattern_height, allocator);
             errdefer child_it.deinit();
             var evaluated = try evaluate(&child_it);
             evaluated.height += 1;
@@ -253,7 +252,7 @@ fn evaluate(it: anytype) Allocator.Error!Pattern {
             max_height = @max(max_height, node.height());
         },
         inline .newline, .indent => |sep, tag| {
-            var child_it = try spawnChild(Eval, it.ctx, sep.rhs, pattern_height, pattern_number, allocator);
+            var child_it = try spawnChild(Eval, it.ctx, sep.rhs, pattern_height, allocator);
             errdefer child_it.deinit();
             var evaluated = try evaluate(&child_it);
             evaluated.height += 1;
@@ -281,7 +280,6 @@ fn spawnChild(
     parent_ctx: anytype,
     sub: Pattern,
     pattern_height: usize,
-    pattern_number: ?i64,
     allocator: Allocator,
 ) Allocator.Error!Eval {
     const content_height = contentHeight(sub.root);
@@ -290,7 +288,7 @@ fn spawnChild(
     return .{
         .allocator = allocator,
         .current = current,
-        .ctx = parent_ctx.child(content_height, pattern_height, numeric.maxNumber(sub.root), pattern_number),
+        .ctx = try parent_ctx.child(content_height, pattern_height, sub, allocator),
     };
 }
 
@@ -310,7 +308,7 @@ const PureCtx = struct {
     pub fn transform(_: *PureCtx, _: *Pattern, _: Allocator) Allocator.Error!?Pattern {
         return null; // pure passes never finalize early; always recurse
     }
-    pub fn child(_: PureCtx, _: usize, _: usize, _: ?i64, _: ?i64) PureCtx {
+    pub fn child(_: PureCtx, _: usize, _: usize, _: Pattern, _: Allocator) Allocator.Error!PureCtx {
         return .{};
     }
     pub fn lift(_: *PureCtx, _: *Node, child_it: anytype, _: Allocator) Allocator.Error!void {

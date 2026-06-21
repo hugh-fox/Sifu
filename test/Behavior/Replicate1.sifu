@@ -1,0 +1,34 @@
+Replicate 0 x --> ()
+Replicate (n + 1) x --> x, Replicate n x
+
+# ===
+
+Replicate 0 A
+
+# ---
+
+()
+
+# ===
+
+Replicate 1 A
+
+# ---
+
+A, ()
+
+# ===
+
+Replicate 2 A
+
+# ---
+
+A, A, ()
+
+# ===
+
+Replicate 2 A
+
+# ---
+
+A, A, A, ()

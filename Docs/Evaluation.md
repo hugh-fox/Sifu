@@ -52,15 +52,21 @@ In Sifu, all forms of evaluation are essentially a repeated match and rewrite of
     
 ---
 
-# Specific Evaluators
+# Steps
 
 ## Operators
 
-This evaluator looks for an operator as is, but if it fails, it recurses on the lhs and rhs. Particularly useful for lists, where each element should be evaluated.
+This step looks for an operator as is, but if it fails, it recurses on the lhs and rhs. Particularly useful for lists, where each element should be evaluated.
 
 ## Match Step
 
 A simple step that just performs a single match and rewrite step, evaluating to the rewritten pattern and an index for which it was matched.
+
+## Numeric
+
+Handles terminating recursion for number expressions that the math evaluator determines is less than the called value, if there is a prior rule that will eventually match it.
+
+# Evaluators
 
 ## Evaluate Complete
 
