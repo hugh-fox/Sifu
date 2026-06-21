@@ -1,0 +1,15 @@
+Map fn () -> ()
+Map fn (*head, *tail) --> fn *head, Map fn (*tail)
+
+Combinations ()       --> (())
+Combinations (x, *xs) --> Combinations *xs ++ Map (x, ) (Combinations ( *xs))
+
+*xs ++ *ys --> *xs, *ys
+
+# ===
+
+Combinations (1, 2, 3,)
+
+# ---
+
+((1,2),(1,3),(2,3),)
