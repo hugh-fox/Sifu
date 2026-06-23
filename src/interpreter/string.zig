@@ -11,9 +11,12 @@ pub const concat_op = "+";
 
 /// Placeholder; memory allocation is not handled.
 pub fn step(pattern: Pattern, allocator: Allocator) Allocator.Error!?Pattern {
-    // A top-level concatenation looks like `operand (+ operand)*`, i.e. the
-    // second node is a `+` infix. Fold the whole root into one literal.
-    if (pattern.root.len >= 2 and isConcat(pattern.root[1])) {
+    // A top-level concatenation looks like `operand (+ operand)*`. A string
+    // operand decomposes into several `.char` nodes, so the `+` infix can appear
+    // at any position. Only fold when at least one operand is a string (has a
+    // `.char`): otherwise a plain juxtaposition like `A + B C` would be folded
+    // into a string, which it is not.
+    if (hasConcat(pattern.root) and hasChar(pattern.root)) {
         var acc = ArrayList(u8).empty;
         errdefer acc.deinit(allocator);
         // TODO: improve this, should never need a `quote` function
@@ -37,14 +40,38 @@ fn isConcat(node: Node) bool {
     return node == .infix and std.mem.eql(u8, node.infix.op, concat_op);
 }
 
+/// True if any node in the sequence is a `+` infix operation.
+fn hasConcat(root: []const Node) bool {
+    for (root) |node| if (isConcat(node)) return true;
+    return false;
+}
+
+/// True if any node in the sequence (or a `+`-operand under it) is a string
+/// character, marking the expression as a string concatenation.
+fn hasChar(root: []const Node) bool {
+    for (root) |node| switch (node) {
+        .char => return true,
+        .pattern => |sub| if (hasChar(sub.root)) return true,
+        .infix => |inf| if (isConcat(node) and hasChar(inf.rhs.root)) return true,
+        else => {},
+    };
+    return false;
+}
+
 /// Appends the concatenated content of a node sequence of the form
 /// `operand (+ operand)*` to `acc`. Returns false (leaving `acc`'s prior
 /// contents in place) when the sequence is not a foldable concatenation.
 fn appendRoot(acc: *ArrayList(u8), root: []const Node, allocator: Allocator) Allocator.Error!bool {
     if (root.len == 0) return true;
-    if (!try appendOperand(acc, root[0], allocator)) return false;
 
-    var i: usize = 1;
+    // The first operand is the leading run of plain nodes (string literals
+    // decompose into one constant node per character, so a single operand can
+    // span several nodes) up to the first `+` infix.
+    var i: usize = 0;
+    while (i < root.len and !isConcat(root[i])) : (i += 1) {
+        if (!try appendOperand(acc, root[i], allocator)) return false;
+    }
+
     while (i < root.len) : (i += 1) {
         if (!isConcat(root[i])) return false;
         // The operands are the infix node's rhs pattern.
@@ -57,6 +84,13 @@ fn appendRoot(acc: *ArrayList(u8), root: []const Node, allocator: Allocator) All
 /// operand is not foldable (e.g. an unbound variable or an operator node).
 fn appendOperand(acc: *ArrayList(u8), node: Node, allocator: Allocator) Allocator.Error!bool {
     switch (node) {
+        // A string character contributes its source bytes directly.
+        .char => |c| {
+            try acc.appendSlice(allocator, c);
+            return true;
+        },
+        // A plain constant (e.g. a number operand like `42`) contributes its
+        // text, with any surrounding quotes stripped.
         .constant => |constant| {
             try acc.appendSlice(allocator, unquote(constant));
             return true;
@@ -135,9 +169,11 @@ test "evaluateString: non-concat expression is unchanged" {
 test "evaluateString: unbound variable is not foldable" {
     var arena = ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
-    // `x` has no value here, so the concatenation must be left intact.
+    // `x` has no value here, so the concatenation must be left intact. The
+    // string literal decomposes into characters that print adjacently, so it
+    // reads back as `i32.const ` (trailing space character preserved) `+ x`.
     const out = try evalToString(arena.allocator(), "\"i32.const \" + x");
-    try testing.expectEqualStrings("\"i32.const \" + x", out);
+    try testing.expectEqualStrings("i32.const  + x", out);
 }
 
 test "I32-Const rule rewrites to a mnemonic string" {
@@ -150,7 +186,9 @@ test "I32-Const rule rewrites to a mnemonic string" {
     const value = try core.evaluateComplete(trie, allocator, query) orelse
         return error.NoEvalResult;
     const out = try value.toString(allocator);
-    try testing.expectEqualStrings("\"i32.const\"", out);
+    // Without a `+` concatenation to fold, the literal stays as its individual
+    // characters, which print adjacently and read back as `i32.const`.
+    try testing.expectEqualStrings("i32.const", out);
 }
 
 test "rule + concat assembles an instruction" {

@@ -24,6 +24,7 @@ const Pattern = trie_module.Pattern;
 const Node = trie_module.Node;
 const Trie = trie_module.Trie;
 const comments = @import("interpreter/comments.zig");
+const chars = @import("sifu/chars.zig");
 
 const Oom = Allocator.Error;
 
@@ -554,6 +555,13 @@ fn parseTerms(self: *Self, allocator: Allocator) Oom!Pattern {
     var nodes = std.ArrayList(Node).empty;
     var max_child: usize = 0;
     while (self.canStartTerm()) {
+        // String literals decompose into one constant node per character, so
+        // both parsers key the trie on characters rather than whole strings.
+        if (self.current.tag == .string or self.current.tag == .single_string) {
+            const tok = self.eat();
+            try chars.appendStringChars(allocator, &nodes, tok.text(self.source));
+            continue;
+        }
         const node = try self.parseTerm(allocator);
         max_child = @max(max_child, node.height());
         try nodes.append(allocator, node);
@@ -769,13 +777,14 @@ pub fn parse(allocator: Allocator, source: []const u8) Oom!Pattern {
 
 const testing = std.testing;
 
-const NodeTag = enum { constant, variable, var_pattern, comment, pattern, infix, match, arrow, list, semicolon, newline, indent, trie };
+const NodeTag = enum { constant, char, variable, var_pattern, comment, pattern, infix, match, arrow, list, semicolon, newline, indent, trie };
 
 fn expectNodes(pattern: Pattern, expected_tags: []const NodeTag) !void {
     try testing.expectEqual(expected_tags.len, pattern.root.len);
     for (pattern.root, expected_tags) |node, expected_tag| {
         const actual_tag: NodeTag = switch (node) {
             .constant => .constant,
+            .char => .char,
             .variable => |v| if (v.len > 0 and v[0] == '*') .var_pattern else .variable,
             .comment => .comment,
             .pattern => .pattern,
@@ -850,9 +859,11 @@ test "decimal number" {
 test "string" {
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
+    // String literals decompose into one char node per character.
     const p = try parse(arena.allocator(), "\"hello\"");
-    try expectNodes(p, &.{.constant});
-    try testing.expectEqualStrings("\"hello\"", p.root[0].constant);
+    try expectNodes(p, &.{ .char, .char, .char, .char, .char });
+    try testing.expectEqualStrings("h", p.root[0].char);
+    try testing.expectEqualStrings("o", p.root[4].char);
 }
 
 test "arrow: A -> B" {
@@ -1003,7 +1014,7 @@ test "single entry trie: { A -> B }" {
     const t = p.root[0].trie;
     try testing.expectEqual(@as(usize, 1), t.length());
     // Trie should have entry: A -> B
-    try testing.expect(t.map.contains("A"));
+    try testing.expect(t.getToken("A") != null);
 }
 
 test "multi-constant entry trie: { A B -> C }" {
@@ -1014,9 +1025,9 @@ test "multi-constant entry trie: { A B -> C }" {
     const t = p.root[0].trie;
     try testing.expectEqual(@as(usize, 1), t.length());
     // Trie should have incrementHeight entry: A -> B -> value(C)
-    try testing.expect(t.map.contains("A"));
-    const a_trie = t.map.get("A").?;
-    try testing.expect(a_trie.map.contains("B"));
+    try testing.expect(t.getToken("A") != null);
+    const a_trie = t.getToken("A").?;
+    try testing.expect(a_trie.getToken("B") != null);
 }
 
 test "multi-entry trie: { A -> B; C -> D }" {
@@ -1026,8 +1037,8 @@ test "multi-entry trie: { A -> B; C -> D }" {
     try expectNodes(p, &.{.trie});
     const t = p.root[0].trie;
     try testing.expectEqual(@as(usize, 2), t.length());
-    try testing.expect(t.map.contains("A"));
-    try testing.expect(t.map.contains("C"));
+    try testing.expect(t.getToken("A") != null);
+    try testing.expect(t.getToken("C") != null);
 }
 
 test "trie with variable: { x -> x }" {
@@ -1037,7 +1048,7 @@ test "trie with variable: { x -> x }" {
     try expectNodes(p, &.{.trie});
     const t = p.root[0].trie;
     try testing.expectEqual(@as(usize, 1), t.length());
-    try testing.expect(t.map.contains("x"));
+    try testing.expect(t.var_map.contains("x"));
 }
 
 test "trie constant-only entry: { A }" {
@@ -1047,7 +1058,7 @@ test "trie constant-only entry: { A }" {
     try expectNodes(p, &.{.trie});
     const t = p.root[0].trie;
     try testing.expectEqual(@as(usize, 1), t.length());
-    try testing.expect(t.map.contains("A"));
+    try testing.expect(t.getToken("A") != null);
 }
 
 test "trie in expression: X { A -> B } Y" {
@@ -1068,9 +1079,9 @@ test "trie with 3 entries: { A -> 1; B -> 2; C -> 3 }" {
     try expectNodes(p, &.{.trie});
     const t = p.root[0].trie;
     try testing.expectEqual(@as(usize, 3), t.length());
-    try testing.expect(t.map.contains("A"));
-    try testing.expect(t.map.contains("B"));
-    try testing.expect(t.map.contains("C"));
+    try testing.expect(t.getToken("A") != null);
+    try testing.expect(t.getToken("B") != null);
+    try testing.expect(t.getToken("C") != null);
 }
 
 test "parseTrie: comma with varpattern - A, *x --> *x" {
@@ -1079,10 +1090,10 @@ test "parseTrie: comma with varpattern - A, *x --> *x" {
     var trie = try parseTrie(arena.allocator(), "A, *x --> *x");
     // Trie structure: A -> , -> *x (var) -> value(*x)
     try testing.expectEqual(@as(usize, 1), trie.length());
-    try testing.expect(trie.map.contains("A"));
-    const a_trie = trie.map.get("A").?;
-    try testing.expect(a_trie.map.contains(","));
-    const comma_trie = a_trie.map.get(",").?;
+    try testing.expect(trie.getToken("A") != null);
+    const a_trie = trie.getToken("A").?;
+    try testing.expect(a_trie.getToken(",") != null);
+    const comma_trie = a_trie.getToken(",").?;
     // After comma, there should be a variable *x
     try testing.expect(comma_trie.var_branches.items.len > 0);
 }
@@ -1094,8 +1105,8 @@ test "parseTrie: mixed operators" {
     // Entry 2: F --> G
     const trie = try parseTrie(arena.allocator(), "A, B -> C, D --> E; F --> G");
     try testing.expectEqual(@as(usize, 2), trie.length());
-    try testing.expect(trie.map.contains("A"));
-    try testing.expect(trie.map.contains("F"));
+    try testing.expect(trie.getToken("A") != null);
+    try testing.expect(trie.getToken("F") != null);
 }
 
 test "multiline: newlines separate entries" {
@@ -1162,8 +1173,8 @@ test "multiline: trie with newline entries" {
     defer arena.deinit();
     const trie = try parseTrie(arena.allocator(), "A -> 1\nB -> 2");
     try testing.expectEqual(@as(usize, 2), trie.length());
-    try testing.expect(trie.map.contains("A"));
-    try testing.expect(trie.map.contains("B"));
+    try testing.expect(trie.getToken("A") != null);
+    try testing.expect(trie.getToken("B") != null);
 }
 
 test "multiline: trie with trailing arrow has empty value" {
@@ -1172,8 +1183,8 @@ test "multiline: trie with trailing arrow has empty value" {
     // Arrow at end of line has empty value, B is separate entry
     const trie = try parseTrie(arena.allocator(), "A ->\nB");
     try testing.expectEqual(@as(usize, 2), trie.length());
-    try testing.expect(trie.map.contains("A"));
-    try testing.expect(trie.map.contains("B"));
+    try testing.expect(trie.getToken("A") != null);
+    try testing.expect(trie.getToken("B") != null);
     // A's value should be empty
     const a_value = trie.getIndexOrNull(0).?;
     try testing.expectEqual(@as(usize, 0), a_value.root.len);
@@ -1213,7 +1224,7 @@ test "multiline: multi-line pattern without continuation" {
     ;
     const trie = try parseTrie(arena.allocator(), src);
     try testing.expectEqual(@as(usize, 2), trie.length());
-    try testing.expect(trie.map.contains("Map"));
+    try testing.expect(trie.getToken("Map") != null);
 }
 
 test "multiline: newlines and semicolons produce same structure" {

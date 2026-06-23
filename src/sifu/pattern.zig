@@ -24,17 +24,22 @@ pub const Pattern = struct {
         try slice[0].writeSExp(writer, optional_indent);
         if (slice.len == 1) {
             return;
-        } else for (slice[1 .. slice.len - 1]) |*node| {
-            // Don't add space before separator nodes or comma keys
-            if (node.* != .list and node.* != .semicolon and node.* != .newline and node.* != .indent and !node.isCommaConstant())
+        }
+        for (slice[1..], slice[0 .. slice.len - 1]) |*node, prev| {
+            if (needsSpaceBefore(node.*, prev))
                 try writer.writeByte(' ');
             try node.writeSExp(writer, optional_indent);
         }
-        // Don't add space before separator nodes or comma keys
-        if (slice[slice.len - 1] != .list and slice[slice.len - 1] != .semicolon and slice[slice.len - 1] != .newline and slice[slice.len - 1] != .indent and !slice[slice.len - 1].isCommaConstant())
-            try writer.writeByte(' ');
-        try slice[slice.len - 1]
-            .writeSExp(writer, optional_indent);
+    }
+
+    /// Whether a space should separate `node` from the preceding `prev` term in
+    /// a juxtaposition. Separators (and comma keys) glue to their left, and a
+    /// run of chars from one string literal prints adjacently (`hi`, not `h i`),
+    /// keeping whitespace significant.
+    fn needsSpaceBefore(node: Node, prev: Node) bool {
+        if (node == .char and prev == .char) return false;
+        return node != .list and node != .semicolon and
+            node != .newline and node != .indent and !node.isCommaConstant();
     }
 
     pub fn write(

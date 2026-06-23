@@ -15,51 +15,49 @@ const Writer = Io.Writer;
 pub const Node = @import("node.zig").Node;
 pub const Pattern = @import("pattern.zig").Pattern;
 
-pub const HashMap = std.StringHashMapUnmanaged(Trie);
+/// Constants (and all structural separators) are keyed by individual bytes:
+/// a token like `Foo` is the path `F` -> `o` -> `o` -> ` ` (a trailing space
+/// delimits one token from the next, mirroring how the source separates them).
+/// Byte keys need no duped/owned key memory, unlike whole-string keys.
+pub const HashMap = std.AutoHashMapUnmanaged(u8, Trie);
+/// Variables remain keyed by their whole name: a variable matches an entire
+/// subject term ("match anything"), which has no per-byte meaning.
+pub const VarMap = std.StringHashMapUnmanaged(Trie);
 pub const GetOrPutResult = HashMap.GetOrPutResult;
 
-/// A constant node and its next term pointer for a trie, where only the
-/// length of slice types are stored for constants (instead of pointers).
-/// The term/next is a reference to a constant/value in the HashMaps,
-/// which owns both.
-const Entry = HashMap.Entry;
+const ByteEntry = HashMap.Entry;
+const VarEntry = VarMap.Entry;
 
-/// This maps to branches, but the type is Branch instead of just *Self to
-/// retrieve constants if necessary. The Self pointer references another field in
-/// this trie, such as `constants`. Stores any and all values, vars and their indices
-/// at each branch in the trie. Tracks the order of entries in the trie and
-/// references to next pointers. An index for an entry is saved at every branch
-/// in the trie for a given constant. Branches may or may not contain values in their
-/// ValueMap, for example in `Foo Bar -> 123`, the branch at `Foo` would have an
-/// index to the constant `Bar` and a leaf trie containing the value `123`.
-const BranchNode = struct {
-    // The string constant and child trie entry from the current map.
-    entry: Entry,
-    // This points to the next branch in the entry's branch list. Necessary for
-    // efficient lookups by index. There is always a next branch for constants/vars
-    // and never for values.
+/// A byte branch and its child trie entry from the byte map.
+const ByteBranchNode = struct {
+    entry: ByteEntry,
+    // Index of this branch within the child entry's branch list. Necessary for
+    // efficient lookups by index.
     next_index: usize,
 
-    pub fn this(branch_node: BranchNode) *Trie {
+    pub fn this(branch_node: ByteBranchNode) *Trie {
+        return branch_node.entry.value_ptr;
+    }
+};
+
+/// A variable branch and its child trie entry from the var map.
+const VarBranchNode = struct {
+    entry: VarEntry,
+    next_index: usize,
+
+    pub fn this(branch_node: VarBranchNode) *Trie {
         return branch_node.entry.value_ptr;
     }
 };
 
 /// A single index and its next pointer in the trie. The union disambiguates
-/// between values and the next variables/constant. Constants are borrowed from the trie's
-/// hashmap, but variables are owned (as they aren't stored as constants in the trie).
+/// between values and the next variable/constant byte. Constant bytes are
+/// borrowed from the byte map, variables from the var map.
 /// Variables starting with '*' have var_pattern behavior.
 const Branch = union(enum) {
-    constant: BranchNode,
-    variable: BranchNode,
+    constant: ByteBranchNode,
+    variable: VarBranchNode,
     value: Pattern,
-
-    pub fn node(branch: Branch) ?BranchNode {
-        return switch (branch) {
-            .constant, .variable => |branch_node| branch_node,
-            .value => null,
-        };
-    }
 
     pub fn isVarPattern(branch: Branch) bool {
         return switch (branch) {
@@ -74,16 +72,6 @@ const Branch = union(enum) {
             .value => return null,
             inline else => |branch_node| return branch_node.this(),
         }
-    }
-
-    pub fn next(self: Branch, bound: Bound) ?IndexBranch {
-        const branch_node = self.node() orelse return null;
-        const trie = branch_node.entry.value_ptr.*;
-        return switch (self) {
-            .constant => Trie.findNextInBranches(trie.constant_branches.items, bound),
-            .variable => Trie.findNextInBranches(trie.var_branches.items, bound),
-            .value => null,
-        };
     }
 };
 
@@ -118,6 +106,12 @@ pub const Trie = struct {
     pub const Self = @This();
 
     map: HashMap = .{},
+    var_map: VarMap = .{},
+    /// When non-empty, this node is the delimiter leaf that ends a token whose
+    /// bytes spell `token` (a constant or structural separator). The string is
+    /// borrowed (from source or a comptime literal), so reconstruction hands
+    /// back whole tokens cheaply without re-lexing the byte path.
+    token: []const u8 = &.{},
     constant_branches: BranchList = .empty,
     var_branches: BranchList = .empty,
     value_branches: BranchList = .empty,
@@ -176,22 +170,31 @@ pub const Trie = struct {
         index: usize,
         nodes: *ArrayList(Node),
     ) Allocator.Error!void {
+        var current = self;
         const bound = Bound{ .lower = index, .upper = index + 1 };
-        // Check constants first
-        if (findNextInBranches(self.constant_branches.items, bound)) |kb| {
-            const found_index, const branch = kb;
-            if (found_index == index) {
-                try nodes.append(allocator, .{ .constant = branch.constant.entry.key_ptr.* });
-                return branch.constant.entry.value_ptr.rebuildConstantInner(allocator, index, nodes);
+        while (true) {
+            // Follow a constant byte branch. A whole token is spelled across
+            // several bytes; emit it only when we reach its delimiter leaf
+            // (the node carrying the stored token).
+            if (findNextInBranches(current.constant_branches.items, bound)) |kb| {
+                const found_index, const branch = kb;
+                if (found_index == index) {
+                    current = branch.constant.entry.value_ptr.*;
+                    if (current.token.len != 0)
+                        try nodes.append(allocator, .{ .constant = current.token });
+                    continue;
+                }
             }
-        }
-        // Then check vars
-        if (findNextInBranches(self.var_branches.items, bound)) |vb| {
-            const found_index, const branch = vb;
-            if (found_index == index) {
-                try nodes.append(allocator, .{ .variable = branch.variable.entry.key_ptr.* });
-                return branch.variable.entry.value_ptr.rebuildConstantInner(allocator, index, nodes);
+            // Then check vars (whole-name branches).
+            if (findNextInBranches(current.var_branches.items, bound)) |vb| {
+                const found_index, const branch = vb;
+                if (found_index == index) {
+                    try nodes.append(allocator, .{ .variable = branch.variable.entry.key_ptr.* });
+                    current = branch.variable.entry.value_ptr.*;
+                    continue;
+                }
             }
+            return;
         }
     }
 
@@ -203,7 +206,7 @@ pub const Trie = struct {
     pub fn copy(self: Self, allocator: Allocator) Allocator.Error!Self {
         var result = Self{ .height = self.height };
 
-        // Copy the map entries
+        // Copy the byte map entries
         var keys_iter = self.map.iterator();
         while (keys_iter.next()) |entry|
             try result.map.putNoClobber(
@@ -211,6 +214,18 @@ pub const Trie = struct {
                 entry.key_ptr.*,
                 try entry.value_ptr.*.copy(allocator),
             );
+
+        // Copy the var map entries (keyed by whole variable name)
+        var var_iter = self.var_map.iterator();
+        while (var_iter.next()) |entry|
+            try result.var_map.putNoClobber(
+                allocator,
+                entry.key_ptr.*,
+                try entry.value_ptr.*.copy(allocator),
+            );
+
+        // Copy the token markers on the leaf, if any.
+        result.token = self.token;
 
         // Copy the branch lists. Each branch holds a map Entry pointing at the
         // source map, so rebuild it against the copied map or the pointers
@@ -227,7 +242,7 @@ pub const Trie = struct {
         try result.var_branches.ensureTotalCapacity(allocator, self.var_branches.items.len);
         for (self.var_branches.items) |index_branch| {
             const idx, const branch = index_branch;
-            const entry = result.map.getEntry(branch.variable.entry.key_ptr.*).?;
+            const entry = result.var_map.getEntry(branch.variable.entry.key_ptr.*).?;
             result.var_branches.appendAssumeCapacity(.{ idx, .{ .variable = .{
                 .entry = entry,
                 .next_index = branch.variable.next_index,
@@ -271,6 +286,13 @@ pub const Trie = struct {
         }
         self.map.deinit(allocator);
 
+        // Recursively deinit child tries reached through variables
+        var var_iter = self.var_map.iterator();
+        while (var_iter.next()) |entry| {
+            entry.value_ptr.deinit(allocator);
+        }
+        self.var_map.deinit(allocator);
+
         // Deinit values
         for (self.value_branches.items) |*index_branch| {
             _, var branch = index_branch.*;
@@ -288,13 +310,22 @@ pub const Trie = struct {
     pub fn eql(self: Self, other: Self) bool {
         if (self.map.count() != other.map.count())
             return false;
+        if (self.var_map.count() != other.var_map.count())
+            return false;
+        // Byte map entries are keyed by individual bytes; look each up in the
+        // other map rather than relying on iteration order.
         var map_iter = self.map.iterator();
-        var other_map_iter = other.map.iterator();
         while (map_iter.next()) |entry| {
-            const other_entry = other_map_iter.next() orelse
+            const other_value = other.map.get(entry.key_ptr.*) orelse
                 return false;
-            if (!(mem.eql(u8, entry.key_ptr.*, other_entry.key_ptr.*)) or
-                !entry.value_ptr.eql(other_entry.value_ptr.*))
+            if (!entry.value_ptr.eql(other_value))
+                return false;
+        }
+        var var_iter = self.var_map.iterator();
+        while (var_iter.next()) |entry| {
+            const other_value = other.var_map.get(entry.key_ptr.*) orelse
+                return false;
+            if (!entry.value_ptr.eql(other_value))
                 return false;
         }
         return true;
@@ -306,52 +337,44 @@ pub const Trie = struct {
         return result;
     }
 
+    /// Walk a literal `bytes` path through the byte map and return the final
+    /// byte's entry together with the trie it leads to, or null if any byte is
+    /// missing. Used by both constant and separator matching.
+    fn getByteEntry(self: *const Self, bytes: []const u8) ?struct { ByteEntry, *Trie } {
+        var current: *const Self = self;
+        var entry: ByteEntry = undefined;
+        for (bytes) |byte| {
+            entry = current.map.getEntry(byte) orelse return null;
+            current = entry.value_ptr;
+        }
+        return .{ entry, entry.value_ptr };
+    }
+
+    /// Match an identifier constant (its bytes plus the delimiter) and find the
+    /// lowest index at or after `bound` continuing past it.
     fn getBranch(
         self: Trie,
         bound: Bound,
         constant: []const u8,
-        comptime tag: enum { constant, variable },
     ) ?IndexBranchTrie {
-        if (self.map.getEntry(constant)) |entry| {
-            debug(
-                "Found string {s} in {*}",
-                .{ constant, &self },
-            );
-            // Find the next index from bound in the child trie. We need to
-            // check all branch types (constants, vars, values) to find the minimum
-            // index at or after bound.
-            const child_trie = entry.value_ptr;
-            if (child_trie.findNext(bound)) |index_branch| {
-                const index, _ = index_branch;
-                debug(
-                    "Found branch in {*} for constant {s} at index: {} within bound {}",
-                    .{ child_trie, constant, index, bound },
-                );
-                if (index < bound.lower) panic(
-                    "Index {} is less than bound {}\n",
-                    .{ index, bound },
-                );
-                // Return the minimum index from the child trie but the
-                // branch from this one
-                return .{
-                    .index = index,
-                    .branch = @unionInit(Branch, @tagName(tag), .{
-                        .entry = entry,
-                        .next_index = 0, // Not used with new structure
-                    }),
-                    .trie = child_trie,
-                };
-            } else {
-                debug(
-                    "Constant {s} found in trie, but no branches at or after bound {}",
-                    .{ constant, bound },
-                );
-                return null;
-            }
-        } else {
+        const entry, const child_trie = self.getByteEntry(constant) orelse {
             debug("Constant '{s}' not found in map", .{constant});
             return null;
-        }
+        };
+        // Consume the inter-token delimiter following the identifier.
+        const delim_entry = child_trie.map.getEntry(delim) orelse return null;
+        const leaf = delim_entry.value_ptr;
+        const index, _ = leaf.findNext(bound) orelse {
+            debug("Constant {s} found, but no branches at or after bound {}", .{ constant, bound });
+            return null;
+        };
+        if (index < bound.lower)
+            panic("Index {} is less than bound {}\n", .{ index, bound });
+        return .{
+            .index = index,
+            .branch = .{ .constant = .{ .entry = entry, .next_index = 0 } },
+            .trie = leaf,
+        };
     }
 
     /// Follows `trie` for each trie matching structure as well as value.
@@ -368,15 +391,15 @@ pub const Trie = struct {
         node: Node,
     ) ?Self {
         return switch (node) {
-            .constant => |constant| trie.map.get(constant),
-            .variable => |variable| trie.map.get(variable),
+            inline .constant, .char => |constant| trie.getToken(constant),
+            .variable => |variable| trie.var_map.get(variable),
             .pattern => |sub_pattern| blk: {
-                var current = trie.map.get("(") orelse
+                var current = trie.getToken("(") orelse
                     break :blk null;
                 for (sub_pattern.root) |sub_node|
                     current = current.getTerm(sub_node) orelse
                         break :blk null;
-                break :blk current.map.get(")");
+                break :blk current.getToken(")");
             },
             .arrow, .match, .list => panic("unimplemented", .{}),
             else => panic("unimplemented", .{}),
@@ -411,14 +434,22 @@ pub const Trie = struct {
             null;
     }
 
-    fn getOrPutConstant(
+    /// Inter-token delimiter byte appended after each identifier constant so a
+    /// token can't be confused with the prefix of a longer one (`Foo` vs
+    /// `Foobar`). Mirrors the whitespace the source already uses to separate
+    /// tokens. Structural separators (`(`, `->`, `,` ...) are matched byte-exact
+    /// without it.
+    const delim = ' ';
+
+    /// Follow or create a single byte branch, recording `index` on it.
+    fn getOrPutByte(
         trie: *Self,
         allocator: Allocator,
         index: usize,
-        constant: []const u8,
+        byte: u8,
     ) !*Self {
         const entry = try trie.map
-            .getOrPutValue(allocator, constant, Self{ .height = trie.height + 1 });
+            .getOrPutValue(allocator, byte, Self{ .height = trie.height + 1 });
         const next = entry.value_ptr;
         try trie.constant_branches.append(
             allocator,
@@ -432,13 +463,30 @@ pub const Trie = struct {
         return next;
     }
 
+    /// Append a token (a constant or structural separator): each of its bytes
+    /// followed by the delimiter. The delimiter leaf records the whole token so
+    /// reconstruction can hand it back without re-lexing.
+    fn ensureToken(
+        trie: *Self,
+        allocator: Allocator,
+        index: usize,
+        token: []const u8,
+    ) Allocator.Error!*Self {
+        var next = trie;
+        for (token) |byte|
+            next = try next.getOrPutByte(allocator, index, byte);
+        next = try next.getOrPutByte(allocator, index, delim);
+        if (next.token.len == 0) next.token = token;
+        return next;
+    }
+
     fn getOrPutVar(
         trie: *Self,
         allocator: Allocator,
         index: usize,
         variable: []const u8,
     ) !*Self {
-        const entry = try trie.map
+        const entry = try trie.var_map
             .getOrPutValue(allocator, variable, Self{});
         const next = entry.value_ptr;
         try trie.var_branches.append(
@@ -453,6 +501,14 @@ pub const Trie = struct {
         return next;
     }
 
+    /// Follow a token (bytes plus delimiter), read-only; null if absent.
+    pub fn getToken(trie: Self, token: []const u8) ?Self {
+        var current = trie;
+        for (token) |byte|
+            current = current.map.get(byte) orelse return null;
+        return current.map.get(delim);
+    }
+
     /// Follows or creates a path as necessary in the trie and
     /// indices. Only adds branches, not values.
     fn ensurePathTerm(
@@ -462,9 +518,9 @@ pub const Trie = struct {
         term: Node,
     ) Allocator.Error!*Self {
         return switch (term) {
-            .constant => |constant| blk: {
-                debug("getOrPutConstant: {*} put {s} at index {}", .{ trie, constant, index });
-                const next = try trie.getOrPutConstant(allocator, index, constant);
+            inline .constant, .char => |constant| blk: {
+                debug("ensureConstant: {*} put {s} at index {}", .{ trie, constant, index });
+                const next = try trie.ensureToken(allocator, index, constant);
                 break :blk next;
             },
             .variable => |variable| try trie
@@ -472,25 +528,20 @@ pub const Trie = struct {
             // Comments are stripped before trie construction; skip defensively.
             .comment => trie,
             .pattern => |sub_pat| blk: {
-                var next = trie;
-                debug("Processing pattern node at {*}", .{next});
-                next = try next.getOrPutConstant(allocator, index, "(");
-                debug("Open paren address: {*}", .{next});
+                var next = try trie.ensureToken(allocator, index, "(");
                 next = try next.ensurePath(allocator, index, sub_pat);
-                debug("Sub-pattern address: {*}", .{next});
-                next = try next.getOrPutConstant(allocator, index, ")");
-                debug("Close paren address: {*}", .{next});
+                next = try next.ensureToken(allocator, index, ")");
                 break :blk next;
             },
             .trie => |sub_trie| blk: {
-                var next = try trie.getOrPutConstant(allocator, index, "{");
+                var next = try trie.ensureToken(allocator, index, "{");
 
                 const indices = try sub_trie.valueIndices(allocator);
                 defer allocator.free(indices);
 
                 for (indices, 0..) |entry_idx, i| {
                     if (i > 0) {
-                        next = try next.getOrPutConstant(allocator, index, ",");
+                        next = try next.ensureToken(allocator, index, ",");
                     }
 
                     const constant_pat = try sub_trie.rebuildConstant(allocator, entry_idx);
@@ -499,58 +550,47 @@ pub const Trie = struct {
                     const value = sub_trie.getIndexOrNull(entry_idx) orelse continue;
 
                     next = try next.ensurePath(allocator, index, constant_pat);
-                    next = try next.getOrPutConstant(allocator, index, "->");
+                    next = try next.ensureToken(allocator, index, "->");
                     next = try next.ensurePath(allocator, index, value);
                 }
 
-                next = try next.getOrPutConstant(allocator, index, "}");
+                next = try next.ensureToken(allocator, index, "}");
                 break :blk next;
             },
             .list => |comma| blk: {
-                var next = trie;
-                next = try next.getOrPutConstant(allocator, index, ",");
+                var next = try trie.ensureToken(allocator, index, ",");
                 next = try next.ensurePath(allocator, index, comma);
-
                 break :blk next;
             },
             .semicolon => |semi| blk: {
-                var next = trie;
-                next = try next.getOrPutConstant(allocator, index, ";");
+                var next = try trie.ensureToken(allocator, index, ";");
                 next = try next.ensurePath(allocator, index, semi);
-
                 break :blk next;
             },
             .indent => |ind| blk: {
-                var next = trie;
-                next = try next.getOrPutConstant(allocator, index, ",");
+                var next = try trie.ensureToken(allocator, index, ",");
                 next = try next.ensurePath(allocator, index, ind.rhs);
-
                 break :blk next;
             },
             .newline => |nl| blk: {
-                var next = trie;
-                next = try next.getOrPutConstant(allocator, index, "\n");
+                var next = try trie.ensureToken(allocator, index, "\n");
                 next = try next.ensurePath(allocator, index, nl.rhs);
-
                 break :blk next;
             },
             .infix => |inf| blk: {
-                var next = trie;
-                // The operator symbol becomes a constant on the path, followed by
+                // The operator symbol becomes bytes on the path, followed by
                 // its operands, matching how lists/arrows are flattened.
-                next = try next.getOrPutConstant(allocator, index, inf.op);
+                var next = try trie.ensureToken(allocator, index, inf.op);
                 next = try next.ensurePath(allocator, index, inf.rhs);
                 break :blk next;
             },
             .match => |sub_pat| blk: {
-                var next = trie;
-                next = try next.getOrPutConstant(allocator, index, ":");
+                var next = try trie.ensureToken(allocator, index, ":");
                 next = try next.ensurePath(allocator, index, sub_pat);
                 break :blk next;
             },
             .arrow => |sub_pat| blk: {
-                var next = trie;
-                next = try next.getOrPutConstant(allocator, index, "->");
+                var next = try trie.ensureToken(allocator, index, "->");
                 next = try next.ensurePath(allocator, index, sub_pat);
                 break :blk next;
             },
@@ -762,11 +802,19 @@ pub const Trie = struct {
     fn continuesAt(self: *const Self, node: Node) bool {
         if (self.var_branches.items.len > 0) return true;
         return switch (node) {
-            .constant => |c| self.map.get(c) != null,
-            .infix => |inf| self.map.get(inf.op) != null,
-            .pattern => self.map.get("(") != null,
+            inline .constant, .char => |c| self.getToken(c) != null,
+            .infix => |inf| self.getToken(inf.op) != null,
+            .pattern => self.getToken("(") != null,
             else => false,
         };
+    }
+
+    /// Walk a structural separator token (its bytes plus the delimiter) and
+    /// return the trie it leads to.
+    fn getSeparatorTrie(self: *const Self, key: []const u8) ?*Trie {
+        _, const after = self.getByteEntry(key) orelse return null;
+        const delim_entry = after.map.getEntry(delim) orelse return null;
+        return delim_entry.value_ptr;
     }
 
     /// Find the first term at or after bound
@@ -785,8 +833,8 @@ pub const Trie = struct {
                 .variable => |variable| variable,
                 .value => panic("Expected variable, found value", .{}),
                 inline else => |b, tag| panic(
-                    "Expected variable, found {s} {s} at {*}",
-                    .{ @tagName(tag), b.entry.key_ptr.*, b.entry.value_ptr },
+                    "Expected variable, found {s} at {*}",
+                    .{ @tagName(tag), b.entry.value_ptr },
                 ),
             };
             const variable = branch_node.entry.key_ptr.*;
@@ -829,12 +877,12 @@ pub const Trie = struct {
 
         // Now check for exact matches based on node type
         switch (node) {
-            .constant => |constant| {
+            inline .constant, .char => |constant| {
                 debug(
                     "Checking {*} for constant match {s} at bound {}",
                     .{ self, constant, bound },
                 );
-                return self.getBranch(bound, constant, .constant);
+                return self.getBranch(bound, constant);
             },
 
             .variable => |variable| {
@@ -845,9 +893,8 @@ pub const Trie = struct {
             },
             .pattern => |pattern| {
                 // Match opening paren
-                const open_entry = self.map.getEntry("(") orelse
+                const open_trie = self.getSeparatorTrie("(") orelse
                     return null;
-                const open_trie = open_entry.value_ptr;
                 debug("Matching sub-pattern on {*}", .{open_trie});
                 var index, _ = open_trie.findNext(bound) orelse
                     return null;
@@ -866,9 +913,8 @@ pub const Trie = struct {
                 }
                 debug("Sub-pattern matched {*}", .{pattern_match.trie_ptr});
                 // Successfully matched entire pattern, now match closing paren
-                const close_entry = pattern_match.trie_ptr.map.getEntry(")") orelse
+                const close_trie = pattern_match.trie_ptr.getSeparatorTrie(")") orelse
                     return null;
-                const close_trie = close_entry.value_ptr;
                 debug("Closing paren matched {*}", .{close_trie});
                 index, const branch = close_trie.findNext(.{ .lower = index, .upper = bound.upper }) orelse
                     return null;
@@ -909,9 +955,8 @@ pub const Trie = struct {
             // operator constant, then recursively match the operand pattern.
             .infix => |inf| {
                 debug("Matching infix {s} with {} operand(s)", .{ inf.op, inf.rhs.root.len });
-                const open_entry = self.map.getEntry(inf.op) orelse
+                const open_trie = self.getSeparatorTrie(inf.op) orelse
                     return null;
-                const open_trie = open_entry.value_ptr;
                 var index, _ = open_trie.findNext(bound) orelse
                     return null;
 
@@ -958,9 +1003,8 @@ pub const Trie = struct {
         sep_key: []const u8,
         pattern: Pattern,
     ) Allocator.Error!?IndexBranchTrie {
-        const open_entry = self.map.getEntry(sep_key) orelse
+        const open_trie = self.getSeparatorTrie(sep_key) orelse
             return null;
-        const open_trie = open_entry.value_ptr;
         debug("Matched separator at {*}", .{open_trie});
         var index, _ = open_trie.findNext(bound) orelse
             return null;
@@ -1059,14 +1103,16 @@ pub const Trie = struct {
             index = index_branch_trie.index;
             const branch = index_branch_trie.branch;
             switch (branch) {
-                .constant => |constant| {
-                    debug(
-                        "Appending constant branch at index {} of {s}",
-                        .{ index, constant.entry.key_ptr.* },
-                    );
+                .constant => {
+                    // A constant branch is an exact byte match of the query
+                    // term, so the matched node is the query node itself. Copy
+                    // it: `node_list` becomes the owned `Match.query`, so a
+                    // shallow share of a compound node (e.g. a nested
+                    // `.pattern`) would double-free against the caller's query.
+                    debug("Appending constant branch at index {}", .{index});
                     try node_list.append(
                         allocator,
-                        Node{ .constant = constant.entry.key_ptr.* },
+                        try pattern.root[pattern_index].copy(allocator),
                     );
                 },
                 .variable => |variable| {
@@ -1103,9 +1149,9 @@ pub const Trie = struct {
                         // trie continuation after the var) can resume matching
                         // an upcoming term; a trailing var with no such
                         // continuation swallows everything that remains.
-                        const segmented = var_trie.map.get(",") != null or
-                            var_trie.map.get(";") != null or
-                            var_trie.map.get("\n") != null;
+                        const segmented = var_trie.map.get(',') != null or
+                            var_trie.map.get(';') != null or
+                            var_trie.map.get('\n') != null;
                         var boundary = pattern_index + 1;
                         while (boundary < pattern.root.len) : (boundary += 1) {
                             if (segmented) {
@@ -1220,7 +1266,7 @@ pub const Trie = struct {
         var max_child: usize = 0;
 
         for (pattern.root) |node| switch (node) {
-            .constant => |constant| try result.append(allocator, Node.ofConstant(constant)),
+            inline .constant, .char => |c, tag| try result.append(allocator, @unionInit(Node, @tagName(tag), c)),
             .variable => |variable| {
                 const is_var_pattern = variable.len > 0 and variable[0] == '*';
                 if (is_var_pattern) {
@@ -1345,14 +1391,17 @@ pub const Trie = struct {
         var current = self;
         const index_bound = Bound{ .lower = index, .upper = index + 1 };
         while (true) {
-            // Check constants first
+            // Follow a constant byte branch. A whole token is spelled across
+            // several bytes; emit it only at its delimiter leaf (the node
+            // carrying the stored token).
             if (findNextInBranches(current.constant_branches.items, index_bound)) |kb| {
                 const found_index, const branch = kb;
                 if (found_index == index) {
-                    const constant_val = branch.constant.entry.key_ptr.*;
-                    try writer.writeAll(constant_val);
-                    try writer.writeByte(' ');
                     current = branch.constant.entry.value_ptr;
+                    if (current.token.len != 0) {
+                        try writer.writeAll(current.token);
+                        try writer.writeByte(' ');
+                    }
                     continue;
                 }
             }
@@ -1489,38 +1538,54 @@ pub const Trie = struct {
         try writer.writeAll(if (optional_indent) |_| "\n" else "");
     }
 
-    // Print each unique branch key once, in the order it was first inserted
-    // (the map is unordered, but the branch lists preserve insertion order, so
-    // both parsers print identically). Each key appears once though a branch
-    // list may repeat it across indices, so skip keys already printed.
+    // Print each branch key once. The byte map keys the constant path one byte
+    // at a time and the var map keys whole variable names; both already store
+    // each key uniquely, so iterating them directly needs no dedup.
     fn writeEntries(
         self: *const Self,
         writer: anytype,
         optional_indent: ?usize,
     ) Writer.Error!void {
-        for ([_]BranchList{ self.constant_branches, self.var_branches }) |branches| {
-            for (branches.items, 0..) |index_branch, i| {
-                const branch_node = (index_branch[1].node()) orelse continue;
-                const key = branch_node.entry.key_ptr.*;
-                if (firstWithKey(branches.items[0..i], key)) continue;
+        // The byte and var maps are hash maps whose iteration order depends on
+        // insertion order and collisions, which differ between two tries built
+        // from the same source by different parsers (and shift when a trie is
+        // copied). Sort the keys so this rendering is canonical and two equal
+        // tries print identically, which the `Parsable` tests rely on.
+        const gpa = std.heap.page_allocator;
 
-                for (0..optional_indent orelse 1) |_|
-                    try writer.writeByte(' ');
-                try writer.writeAll(key);
-                try writer.writeAll(" -> ");
-                try branch_node.entry.value_ptr.*.writeIndent(writer, optional_indent);
-                try writer.writeAll(if (optional_indent) |_| "" else ", ");
+        var byte_keys = std.ArrayList(u8).empty;
+        defer byte_keys.deinit(gpa);
+        var byte_iter = self.map.keyIterator();
+        while (byte_iter.next()) |key| byte_keys.append(gpa, key.*) catch return error.WriteFailed;
+        std.mem.sort(u8, byte_keys.items, {}, std.sort.asc(u8));
+
+        for (byte_keys.items) |key| {
+            for (0..optional_indent orelse 1) |_|
+                try writer.writeByte(' ');
+            try writer.writeByte(key);
+            try writer.writeAll(" -> ");
+            try self.map.getPtr(key).?.writeIndent(writer, optional_indent);
+            try writer.writeAll(if (optional_indent) |_| "" else ", ");
+        }
+
+        var var_keys = std.ArrayList([]const u8).empty;
+        defer var_keys.deinit(gpa);
+        var var_iter = self.var_map.keyIterator();
+        while (var_iter.next()) |key| var_keys.append(gpa, key.*) catch return error.WriteFailed;
+        std.mem.sort([]const u8, var_keys.items, {}, struct {
+            fn lessThan(_: void, a: []const u8, b: []const u8) bool {
+                return std.mem.lessThan(u8, a, b);
             }
-        }
-    }
+        }.lessThan);
 
-    /// Whether any earlier branch in `prior` already carries `key`.
-    fn firstWithKey(prior: []const IndexBranch, key: []const u8) bool {
-        for (prior) |index_branch| {
-            const branch_node = index_branch[1].node() orelse continue;
-            if (mem.eql(u8, branch_node.entry.key_ptr.*, key)) return true;
+        for (var_keys.items) |key| {
+            for (0..optional_indent orelse 1) |_|
+                try writer.writeByte(' ');
+            try writer.writeAll(key);
+            try writer.writeAll(" -> ");
+            try self.var_map.getPtr(key).?.writeIndent(writer, optional_indent);
+            try writer.writeAll(if (optional_indent) |_| "" else ", ");
         }
-        return false;
     }
 };
 
@@ -1574,8 +1639,8 @@ test "Structure: put multiple lits" {
         Pattern{ .root = &constant_root },
         val,
     );
-    try testing.expect(trie.map.contains("1"));
-    try testing.expect(trie.map.get("1").?.map.contains("2"));
+    try testing.expect(trie.getToken("1") != null);
+    try testing.expect(trie.getToken("1").?.getToken("2") != null);
     try testing.expectEqualDeep(trie.getIndex(0), val);
 }
 
@@ -1640,13 +1705,13 @@ test "Behavior: nesting" {
     _ = try trie.append(testing.allocator, constant_pat, val);
 
     // The nested pattern should be encoded as "(" -> "A" -> "B" -> ")"
-    try testing.expect(trie.map.contains("("));
-    const open_trie = trie.map.get("(").?;
-    try testing.expect(open_trie.map.contains("A"));
-    const a_trie = open_trie.map.get("A").?;
-    try testing.expect(a_trie.map.contains("B"));
-    const b_trie = a_trie.map.get("B").?;
-    try testing.expect(b_trie.map.contains(")"));
+    try testing.expect(trie.getToken("(") != null);
+    const open_trie = trie.getToken("(").?;
+    try testing.expect(open_trie.getToken("A") != null);
+    const a_trie = open_trie.getToken("A").?;
+    try testing.expect(a_trie.getToken("B") != null);
+    const b_trie = a_trie.getToken("B").?;
+    try testing.expect(b_trie.getToken(")") != null);
 
     // Should be retrievable via get
     const result = trie.get(constant_pat);
@@ -1685,8 +1750,8 @@ test "Behavior: equal variables" {
         Pattern{ .root = &val2_root },
     );
 
-    // Both entries share the same variable name in the map
-    try testing.expect(trie.map.contains("x"));
+    // Both entries share the same variable name in the var map
+    try testing.expect(trie.var_map.contains("x"));
     try testing.expectEqual(@as(usize, 2), trie.length());
 
     // Matching from bound 0 should find index 0
@@ -1754,16 +1819,16 @@ test "Behavior: equal constants, different structure" {
 
     // The root should only have "A" (shared prefix)
     try testing.expectEqual(@as(usize, 1), trie.map.count());
-    try testing.expect(trie.map.contains("A"));
+    try testing.expect(trie.getToken("A") != null);
 
     // Under "A", both "B" and "C" should exist
-    const a_trie = trie.map.get("A").?;
-    try testing.expect(a_trie.map.contains("B"));
-    try testing.expect(a_trie.map.contains("C"));
+    const a_trie = trie.getToken("A").?;
+    try testing.expect(a_trie.getToken("B") != null);
+    try testing.expect(a_trie.getToken("C") != null);
 
     // Under "A" -> "B", "D" should also exist (from entry 2)
-    const b_trie = a_trie.map.get("B").?;
-    try testing.expect(b_trie.map.contains("D"));
+    const b_trie = a_trie.getToken("B").?;
+    try testing.expect(b_trie.getToken("D") != null);
 
     // Each path should resolve to its correct value
     try testing.expectEqualDeep(

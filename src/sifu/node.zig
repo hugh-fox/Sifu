@@ -37,6 +37,13 @@ pub const Node = union(enum) {
     /// arises from NodeMap referencing the same value multiple times
     /// (based on Literal.eql).
     constant: []const u8,
+    /// A single character decomposed from a string literal. Keyed like a
+    /// constant (on its source bytes, which may be a multi-byte UTF-8 codepoint
+    /// or an escape sequence), but printed adjacently to neighbouring chars so
+    /// `"hi"` prints as `hi`. This keeps whitespace significant: a run of chars
+    /// is one contiguous word, distinct from space-separated keys (`h i`), and
+    /// lets the string evaluator tell a string apart from juxtaposed terms.
+    char: []const u8,
     /// A Var matches and stores a locally-unique constant. During rewriting,
     /// whenever the constant is encountered again, it is rewritten to this
     /// pattern's value. A Var pattern matches anything, including nested
@@ -95,7 +102,7 @@ pub const Node = union(enum) {
         allocator: Allocator,
     ) Allocator.Error!Node {
         return switch (self) {
-            inline .constant, .variable, .comment => self,
+            inline .constant, .char, .variable, .comment => self,
             .pattern => |p| Node.ofPattern(try p.copy(allocator)),
             .infix => |inf| Node{ .infix = .{ .op = inf.op, .rhs = try inf.rhs.copy(allocator) } },
             inline .newline, .indent => |sep, tag| @unionInit(
@@ -125,7 +132,7 @@ pub const Node = union(enum) {
 
     pub fn deinit(self: Node, allocator: Allocator) void {
         switch (self) {
-            .constant, .variable, .comment => {},
+            .constant, .char, .variable, .comment => {},
             .trie => |*trie| @constCast(trie).deinit(allocator),
             .infix => |*inf| @constCast(&inf.rhs).deinit(allocator),
             .newline, .indent => |*sep| @constCast(&sep.rhs).deinit(allocator),
@@ -138,6 +145,7 @@ pub const Node = union(enum) {
             false
         else switch (node) {
             .constant => |constant| mem.eql(u8, constant, other.constant),
+            .char => |c| mem.eql(u8, c, other.char),
             .variable => |variable| mem.eql(u8, variable, other.variable),
             .comment => |comment| mem.eql(u8, comment, other.comment),
             .trie => |trie| trie.eql(other.trie),
@@ -188,7 +196,7 @@ pub const Node = union(enum) {
 
     pub fn isOp(self: Node) bool {
         return switch (self) {
-            .constant, .variable, .comment, .pattern, .trie => false,
+            .constant, .char, .variable, .comment, .pattern, .trie => false,
             else => true,
         };
     }
@@ -226,6 +234,7 @@ pub const Node = union(enum) {
             try writer.writeByte(' ');
         switch (self.*) {
             .constant => |constant| _ = try writer.writeAll(constant),
+            .char => |c| try writer.writeAll(c),
             .variable => |variable| try writer.writeAll(variable),
             .comment => |comment| try writer.writeAll(comment),
             .trie => |*trie| try trie.writeIndent(

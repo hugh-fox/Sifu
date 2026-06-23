@@ -520,9 +520,9 @@ test "evaluateComplete: nested pattern" {
 
     // Verify trie structure: x -> , -> y -> value
     try testing.expect(trie.var_branches.items.len == 1);
-    const x_trie = trie.map.get("x") orelse return error.MissingX;
-    try testing.expect(x_trie.map.contains(","));
-    const comma_trie = x_trie.map.get(",") orelse return error.MissingComma;
+    const x_trie = trie.var_map.get("x") orelse return error.MissingX;
+    try testing.expect(x_trie.getToken(",") != null);
+    const comma_trie = x_trie.getToken(",") orelse return error.MissingComma;
     try testing.expect(comma_trie.var_branches.items.len == 1);
 
     // Test the match directly
@@ -719,12 +719,12 @@ test "List with variables: x, y --> y, x" {
     // Verify trie structure: should have var x -> , -> var y -> value
     try testing.expect(trie.var_branches.items.len > 0);
     // Get the trie under x (variables are stored in map)
-    const x_trie = trie.map.get("x") orelse {
+    const x_trie = trie.var_map.get("x") orelse {
         return error.TestUnexpectedResult;
     };
     // Check for comma
-    try testing.expect(x_trie.map.contains(","));
-    const comma_trie = x_trie.map.get(",").?;
+    try testing.expect(x_trie.getToken(",") != null);
+    const comma_trie = x_trie.getToken(",").?;
     // Check for y variable
     try testing.expect(comma_trie.var_branches.items.len > 0);
 
