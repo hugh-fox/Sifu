@@ -17,63 +17,9 @@ const Trie = @import("trie.zig").Trie;
 /// is used during parsing.
 /// A pattern (a list of nodes) Node.
 pub const Node = union(enum) {
-    /// Payload of an `infix` node: a user-defined operator symbol together
-    /// with the pattern of operands following it.
-    pub const Infix = struct {
-        op: []const u8,
-        rhs: Pattern,
-    };
-
-    /// Payload of a whitespace separator (`newline`/`indent`): the literal
-    /// separating whitespace (newline plus any leading indentation) kept
-    /// out-of-band so the printer can reproduce the exact layout, together
-    /// with the pattern that follows it.
-    pub const Sep = struct {
-        ws: []const u8,
-        rhs: Pattern,
-    };
-
-    /// A unique constant, literal values. Uniqueness when in a pattern
-    /// arises from NodeMap referencing the same value multiple times
-    /// (based on Literal.eql).
-    constant: []const u8,
-    /// A single character decomposed from a string literal. Keyed like a
-    /// constant (on its source bytes, which may be a multi-byte UTF-8 codepoint
-    /// or an escape sequence), but printed adjacently to neighbouring chars so
-    /// `"hi"` prints as `hi`. This keeps whitespace significant: a run of chars
-    /// is one contiguous word, distinct from space-separated keys (`h i`), and
-    /// lets the string evaluator tell a string apart from juxtaposed terms.
-    char: []const u8,
-    /// A Var matches and stores a locally-unique constant. During rewriting,
-    /// whenever the constant is encountered again, it is rewritten to this
-    /// pattern's value. A Var pattern matches anything, including nested
-    /// patterns. It only makes sense to match anything after trying to
-    /// match something specific, so Vars always successfully match (if
-    /// there is a Var) after a Constant or Subpat match fails.
-    /// If the variable starts with '*', it matches patterns as a term
-    /// (var_pattern behavior), needed for matching patterns with ops
-    /// where the nested pattern is implicit.
-    variable: []const u8,
-    /// Spaces separated juxtaposition, or lists/parens for nested patterns.
-    /// Infix operators add their rhs as a nested patterns after themselves.
-    pattern: Pattern,
-    /// A non-builtin (user-defined symbol) infix operation. `op` is the
-    /// operator symbol and `rhs` is the pattern of operands that follow it.
-    /// Unlike the builtin operators, the symbol is kept out-of-band here
-    /// rather than flattened into the operand pattern as a leading constant.
-    infix: Infix,
-    /// A postfix encoded match pattern, i.e. `x : Int -> x * 2` where
-    /// some node (`x`) must match some subpattern (`Int`) in order for
-    /// the rest of the match to continue. Like infixes, the patterns to
-    /// the left form their own subpatterns, stored here, but the `:` token
-    /// is elided.
+    char: u8,
     match: Pattern,
-    /// A postfix encoded arrow expression denoting a rewrite, i.e. `A B
-    /// C -> 123`.
     arrow: Pattern,
-    /// A single element in comma separated list, with the comma elided.
-    /// Lists are operators that are recognized as separators for
-    /// patterns.
     list: Pattern,
     /// A single element in a semicolon separated list, with the `;` elided.
     /// Distinct from `.list` (comma): a lower-precedence separator that prints

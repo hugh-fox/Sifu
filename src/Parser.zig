@@ -24,7 +24,6 @@ const Pattern = trie_module.Pattern;
 const Node = trie_module.Node;
 const Trie = trie_module.Trie;
 const comments = @import("interpreter/comments.zig");
-const chars = @import("sifu/chars.zig");
 
 const Oom = Allocator.Error;
 
@@ -38,7 +37,6 @@ pub const Tag = enum {
     var_pattern,
     number,
     string,
-    single_string,
     symbol,
     comment,
     semicolon,
@@ -134,27 +132,16 @@ fn advance(self: *Self) Token {
         '\n' => return self.lexWhitespace(),
         ',' => return self.single(.comma),
         '"' => return self.lexString(),
-        '\'' => return self.lexSingleString(),
         else => {},
     }
 
     if (isDigit(c)) return self.lexNumber();
-
-    // A leading `$` glued directly to an identifier (e.g. `$x`, `$problem_id`)
-    // is a constant, not a variable: the `$` lets otherwise variable-looking
-    // (lowercase) names be treated as literal keys. A lone `$` or `$ name`
-    // (space) stays an operator symbol.
-    if (c == '$' and self.pos + 1 < self.source.len and isIdentStart(self.source[self.pos + 1]))
-        return self.lexDollarConstant();
 
     // Identifiers may carry a leading run of `-`/`_` (e.g. `-Const`, `_x`),
     // mirroring the grammar's key/variable/var_pattern regexes. What follows the
     // prefix decides the kind: `*`+lowercase -> var_pattern (underscores only in
     // the prefix), uppercase -> key/constant, lowercase -> variable. A bare `_`
     // is itself a key. Anything else starting with `-`/`*` is an operator.
-    // Bytes outside ASCII (UTF-8 multibyte sequences, e.g. CJK) are ordinary
-    // identifier characters, lexed as a constant like an uppercase letter.
-    if (c >= 0x80) return self.lexConstant();
     if (c == '_' or c == '-' or c == '*' or isUpper(c) or isLower(c)) {
         var i = self.pos;
         while (i < self.source.len and (self.source[i] == '-' or self.source[i] == '_'))
@@ -240,15 +227,6 @@ fn lexVariable(self: *Self) Token {
     return .{ .tag = .variable, .start = start, .end = self.pos };
 }
 
-// `$name`: a constant whose body is an ordinary identifier. The `$` is kept in
-// the token text so it round-trips.
-fn lexDollarConstant(self: *Self) Token {
-    const start = self.pos;
-    self.pos += 1; // skip the leading `$`
-    self.scanIdentTail();
-    return .{ .tag = .constant, .start = start, .end = self.pos };
-}
-
 fn lexVarPattern(self: *Self) Token {
     const start = self.pos;
     while (self.pos < self.source.len and self.source[self.pos] == '_')
@@ -279,29 +257,19 @@ fn lexNumber(self: *Self) Token {
 }
 
 fn lexString(self: *Self) Token {
-    return self.lexQuoted('"', .string);
-}
-
-// Single-quoted strings (`'...'`) are a distinct token from double-quoted
-// strings, kept apart so source like SQL string literals round-trips faithfully.
-fn lexSingleString(self: *Self) Token {
-    return self.lexQuoted('\'', .single_string);
-}
-
-fn lexQuoted(self: *Self, quote: u8, tag: Tag) Token {
     const start = self.pos;
-    self.pos += 1; // skip opening quote
+    self.pos += 1; // skip opening "
     while (self.pos < self.source.len) {
         if (self.source[self.pos] == '\\' and self.pos + 1 < self.source.len) {
             self.pos += 2; // skip escape sequence
-        } else if (self.source[self.pos] == quote) {
-            self.pos += 1; // skip closing quote
+        } else if (self.source[self.pos] == '"') {
+            self.pos += 1; // skip closing "
             break;
         } else {
             self.pos += 1;
         }
     }
-    return .{ .tag = tag, .start = start, .end = self.pos };
+    return .{ .tag = .string, .start = start, .end = self.pos };
 }
 
 fn lexOperator(self: *Self) Token {
@@ -337,12 +305,7 @@ fn isDigit(c: u8) bool {
 }
 
 fn isIdentTail(c: u8) bool {
-    return isUpper(c) or isLower(c) or isDigit(c) or c == '_' or c >= 0x80;
-}
-
-// The character that may immediately follow `$` to form a variable.
-fn isIdentStart(c: u8) bool {
-    return isUpper(c) or isLower(c) or isDigit(c) or c == '_' or c >= 0x80;
+    return isUpper(c) or isLower(c) or isDigit(c) or c == '_';
 }
 
 fn isOpChar(c: u8) bool {
@@ -384,14 +347,13 @@ pub fn parsePattern(self: *Self, allocator: Allocator) Oom!Pattern {
     return self.parsePrec1(allocator);
 }
 
-/// Builds the wrapper node for a separator token. A comma produces a `.list`, a
-/// semicolon a `.semicolon`; a newline/indent produces a `.newline`/`.indent`
-/// carrying the literal whitespace, so the printer reproduces the exact layout.
+/// Builds the wrapper node for a separator token. A semicolon/comma produces a
+/// `.list`; a newline/indent produces a `.newline`/`.indent` carrying the
+/// literal whitespace, so the printer reproduces the exact layout.
 fn sepNode(self: *Self, tok: Token, rhs: Pattern) Node {
     return switch (tok.tag) {
         .newline => Node{ .newline = .{ .ws = tok.text(self.source), .rhs = incrementHeight(rhs) } },
         .indent => Node{ .indent = .{ .ws = tok.text(self.source), .rhs = incrementHeight(rhs) } },
-        .semicolon => Node{ .semicolon = incrementHeight(rhs) },
         else => Node{ .list = incrementHeight(rhs) },
     };
 }
@@ -555,13 +517,6 @@ fn parseTerms(self: *Self, allocator: Allocator) Oom!Pattern {
     var nodes = std.ArrayList(Node).empty;
     var max_child: usize = 0;
     while (self.canStartTerm()) {
-        // String literals decompose into one constant node per character, so
-        // both parsers key the trie on characters rather than whole strings.
-        if (self.current.tag == .string or self.current.tag == .single_string) {
-            const tok = self.eat();
-            try chars.appendStringChars(allocator, &nodes, tok.text(self.source));
-            continue;
-        }
         const node = try self.parseTerm(allocator);
         max_child = @max(max_child, node.height());
         try nodes.append(allocator, node);
@@ -572,7 +527,7 @@ fn parseTerms(self: *Self, allocator: Allocator) Oom!Pattern {
 fn parseTerm(self: *Self, allocator: Allocator) Oom!Node {
     const tok = self.eat();
     return switch (tok.tag) {
-        .constant, .number, .string, .single_string => Node{ .constant = tok.text(self.source) },
+        .constant, .number, .string => Node{ .constant = tok.text(self.source) },
         .variable => Node{ .variable = tok.text(self.source) },
         .var_pattern => Node{ .variable = tok.text(self.source) },
         .comment => Node{ .comment = tok.text(self.source) },
@@ -611,7 +566,6 @@ fn canStartTerm(self: Self) bool {
         .var_pattern,
         .number,
         .string,
-        .single_string,
         .comment,
         .left_paren,
         .left_brace,
@@ -627,8 +581,7 @@ fn incrementHeight(p: Pattern) Pattern {
 
 fn wrapOp(tag: Tag, rhs: Pattern) Node {
     return switch (tag) {
-        .semicolon => Node{ .semicolon = incrementHeight(rhs) },
-        .comma => Node{ .list = incrementHeight(rhs) },
+        .semicolon, .comma => Node{ .list = incrementHeight(rhs) },
         .long_match, .match => Node{ .match = incrementHeight(rhs) },
         .long_arrow, .arrow => Node{ .arrow = incrementHeight(rhs) },
         else => Node{ .pattern = incrementHeight(rhs) },
@@ -677,7 +630,7 @@ fn appendEntryRecursive(result: *Trie, allocator: Allocator, pattern: Pattern) O
     // A trailing separator splits entries: prefix is one entry, contents more.
     const last_idx = pattern.root.len - 1;
     const sep_contents: ?Pattern = switch (pattern.root[last_idx]) {
-        .list, .semicolon => |p| p,
+        .list => |p| p,
         .newline, .indent => |sep| sep.rhs,
         else => null,
     };
@@ -725,7 +678,7 @@ fn foldContinuation(result: *Trie, allocator: Allocator, prefix: []Node, content
     // folded value, the rest (if any) stays as following entries.
     var split: usize = contents.root.len;
     for (contents.root, 0..) |node, i| switch (node) {
-        .list, .semicolon, .newline, .indent => {
+        .list, .newline, .indent => {
             split = i;
             break;
         },
@@ -777,14 +730,13 @@ pub fn parse(allocator: Allocator, source: []const u8) Oom!Pattern {
 
 const testing = std.testing;
 
-const NodeTag = enum { constant, char, variable, var_pattern, comment, pattern, infix, match, arrow, list, semicolon, newline, indent, trie };
+const NodeTag = enum { constant, variable, var_pattern, comment, pattern, infix, match, arrow, list, newline, indent, trie };
 
 fn expectNodes(pattern: Pattern, expected_tags: []const NodeTag) !void {
     try testing.expectEqual(expected_tags.len, pattern.root.len);
     for (pattern.root, expected_tags) |node, expected_tag| {
         const actual_tag: NodeTag = switch (node) {
             .constant => .constant,
-            .char => .char,
             .variable => |v| if (v.len > 0 and v[0] == '*') .var_pattern else .variable,
             .comment => .comment,
             .pattern => .pattern,
@@ -792,7 +744,6 @@ fn expectNodes(pattern: Pattern, expected_tags: []const NodeTag) !void {
             .match => .match,
             .arrow => .arrow,
             .list => .list,
-            .semicolon => .semicolon,
             .newline => .newline,
             .indent => .indent,
             .trie => .trie,
@@ -859,11 +810,9 @@ test "decimal number" {
 test "string" {
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
-    // String literals decompose into one char node per character.
     const p = try parse(arena.allocator(), "\"hello\"");
-    try expectNodes(p, &.{ .char, .char, .char, .char, .char });
-    try testing.expectEqualStrings("h", p.root[0].char);
-    try testing.expectEqualStrings("o", p.root[4].char);
+    try expectNodes(p, &.{.constant});
+    try testing.expectEqualStrings("\"hello\"", p.root[0].constant);
 }
 
 test "arrow: A -> B" {
@@ -929,13 +878,12 @@ test "semicolon: A ; B ; C" {
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
     const p = try parse(arena.allocator(), "A ; B ; C");
-    // Right-assoc: [A, semicolon([B, semicolon([C])])]. Semicolons are their
-    // own node type, distinct from comma lists.
-    try expectNodes(p, &.{ .constant, .semicolon });
+    // Right-assoc: [A, list([B, list([C])])]
+    try expectNodes(p, &.{ .constant, .list });
     try testing.expectEqualStrings("A", p.root[0].constant);
-    try testing.expectEqualStrings("B", p.root[1].semicolon.root[0].constant);
-    try expectNodes(p.root[1].semicolon, &.{ .constant, .semicolon });
-    try testing.expectEqualStrings("C", p.root[1].semicolon.root[1].semicolon.root[0].constant);
+    try testing.expectEqualStrings("B", p.root[1].list.root[0].constant);
+    try expectNodes(p.root[1].list, &.{ .constant, .list });
+    try testing.expectEqualStrings("C", p.root[1].list.root[1].list.root[0].constant);
 }
 
 test "incrementHeight pattern: (A B)" {
@@ -1014,7 +962,7 @@ test "single entry trie: { A -> B }" {
     const t = p.root[0].trie;
     try testing.expectEqual(@as(usize, 1), t.length());
     // Trie should have entry: A -> B
-    try testing.expect(t.getToken("A") != null);
+    try testing.expect(t.map.contains("A"));
 }
 
 test "multi-constant entry trie: { A B -> C }" {
@@ -1025,9 +973,9 @@ test "multi-constant entry trie: { A B -> C }" {
     const t = p.root[0].trie;
     try testing.expectEqual(@as(usize, 1), t.length());
     // Trie should have incrementHeight entry: A -> B -> value(C)
-    try testing.expect(t.getToken("A") != null);
-    const a_trie = t.getToken("A").?;
-    try testing.expect(a_trie.getToken("B") != null);
+    try testing.expect(t.map.contains("A"));
+    const a_trie = t.map.get("A").?;
+    try testing.expect(a_trie.map.contains("B"));
 }
 
 test "multi-entry trie: { A -> B; C -> D }" {
@@ -1037,8 +985,8 @@ test "multi-entry trie: { A -> B; C -> D }" {
     try expectNodes(p, &.{.trie});
     const t = p.root[0].trie;
     try testing.expectEqual(@as(usize, 2), t.length());
-    try testing.expect(t.getToken("A") != null);
-    try testing.expect(t.getToken("C") != null);
+    try testing.expect(t.map.contains("A"));
+    try testing.expect(t.map.contains("C"));
 }
 
 test "trie with variable: { x -> x }" {
@@ -1048,7 +996,7 @@ test "trie with variable: { x -> x }" {
     try expectNodes(p, &.{.trie});
     const t = p.root[0].trie;
     try testing.expectEqual(@as(usize, 1), t.length());
-    try testing.expect(t.var_map.contains("x"));
+    try testing.expect(t.map.contains("x"));
 }
 
 test "trie constant-only entry: { A }" {
@@ -1058,7 +1006,7 @@ test "trie constant-only entry: { A }" {
     try expectNodes(p, &.{.trie});
     const t = p.root[0].trie;
     try testing.expectEqual(@as(usize, 1), t.length());
-    try testing.expect(t.getToken("A") != null);
+    try testing.expect(t.map.contains("A"));
 }
 
 test "trie in expression: X { A -> B } Y" {
@@ -1079,9 +1027,9 @@ test "trie with 3 entries: { A -> 1; B -> 2; C -> 3 }" {
     try expectNodes(p, &.{.trie});
     const t = p.root[0].trie;
     try testing.expectEqual(@as(usize, 3), t.length());
-    try testing.expect(t.getToken("A") != null);
-    try testing.expect(t.getToken("B") != null);
-    try testing.expect(t.getToken("C") != null);
+    try testing.expect(t.map.contains("A"));
+    try testing.expect(t.map.contains("B"));
+    try testing.expect(t.map.contains("C"));
 }
 
 test "parseTrie: comma with varpattern - A, *x --> *x" {
@@ -1090,10 +1038,10 @@ test "parseTrie: comma with varpattern - A, *x --> *x" {
     var trie = try parseTrie(arena.allocator(), "A, *x --> *x");
     // Trie structure: A -> , -> *x (var) -> value(*x)
     try testing.expectEqual(@as(usize, 1), trie.length());
-    try testing.expect(trie.getToken("A") != null);
-    const a_trie = trie.getToken("A").?;
-    try testing.expect(a_trie.getToken(",") != null);
-    const comma_trie = a_trie.getToken(",").?;
+    try testing.expect(trie.map.contains("A"));
+    const a_trie = trie.map.get("A").?;
+    try testing.expect(a_trie.map.contains(","));
+    const comma_trie = a_trie.map.get(",").?;
     // After comma, there should be a variable *x
     try testing.expect(comma_trie.var_branches.items.len > 0);
 }
@@ -1105,8 +1053,8 @@ test "parseTrie: mixed operators" {
     // Entry 2: F --> G
     const trie = try parseTrie(arena.allocator(), "A, B -> C, D --> E; F --> G");
     try testing.expectEqual(@as(usize, 2), trie.length());
-    try testing.expect(trie.getToken("A") != null);
-    try testing.expect(trie.getToken("F") != null);
+    try testing.expect(trie.map.contains("A"));
+    try testing.expect(trie.map.contains("F"));
 }
 
 test "multiline: newlines separate entries" {
@@ -1173,8 +1121,8 @@ test "multiline: trie with newline entries" {
     defer arena.deinit();
     const trie = try parseTrie(arena.allocator(), "A -> 1\nB -> 2");
     try testing.expectEqual(@as(usize, 2), trie.length());
-    try testing.expect(trie.getToken("A") != null);
-    try testing.expect(trie.getToken("B") != null);
+    try testing.expect(trie.map.contains("A"));
+    try testing.expect(trie.map.contains("B"));
 }
 
 test "multiline: trie with trailing arrow has empty value" {
@@ -1183,8 +1131,8 @@ test "multiline: trie with trailing arrow has empty value" {
     // Arrow at end of line has empty value, B is separate entry
     const trie = try parseTrie(arena.allocator(), "A ->\nB");
     try testing.expectEqual(@as(usize, 2), trie.length());
-    try testing.expect(trie.getToken("A") != null);
-    try testing.expect(trie.getToken("B") != null);
+    try testing.expect(trie.map.contains("A"));
+    try testing.expect(trie.map.contains("B"));
     // A's value should be empty
     const a_value = trie.getIndexOrNull(0).?;
     try testing.expectEqual(@as(usize, 0), a_value.root.len);
@@ -1224,23 +1172,23 @@ test "multiline: multi-line pattern without continuation" {
     ;
     const trie = try parseTrie(arena.allocator(), src);
     try testing.expectEqual(@as(usize, 2), trie.length());
-    try testing.expect(trie.getToken("Map") != null);
+    try testing.expect(trie.map.contains("Map"));
 }
 
 test "multiline: newlines and semicolons produce same structure" {
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
-    // Newlines and semicolons are distinct nodes (.newline vs .semicolon) for
+    // Newlines and semicolons are distinct nodes (.newline vs .list) for
     // pretty-print isomorphism, but separate entries the same way.
     const with_newline = try parse(arena.allocator(), "A\nB");
     const with_semicolon = try parse(arena.allocator(), "A; B");
 
     try expectNodes(with_newline, &.{ .constant, .newline });
-    try expectNodes(with_semicolon, &.{ .constant, .semicolon });
+    try expectNodes(with_semicolon, &.{ .constant, .list });
     try testing.expectEqualStrings("A", with_newline.root[0].constant);
     try testing.expectEqualStrings("A", with_semicolon.root[0].constant);
     try testing.expectEqualStrings("B", with_newline.root[1].newline.rhs.root[0].constant);
-    try testing.expectEqualStrings("B", with_semicolon.root[1].semicolon.root[0].constant);
+    try testing.expectEqualStrings("B", with_semicolon.root[1].list.root[0].constant);
 }
 
 test "multiline: trailing operators do not continue" {

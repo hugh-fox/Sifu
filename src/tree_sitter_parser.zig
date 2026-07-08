@@ -13,12 +13,12 @@ const ArrayListUnmanaged = std.ArrayListUnmanaged;
 const DoublyLinkedList = std.DoublyLinkedList;
 const assert = std.debug.assert;
 const panic = std.debug.panic;
+const verbose_errors = @import("build_options").verbose_errors;
 const debug_mode = @import("builtin").mode == .Debug;
 const Trie = @import("sifu/trie.zig").Trie;
 const Pattern = @import("sifu/trie.zig").Pattern;
 const Node = @import("sifu/trie.zig").Node;
 const debug = std.log.debug;
-const chars = @import("sifu/chars.zig");
 
 pub const parser = @import("tree_sitter_sifu");
 const Ast = parser.Tree;
@@ -107,15 +107,6 @@ pub fn astToPattern(
     if (cursor.gotoFirstChild()) {
         while (true) {
             const child = cursor.node();
-            // String literals decompose into one constant node per character,
-            // matching the reference parser so the trie keys on characters.
-            const ckind = child.kind();
-            if (mem.eql(u8, ckind, "string") or mem.eql(u8, ckind, "single_string")) {
-                const text = source[child.startByte()..child.endByte()];
-                try chars.appendStringChars(allocator, &nodes, text);
-                if (!cursor.gotoNextSibling()) break;
-                continue;
-            }
             // Parse the child
             if (try parseTermNode(allocator, source, child)) |parsed_node| {
                 max_child = @max(max_child, parsed_node.height());
@@ -228,12 +219,10 @@ fn parseTermNode(
 
     const NodeKind = enum {
         key,
-        constant,
         variable,
         var_pattern,
         number,
         string,
-        single_string,
         symbol,
         nested_pattern,
         nested_trie,
@@ -247,7 +236,7 @@ fn parseTermNode(
     };
 
     return switch (kind) {
-        .key, .constant, .number, .string, .single_string, .symbol => Node{ .constant = text },
+        .key, .number, .string, .symbol => Node{ .constant = text },
         .variable => Node{ .variable = text },
         .var_pattern => Node{ .variable = text },
         .comment => Node{ .comment = text },
@@ -272,7 +261,7 @@ fn convertRHS(
         return Node{ .pattern = rhs_pattern.* };
     } else if (mem.eql(u8, node_kind, "semicolon")) {
         defer rhs_pattern.* = .{};
-        return Node{ .semicolon = rhs_pattern.* };
+        return Node{ .list = rhs_pattern.* };
     } else if (mem.eql(u8, node_kind, "newline_sep")) {
         defer rhs_pattern.* = .{};
         return Node{ .newline = .{ .ws = ws, .rhs = rhs_pattern.* } };

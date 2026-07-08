@@ -2,6 +2,7 @@ const std = @import("std");
 const Io = std.Io;
 const fs = std.fs;
 const no_os = @import("builtin").target.os.tag == .freestanding;
+const verbose_tests = @import("build_options").verbose_errors;
 const wasm = @import("wasm.zig");
 
 pub const Streams = struct {
@@ -30,3 +31,9 @@ pub const Streams = struct {
         }
     }
 };
+
+// TODO switch on verbose_tests
+// var stderr_writer = if (verbose_tests)
+//     stderr
+// else
+//     io.Writer.Discarding.init(&stderr_buffer);

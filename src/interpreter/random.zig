@@ -17,8 +17,4 @@ fn rng() std.Random {
 /// A random index within `bound` (`[lower, upper)`), or null once the level has
 /// settled (the lower bound reached the upper). Used by `EvalCtx.pickIndex` when
 /// the `.random` mode is active.
-pub fn pickIndex(bound: Bound) ?usize {
-    if (bound.lower >= bound.upper)
-        return null;
-    return rng().intRangeLessThan(usize, bound.lower, bound.upper);
-}
+pub fn pickIndex(bound: Bound) ?usize {}

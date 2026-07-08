@@ -20,6 +20,11 @@ pub fn build(b: *std.Build) void {
         "DetectLeaks",
         "Use GPA's with leak detection instead of arenas",
     ) orelse false;
+    const verbose = b.option(
+        bool,
+        "Verbose",
+        "Output debug logging",
+    ) orelse false;
     const use_tree_sitter = b.option(
         bool,
         "TreeSitter",
@@ -27,6 +32,7 @@ pub fn build(b: *std.Build) void {
     ) orelse false;
     const build_options = b.addOptions();
     build_options.addOption(bool, "detect_leaks", detect_leaks);
+    build_options.addOption(bool, "verbose", verbose);
     build_options.addOption(bool, "tree_sitter", use_tree_sitter);
 
     const tree_sitter_sifu = b.dependency("tree_sitter_sifu", .{
@@ -201,6 +207,7 @@ pub fn build(b: *std.Build) void {
     // exe on its arena.
     const leakcheck_options = b.addOptions();
     leakcheck_options.addOption(bool, "detect_leaks", true);
+    leakcheck_options.addOption(bool, "verbose", verbose);
     leakcheck_options.addOption(bool, "tree_sitter", use_tree_sitter);
 
     const leakcheck_exe = b.addExecutable(.{

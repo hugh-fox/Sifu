@@ -33,7 +33,7 @@ In Sifu, all forms of evaluation are essentially a repeated match and rewrite of
     ```
     Sum (x, *xs) -> x + Sum (x, *xs)
     ```
-    This rule will loop forever, generating an infinitely long sequence of `x + x + ...`. The current evaluator does not support unlimited recursion, but rather a limited form of structural recursion based on the height (or depth) of the pattern matched and the pattern rewritten. In this form, recursion happens (i.e. the matched pattern is rewritten) only when the resulting rewritten pattern has a combined level of nesting (including a level created from any operators' rhs) _less than_ the original matched pattern. In this way, the finite structure of the pattern being matched is tied to the computation, guaranteeing it to be finite.
+    This rule will generate an infinitely long sequence of `x + x + ...`. The current evaluator does not support unlimited recursion, but rather a limited form of structural recursion based on the height (or depth) of the pattern matched and the pattern rewritten. In this form, recursion happens (i.e. the matched pattern is rewritten) only when the resulting rewritten pattern has a level of nesting (including a level created from any operators' rhs) _less than_ the original matched pattern. In this way, the finite structure of the pattern being matched is tied to the computation, guaranteeing it to be finite.
     
     Additionally, the structurally recursive calls are limited by tracking an upper bound as well. The current index is passed as the upper bound to the structurally recursive calls, ensuring they cannot match anything after the current index.
     
