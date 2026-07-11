@@ -96,6 +96,12 @@ pub fn main(init: std.process.Init) !void {
     }
 }
 
+// Parsing is matching is evaluation. Parens don't need parsing
+// into tree structure, just track their start / len on a separate
+// stack in paren context. Each evaluator runs in sequence each byte,
+// and tracks its own context. Trie and match eval are the same thing.
+// No difference between adding parenthesis and infix -> postfix.
+
 fn repl(allocator: Allocator, io: Io, stack: *ArrayList(u8)) !void {
     var in_buffer: [1024]u8 = undefined;
     var out_buffer: [1024]u8 = undefined;
@@ -104,85 +110,51 @@ fn repl(allocator: Allocator, io: Io, stack: *ArrayList(u8)) !void {
     const in = &stdin_reader.interface;
     const out = &stdout_writer.interface;
 
-    var tries = ArrayList(Trie);
-    defer for (tries) |trie| trie.deinit(allocator);
+    var trie = Trie{};
+    try trie.append(allocator, "A", "B");
 
-    var trie_context: ?*Trie = null;
+    _ = stack;
+
+    var current = trie;
+    var match_index: usize = 0;
     var pattern_len: usize = 0;
-    var expr_index: usize = 0;
 
     // Parse initial trie
-    loop: while (in.takeByte()) |next| : (pattern_len += 1) {
-        if (trie_context) |trie| {
-            const get_or_put = try trie.map.getOrPut(allocator, next);
-            trie_context = get_or_put.value_ptr;
+    while (in.takeByte()) |next| : (pattern_len += 1) {
+        if (current.map.get(next)) |next_trie| {
+            debug("Got: '{c}'", .{next});
+            current = next_trie;
+        } else {
+            // Check if there is a value index greater than or equal to current
+            const leaf_index = std.sort.lowerBound(
+                struct { usize, []const u8 },
+                current.leaves.items,
+                match_index,
+                struct {
+                    pub fn compareFn(
+                        lhs: usize,
+                        rhs: struct { usize, []const u8 },
+                    ) std.math.Order {
+                        const index, const value = rhs;
+                        _ = value;
+                        return std.math.order(lhs, index);
+                    }
+                }.compareFn,
+            );
+            if (leaf_index == current.leaves.items.len) {
+                debug("No value found", .{});
+                // If no value, we output and continue
+                try out.writeByte(next);
+            } else {
+                debug("Value found at leaf: {}", .{leaf_index});
+                // Output the value (TODO: eval the value too)
+                try out.print("{s}\n", .{current.leaves.items[leaf_index][1]});
+            }
+            // Reset match
+            current = trie;
+            match_index = 0;
         }
-        // Parsing is matching is evaluation. Parens don't need parsing
-        // into tree structure, just track their start / len on a separate
-        // stack in paren context. Each evaluator runs in sequence each byte,
-        // and tracks its own context. Trie and match eval are the same thing.
-        // No difference between adding parenthesis and infix -> postfix.
-        switch (next) {
-            'A'...'Z' => {
-                try stack.append(allocator, next);
-                continue :loop;
-            },
-            'a'...'z' => {
-                try stack.append(allocator, next);
-                continue :loop;
-            },
-            '0'...'9' => {
-                try stack.append(allocator, next);
-                continue :loop;
-            },
-            '\n' => {
-                const top = stack.items[stack.items.len - match_counter ..];
-                debug("Appending: `{s}`\n", .{top});
-                try trie.append(allocator, top, top);
-                try trie.writeCanonical(out);
-            },
-            ',' => {
-                // Match mode
-                try stack.append(allocator, next);
-            },
-            ':' => {
-                // Match mode
-                try stack.append(allocator, next);
-            },
-            '-' => {
-                // Possible arrow
-                try stack.append(allocator, next);
-            },
-            '(' => {
-                try stack.append(allocator, next);
-            },
-            ')' => {
-                try stack.append(allocator, next);
-            },
-            '{' => {
-                // Add a trie to the trie stack.
-                var trie = Trie{};
-                defer trie.deinit(allocator);
-                const trie = parseTrie(allocator, stack);
-                const child = readUntilOp(allocator, trie);
-
-                try stack.append(allocator, next);
-            },
-            '}' => {
-                // Pop this trie from the trie stack and match, if any
-                if (tries.pop()) |trie| {
-                    trie.map.get(next);
-                }
-                // Exit trie context
-                trie_context = null;
-            },
-            else => {
-                // try out.printAsciiChar(next, .{});
-                try stack.append(allocator, next);
-                current = current;
-                match_counter += 1;
-            },
-        }
+        try out.flush();
     } else |err| switch (err) {
         error.EndOfStream => {},
         error.ReadFailed => return err,
